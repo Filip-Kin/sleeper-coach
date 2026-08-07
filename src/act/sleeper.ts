@@ -136,7 +136,7 @@ export async function liveAvailable(page: Page): Promise<{ name: string; pos: st
           if (!name) name = (nw.textContent ?? "").trim().split("\n")[0] ?? "";
         }
         const m = (typeof r.className === "string" ? r.className : "").match(/\b(QB|RB|WR|TE|K|DEF)\b/);
-        return { name, pos: m ? m[1] : "" };
+        return { name, pos: m?.[1] ?? "" };
       })
       .filter((x) => x.name);
   });
