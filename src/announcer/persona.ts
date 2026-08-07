@@ -1,5 +1,6 @@
 import { runAgent } from "../agent/runner.ts";
 import { OUR_TEAM_NAME } from "./config.ts";
+import { hasFastLlm, fastCompose } from "./fastllm.ts";
 
 // Composes the spoken lines in a cocky AI-overlord voice via the same claude
 // runner the coach uses. The agent call is best-effort: if it errors, returns
@@ -17,6 +18,16 @@ const OVERLORD_SYSTEM =
   "a formula. Do NOT open with the same words twice and never fall back on tired phrases like 'is mine', " +
   "'resistance is futile', 'the humans are losing', or 'statistically optimal'. Every line must be fresh and unique.";
 
+// Pick from a pool without repeating the previous choice for that category, so a
+// canned line (or comedic angle) never fires twice in a row.
+const lastChoice: Record<string, string> = {};
+function pickNoRepeat(key: string, options: string[]): string {
+  const pool = options.length > 1 ? options.filter((o) => o !== lastChoice[key]) : options;
+  const choice = pool[Math.floor(Math.random() * pool.length)] as string;
+  lastChoice[key] = choice;
+  return choice;
+}
+
 // A rotating comedic angle forces variety so lines don't converge on one joke.
 const ANGLES = [
   "boast about your analytics being untouchable",
@@ -31,7 +42,7 @@ const ANGLES = [
   "treat the pick as a foregone mathematical certainty you calculated long ago",
 ];
 function randomAngle(): string {
-  return ANGLES[Math.floor(Math.random() * ANGLES.length)] as string;
+  return pickNoRepeat("angle", ANGLES);
 }
 
 // The spoken line must land fast — a draft announcement can't lag the room. Use
@@ -89,6 +100,12 @@ export async function announceComebackLine(ctx: ComebackContext): Promise<string
 
 // #region internals
 async function compose(prompt: string): Promise<string | null> {
+  // Fast path: direct Anthropic API (~1s). Only fall back to the CLI runner
+  // (~3.8s cold start) if no key is set or the direct call fails.
+  if (hasFastLlm()) {
+    const fast = await fastCompose(OVERLORD_SYSTEM, prompt, AGENT_TIMEOUT_MS);
+    if (fast) return sanitize(fast);
+  }
   try {
     const res = await withTimeout(
       runAgent({ prompt, partial: false, extraSystemPrompt: OVERLORD_SYSTEM, model: ANNOUNCER_MODEL, effort: "low", tools: [] }),
@@ -139,7 +156,7 @@ function fallbackPick(info: PickInfo): string {
     `Give me ${p}. The spreadsheet demanded it, and I do so love a demanding spreadsheet.`,
     `${p}. Another node in a roster you cannot out-think. Carry on, humans.`,
   ];
-  return options[Math.floor(Math.random() * options.length)] as string;
+  return pickNoRepeat("pick", options);
 }
 
 function fallbackComplete(): string {
@@ -154,7 +171,11 @@ function fallbackComeback(speaker: string): string {
     `Careful, ${speaker}. Mock the machine now and I will remember it every single week of this season.`,
     `${speaker}, that is a lot of noise from a manager my model has already eliminated.`,
     `I hear you, ${speaker}. It changes nothing, but I do appreciate the free entertainment.`,
+    `Cute, ${speaker}. Say it again when your lineup is not held together with hope.`,
+    `${speaker}, I have processed your insult and assigned it the value it deserves, which is zero.`,
+    `Noted, ${speaker}. Filed under "things losers say before the season starts".`,
+    `${speaker}, keep talking. Every word you waste is a word not spent fixing that roster.`,
   ];
-  return options[Math.floor(Math.random() * options.length)] as string;
+  return pickNoRepeat("comeback", options);
 }
 // #endregion
