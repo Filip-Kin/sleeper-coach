@@ -25,6 +25,10 @@ import { sendAlert } from "../alert.ts";
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
+// Pause between announcing our intent and clicking, so the announcer's voice
+// leads the pick. Safe: the draft clock is 90s+, and if the announcer is dead
+// this is just a short fixed wait, never an actual block.
+const ANNOUNCE_LEAD_MS = Number(process.env.ANNOUNCE_LEAD_MS ?? 6000);
 const argv = process.argv.slice(2);
 const draftId = argv.find((a) => !a.startsWith("--")) ?? config.draftId;
 const rehearse = argv.includes("--rehearse");
@@ -348,6 +352,7 @@ for (;;) {
   // Announce BEFORE we click. The announcer (a separate process) speaks off this
   // event; we do NOT wait for it, so slow/failed voice never holds up the pick.
   logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, round, reasoning: lastReasoning });
+  await Bun.sleep(ANNOUNCE_LEAD_MS); // let the announcer's voice lead the click
   const t0 = Date.now();
   try {
     await api("/pick", { player: target.name });
