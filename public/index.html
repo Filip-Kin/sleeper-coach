@@ -52,6 +52,16 @@
   td.num { text-align: right; font-family: var(--mono); }
   .tier { color: var(--muted); }
   .inj { color: var(--warn); font-size: 11px; }
+  .act { border-bottom: 1px solid var(--line); padding: 10px 12px; }
+  .act-head { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
+  .badge { text-transform: uppercase; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: var(--panel2); }
+  .badge.coach { color: #0b0c10; background: var(--accent); }
+  .badge.engineer { color: #0b0c10; background: var(--warn); }
+  .badge.daemon, .badge.system { color: var(--muted); }
+  .act-type { font-family: var(--mono); }
+  .act-time { margin-left: auto; }
+  .act-sum { margin-top: 4px; font-size: 13.5px; }
+  .reason { margin-top: 4px; color: var(--muted); font-style: italic; font-size: 12.5px; }
   iframe { width: 100%; height: 100%; border: 0; background: #000; }
   .status { padding: 8px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
 </style>
@@ -82,10 +92,12 @@
       <div class="tabs">
         <button data-tab="board" class="on">Board</button>
         <button data-tab="roster">My roster</button>
+        <button data-tab="activity">Activity</button>
         <button id="takeoverBtn" title="Open the browser takeover in a new tab">Takeover ↗</button>
       </div>
       <div class="tabwrap" id="tab-board"></div>
       <div class="tabwrap" id="tab-roster" style="display:none"></div>
+      <div class="tabwrap" id="tab-activity" style="display:none"></div>
     </div>
   </div>
 </main>
@@ -164,8 +176,23 @@ $("#newBtn").addEventListener("click", () => { sessionId = null; localStorage.re
 // tabs (Takeover is not a tab — it opens the noVNC view in a new tab)
 document.querySelectorAll(".tabs button[data-tab]").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button[data-tab]").forEach(x=>x.classList.remove("on")); b.classList.add("on");
-  for (const t of ["board","roster"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
+  for (const t of ["board","roster","activity"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
+  if (b.dataset.tab === "activity") renderActivity();
 }));
+
+async function renderActivity() {
+  try {
+    const s = await (await fetch("/api/activity")).json();
+    const evs = (s.events || []).slice().reverse();
+    $("#tab-activity").innerHTML = evs.length ? evs.map(e => {
+      const t = new Date(e.ts).toLocaleString();
+      const reason = e.detail && e.detail.reasoning ? `<div class="reason">“${escapeHtml(e.detail.reasoning)}”</div>` : "";
+      return `<div class="act"><div class="act-head"><span class="badge ${e.actor}">${e.actor}</span>`
+        + `<span class="act-type">${escapeHtml(e.type)}</span><span class="act-time">${t}</span></div>`
+        + `<div class="act-sum">${escapeHtml(e.summary)}</div>${reason}</div>`;
+    }).join("") : "<p style='color:var(--muted);padding:14px'>No activity yet. The coach and engineer log everything here.</p>";
+  } catch (e) { $("#tab-activity").innerHTML = "<p style='color:var(--bad);padding:14px'>activity error</p>"; }
+}
 $("#takeoverBtn").addEventListener("click", () => {
   window.open(novncUrl || "https://coach-vnc.filipkin.com/vnc.html?autoconnect=1&resize=scale", "_blank");
 });
@@ -192,7 +219,8 @@ async function loadState() {
     novncUrl = s.novncUrl;
   } catch (e) { $("#leagueSub").textContent = "state error: " + e; }
 }
-loadState(); setInterval(loadState, 30000);
+loadState();
+setInterval(() => { loadState(); if ($("#tab-activity").style.display !== "none") renderActivity(); }, 15000);
 </script>
 </body>
 </html>

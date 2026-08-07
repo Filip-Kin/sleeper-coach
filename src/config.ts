@@ -19,6 +19,15 @@ export const config = {
   previousLeagueId: "1267682977899364352",
 } as const;
 
+// This league is actually HALF PPR, but Sleeper's stored setting reads full PPR
+// (rec 1.0) and Filip isn't commissioner so can't correct it. He confirmed the
+// real scoring, so we force the reception value to the truth everywhere the
+// coach values players. `raw` is the league's stored scoring; only `rec` is off.
+export const TRUE_REC = 0.5;
+export function trueScoring<T extends Record<string, number>>(raw: T): T {
+  return { ...raw, rec: TRUE_REC };
+}
+
 // The read-only public Sleeper API. No auth token: it cannot write anything.
 export const SLEEPER_API = "https://api.sleeper.app/v1";
 

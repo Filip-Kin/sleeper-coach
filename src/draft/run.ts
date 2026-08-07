@@ -11,7 +11,7 @@
 //   bun run src/draft/run.ts [draftId]
 
 import { unlinkSync } from "node:fs";
-import { config } from "../config.ts";
+import { config, trueScoring } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
@@ -65,11 +65,9 @@ if (rehearse) {
 
 // Value the board by THIS draft's scoring (ppr | half_ppr | std).
 const league = await sleeper.league(config.leagueId);
-const scoringType = draft.metadata?.scoring_type ?? "ppr";
-const scoring = { ...league.scoring_settings };
-if (scoringType === "half_ppr") scoring.rec = 0.5;
-else if (scoringType === "std") scoring.rec = 0;
-const scoringLabel = scoringType === "half_ppr" ? "half-PPR" : scoringType === "std" ? "standard" : "full-PPR";
+// The league is half-PPR (Filip-confirmed; see config.trueScoring).
+const scoring = trueScoring(league.scoring_settings);
+const scoringLabel = "half-PPR";
 console.log(`[draft-run] scoring: ${scoringLabel} (rec ${scoring.rec})`);
 const projections = await loadSeasonProjections(config.season, scoring);
 

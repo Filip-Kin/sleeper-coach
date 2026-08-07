@@ -1,10 +1,11 @@
-import { config } from "../config.ts";
+import { config, trueScoring } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor } from "../analysis/vor.ts";
 import { loadPlayers } from "../data/players.ts";
 import { describeScoring } from "../analysis/scoring.ts";
 import { runAgent, type AgentEvent } from "../agent/runner.ts";
+import { recentEvents } from "../log.ts";
 
 // The dashboard server. Serves the single-page UI, a state endpoint for the
 // board/roster panels, and an SSE chat endpoint that streams the agent's
@@ -29,7 +30,7 @@ async function stateJson(): Promise<Response> {
     sleeper.rosters(config.leagueId),
     loadPlayers(),
   ]);
-  const projections = await loadSeasonProjections(config.season, league.scoring_settings);
+  const projections = await loadSeasonProjections(config.season, trueScoring(league.scoring_settings));
   const ranked = rankByVor(projections, league).slice(0, 60);
 
   const me = rosters.find((r) => r.roster_id === config.rosterId);
@@ -88,6 +89,7 @@ Bun.serve({
   idleTimeout: 0,
   async fetch(req) {
     const url = new URL(req.url);
+    if (url.pathname === "/api/activity") return Response.json({ events: recentEvents(150) });
     if (url.pathname === "/api/state") return stateJson().catch((e) => Response.json({ error: String(e) }, { status: 500 }));
     if (url.pathname === "/api/chat" && req.method === "POST") return sseChat(req);
     // Static: index at root, else serve files from public/.
