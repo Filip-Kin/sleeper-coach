@@ -113,6 +113,12 @@ async function findPlayerRow(page: Page, playerName: string) {
   return page.locator(".player-rank-item2").filter({ hasText: playerName }).first();
 }
 
+// Are we on the clock? The pick buttons go live (lose .disable) only on our
+// turn. Assumes the draft room is already open (does not navigate).
+export async function isOnClock(page: Page): Promise<boolean> {
+  return (await page.locator(".draft-button:not(.disable)").count()) > 0;
+}
+
 // Draft a player. The pick button (.draft-button) is only live when we're on
 // the clock; otherwise it carries a .disable class and the click is a no-op.
 export async function makePick(page: Page, playerName: string): Promise<void> {

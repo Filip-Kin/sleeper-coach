@@ -92,6 +92,7 @@ export interface DraftPick {
   player_id: string;
   roster_id: number | null;
   picked_by: string;
+  metadata?: { first_name?: string; last_name?: string } | null;
 }
 
 export interface SleeperPlayer {

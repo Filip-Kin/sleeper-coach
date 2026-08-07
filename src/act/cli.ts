@@ -35,6 +35,11 @@ async function main(): Promise<void> {
       console.log(ok ? "LOGGED_IN" : "LOGGED_OUT");
       process.exit(ok ? 0 : 3);
     }
+    case "on-clock": {
+      const on = (await call("/on-clock")).onClock === true;
+      console.log(on ? "ON_CLOCK" : "NOT_ON_CLOCK");
+      process.exit(on ? 0 : 3);
+    }
     case "dom": {
       console.log(JSON.stringify(await call("/dom", args[0] ? { url: args[0] } : {}), null, 2));
       break;

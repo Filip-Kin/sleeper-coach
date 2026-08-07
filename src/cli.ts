@@ -100,6 +100,25 @@ async function cmdBoard(): Promise<void> {
   });
 }
 
+async function cmdAvailable(): Promise<void> {
+  // A draft id is a long number; a bare small number is the row limit.
+  const draftId = args.find((a) => /^\d{12,}$/.test(a)) ?? config.draftId;
+  const posArg = args.find((a) => ["QB", "RB", "WR", "TE", "K", "DEF"].includes(a.toUpperCase()))?.toUpperCase();
+  const limit = Number(args.find((a) => /^\d{1,3}$/.test(a))) || 25;
+
+  const [league, picks] = await Promise.all([sleeper.league(config.leagueId), sleeper.draftPicks(draftId)]);
+  const drafted = new Set(picks.map((p) => p.player_id));
+  const projections = await loadSeasonProjections(config.season, league.scoring_settings);
+  const ranked = rankByVor(projections, league).filter((r) => !drafted.has(r.playerId));
+  const rows = (posArg ? ranked.filter((r) => r.position === posArg) : ranked).slice(0, limit);
+
+  console.log(`\nBest available${posArg ? ` — ${posArg}` : ""} (${drafted.size} drafted, top ${rows.length} by VOR):`);
+  rows.forEach((e, i) => {
+    const inj = e.injuryStatus ? ` [${e.injuryStatus}]` : "";
+    console.log(`  ${String(i + 1).padStart(3)}. ${e.name.padEnd(24)} ${(`${e.position}${e.posRank}`).padEnd(5)} ${e.team.padEnd(4)} pts ${e.points.toFixed(0).padStart(4)} vor ${e.vor.toFixed(0).padStart(4)} adp ${e.adp >= 999 ? "-" : e.adp.toFixed(0)}  T${e.tier}${inj}`);
+  });
+}
+
 async function cmdRoster(): Promise<void> {
   const rosterId = Number(args[0]) || config.rosterId;
   const [rosters, players] = await Promise.all([
@@ -137,6 +156,7 @@ const commands: Record<string, () => Promise<void>> = {
   managers: cmdManagers,
   draft: cmdDraft,
   board: cmdBoard,
+  available: cmdAvailable,
   roster: cmdRoster,
   players: cmdPlayers,
 };

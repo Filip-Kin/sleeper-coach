@@ -7,7 +7,7 @@
 
 import { launchContext, firstPage } from "./browser.ts";
 import {
-  leagueUrl, isLoggedIn, domFacts, screenshot,
+  leagueUrl, isLoggedIn, isOnClock, domFacts, screenshot,
   makePick, setQueue, setLineup, respondTrade, sendTrade, importSession,
 } from "./sleeper.ts";
 
@@ -45,6 +45,8 @@ Bun.serve({
       switch (url.pathname) {
         case "/login-check":
           return Response.json({ loggedIn: await run(() => isLoggedIn(page)) });
+        case "/on-clock":
+          return Response.json({ onClock: await run(() => isOnClock(page)) });
         case "/goto":
           await run(async () => { await page.goto(str(b.url), { waitUntil: "domcontentloaded" }); await page.waitForTimeout(2500); });
           return Response.json({ url: page.url() });
@@ -60,7 +62,8 @@ Bun.serve({
           return Response.json({ result: await run(() => page.evaluate(str(b.expr))) });
         case "/click":
           await run(async () => {
-            if (b.text) await page.getByText(new RegExp(str(b.text), "i")).first().click({ timeout: 8000 });
+            if (b.role) await page.getByRole(str(b.role) as "button", { name: new RegExp(str(b.text), "i") }).first().click({ timeout: 8000 });
+            else if (b.text) await page.getByText(new RegExp(str(b.text), "i")).first().click({ timeout: 8000 });
             else await page.click(str(b.selector), { timeout: 8000 });
           });
           return Response.json({ ok: true });

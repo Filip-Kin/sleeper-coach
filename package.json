@@ -8,6 +8,7 @@
     "coach": "bun run src/cli.ts",
     "act": "bun run src/act/cli.ts",
     "daemon": "bun run src/daemon.ts",
+    "draft-run": "bun run src/draft/run.ts",
     "web": "bun run src/web/server.ts",
     "typecheck": "tsc --noEmit"
   },
