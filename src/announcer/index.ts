@@ -4,9 +4,11 @@
 // each of OUR draft picks it composes a short line (via the claude runner) and
 // plays it into a Discord voice channel using local Piper TTS.
 //
-// SCOPE: announce-our-picks only. No microphone/listening/speech-to-text yet;
-// the code is split into modules (tail, persona, tts, voice) so a listener can
-// be added later without reworking this path.
+// SCOPE: announce-our-picks by default. An optional LISTEN + COMEBACK phase
+// (listen.ts + whisper.ts) lets the bot hear the voice channel and fire back a
+// spoken insult when someone addresses or trash-talks it. That phase is gated
+// behind LISTENER_ENABLED and is OFF by default: with it off the bot behaves
+// exactly as announce-only, never subscribing to audio or running whisper.
 //
 // ------------------------------------------------------------------------------
 // WHAT THE HUMAN MUST PROVIDE to make it talk:
@@ -29,15 +31,19 @@
 
 import { Client, GatewayIntentBits, Events } from "discord.js";
 import sodium from "libsodium-wrappers";
-import { loadConfig } from "./config.ts";
+import { loadConfig, discordNames } from "./config.ts";
 import { startTail } from "./tail.ts";
 import { connectVoice, type VoiceHandle } from "./voice.ts";
 import { synthesize } from "./tts.ts";
-import { announcePickLine, announceCompleteLine } from "./persona.ts";
+import { announcePickLine, announceCompleteLine, announceComebackLine, type ComebackContext } from "./persona.ts";
+import { startListener } from "./listen.ts";
 import type { ActivityEvent } from "../log.ts";
 
 const config = loadConfig();
 if (!config) process.exit(0); // clean exit: nothing to crash-loop on
+// Capture here where the null-guard has narrowed `config`; a hoisted function
+// declaration below (resolveSpeaker) can't see that narrowing on its own.
+const guildId = config.guildId;
 
 // The voice encryption backend must be initialised before we join.
 await sodium.ready;
@@ -131,12 +137,45 @@ function handleEvent(ev: ActivityEvent): void {
 }
 // #endregion
 
+// #region listener (LISTEN + COMEBACK), gated behind LISTENER_ENABLED
+// True while the bot is speaking (its queue is draining). The listener consults
+// this so it never captures or reacts to audio while we're mid-announcement,
+// which also keeps it from reacting to our own voice bleeding back.
+function isBusy(): boolean {
+  return draining;
+}
+
+// Comebacks ride the SAME single queue as announcements, so they can never talk
+// over a pick call: they simply wait their turn like any other spoken line.
+function enqueueComeback(ctx: ComebackContext): void {
+  enqueue(async () => {
+    const line = await announceComebackLine(ctx);
+    await speak(line);
+  });
+}
+
+// Name a speaker: prefer the known/mapped name, else their Discord display name.
+async function resolveSpeaker(userId: string): Promise<string> {
+  const names = discordNames();
+  const mapped = names[userId];
+  if (mapped) return mapped;
+  try {
+    const guild = await client.guilds.fetch(guildId);
+    const member = await guild.members.fetch(userId);
+    return member.displayName || member.user.username || "someone";
+  } catch {
+    return "someone";
+  }
+}
+// #endregion
+
 // #region wiring
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
 let stopTail: (() => void) | null = null;
+let stopListener: (() => void) | null = null;
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`[announcer] logged in as ${c.user.tag}`);
@@ -157,12 +196,27 @@ client.once(Events.ClientReady, async (c) => {
     onEvent: handleEvent,
     onError: (err) => console.error(`[announcer] tail error: ${err.message}`),
   });
+
+  // Listener is OFF unless LISTENER_ENABLED is set. When off we behave exactly
+  // as before: announce-only, never subscribe to audio, never run whisper.
+  if (config.listenerEnabled && voice) {
+    stopListener = startListener({
+      connection: voice.connection,
+      botUserId: c.user.id,
+      isBusy,
+      resolveSpeaker,
+      onComeback: enqueueComeback,
+    });
+  } else {
+    console.log("[announcer] listener disabled (set LISTENER_ENABLED=1 to enable comebacks).");
+  }
 });
 
 client.on(Events.Error, (err) => console.error(`[announcer] discord client error: ${err.message}`));
 
 async function shutdown(code: number): Promise<void> {
   console.log("[announcer] shutting down");
+  stopListener?.();
   stopTail?.();
   voice?.destroy();
   try {

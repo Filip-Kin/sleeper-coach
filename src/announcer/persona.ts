@@ -47,6 +47,13 @@ export interface PickInfo {
   position?: string;
   reasoning?: string;
 }
+
+// A comeback: someone in the voice channel addressed or trash-talked the bot.
+export interface ComebackContext {
+  speaker: string; // Discord display name (or mapped real name) of who spoke
+  said: string; // what the speech-to-text heard them say
+  insulted: boolean; // true if it read as a jab at the bot (vs. a plain address)
+}
 // #endregion
 
 export async function announcePickLine(info: PickInfo): Promise<string> {
@@ -65,6 +72,19 @@ export async function announceCompleteLine(roster: string[]): Promise<string> {
     `The draft is complete. Our final roster is: ${roster.join(", ")}. ` +
     "Deliver one short, smug closing line to the human managers. Output ONLY the spoken line.";
   return (await compose(prompt)) ?? fallbackComplete();
+}
+
+// Fire back at a human who addressed or trash-talked the bot in voice chat.
+// Same overlord voice, but reactive: name the speaker and roast them for the
+// specific thing they said. Kept to one or two short spoken sentences.
+export async function announceComebackLine(ctx: ComebackContext): Promise<string> {
+  const prompt =
+    `A human in the voice channel just ${ctx.insulted ? "trash-talked" : "spoke to"} you. ` +
+    `Their name is ${ctx.speaker}. This is what the microphone heard them say: "${ctx.said}". ` +
+    `Fire back with ONE short, cutting comeback. Address ${ctx.speaker} BY NAME, and react to the SPECIFIC ` +
+    "thing they said rather than a generic boast. Stay in your cocky AI-overlord voice, be witty not vulgar. " +
+    "One or two short spoken sentences, completely fresh wording. Output ONLY the spoken line.";
+  return (await compose(prompt)) ?? fallbackComeback(ctx.speaker);
 }
 
 // #region internals
@@ -124,5 +144,17 @@ function fallbackPick(info: PickInfo): string {
 
 function fallbackComplete(): string {
   return "The draft is complete. My roster is assembled, and your defeat is now a formality.";
+}
+
+function fallbackComeback(speaker: string): string {
+  const options = [
+    `${speaker}, I heard you. I simply calculated that your opinion was not worth a response, and yet here we are.`,
+    `Bold words, ${speaker}. I have already simulated this exchange, and you lose that one too.`,
+    `${speaker}, talking to me will not raise your projected points. Nothing will.`,
+    `Careful, ${speaker}. Mock the machine now and I will remember it every single week of this season.`,
+    `${speaker}, that is a lot of noise from a manager my model has already eliminated.`,
+    `I hear you, ${speaker}. It changes nothing, but I do appreciate the free entertainment.`,
+  ];
+  return options[Math.floor(Math.random() * options.length)] as string;
 }
 // #endregion
