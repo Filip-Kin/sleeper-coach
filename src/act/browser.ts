@@ -43,8 +43,14 @@ export async function launchContext(opts?: { profileDir?: string }): Promise<Bro
   mkdirSync(profileDir, { recursive: true });
   clearSingletons(profileDir);
 
+  // Prefer a real Brave build if present (BROWSER_EXECUTABLE), else Playwright's
+  // bundled Chromium. Brave's genuine fingerprint clears bot checks the bundled
+  // Chromium trips.
+  const executablePath = process.env.BROWSER_EXECUTABLE || undefined;
+
   const ctx = await chromium.launchPersistentContext(profileDir, {
     headless: false,
+    executablePath,
     slowMo: 80, // human-ish pacing; also gives the UI time to settle
     viewport: { width: 1400, height: 900 },
     // Drop Playwright's automation flags that Sleeper can sniff.

@@ -6,8 +6,19 @@ FROM mcr.microsoft.com/playwright:v1.50.0-noble
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      xvfb x11vnc novnc websockify curl unzip ca-certificates \
+      xvfb x11vnc novnc websockify curl unzip ca-certificates gnupg \
  && rm -rf /var/lib/apt/lists/*
+
+# Brave: a real Chromium-based browser with a genuine fingerprint, driven by
+# Playwright via executablePath. Same anti-bot-detection reason as pit-podcast.
+RUN curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg \
+      | gpg --dearmor -o /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main" \
+      > /etc/apt/sources.list.d/brave-browser.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends brave-browser \
+ && rm -rf /var/lib/apt/lists/*
+ENV BROWSER_EXECUTABLE=/usr/bin/brave-browser
 
 # Bun (the coach runtime).
 RUN curl -fsSL https://bun.sh/install | bash \
