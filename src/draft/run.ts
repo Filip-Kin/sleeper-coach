@@ -292,15 +292,16 @@ console.log(`[draft-run] our draft slot: ${myDraftSlot ?? "unresolved"}`);
 console.log("[draft-run] entering pick loop (waiting for our turns)…");
 const rounds = draft.settings.rounds;
 
-// Deterministic state comes from the LIVE browser, never the lagging picks API:
+// Deterministic state from the LIVE browser + our ACTUAL roster count:
 //  - Our turn = our pick button is live (onClock), debounced across two reads to
 //    dodge the brief all-buttons flash at kickoff.
-//  - Our round = a LOCAL count of picks we've made (seeded from our current
-//    roster), incremented only when a pick is confirmed. No global pick number,
-//    so API lag can never mistime a turn.
-//  - A pick is confirmed when our button goes back to disabled (the turn was
-//    consumed) — true whether we clicked it or the clock autopicked from queue.
-let myPicksMade = myRoster(await sleeper.draftPicks(draftId)).length;
+//  - Our round = how many players we've actually drafted + 1 (our Nth pick is in
+//    round N in a snake). Read from the roster, so it can't drift.
+//  - A pick is confirmed by our ROSTER GROWING, not by the button clearing —
+//    which was wrong for back-to-back turns (slots 1 and 8 pick twice around the
+//    round turn, so the button stays lit and a real pick looked like a miss).
+//  - Because the pick button is only clickable on our real turn, a stray attempt
+//    off-turn just fails harmlessly, so re-entering for a back-to-back is safe.
 let lastBoardAt = 0;
 
 async function draftState(): Promise<{ onClock: boolean; available: { name: string; pos: string }[] }> {
@@ -309,45 +310,46 @@ async function draftState(): Promise<{ onClock: boolean; available: { name: stri
 }
 
 for (;;) {
-  if (myPicksMade >= rounds) {
+  await ensureRoom();
+  await resolveSlot();
+  const picks = await sleeper.draftPicks(draftId);
+  const myCount = myRoster(picks).length; // players we've actually drafted
+  if (myCount >= rounds) {
     console.log(`[draft-run] all ${rounds} of our picks made`);
     break;
   }
-  await ensureRoom();
-  await resolveSlot();
-  const round = myPicksMade + 1;
+  const round = myCount + 1;
+  const globalPick = picks.length + 1; // real draft position, for the console
   const { onClock, available } = await draftState();
 
-  // Observability: publish the live board view (what the engine sees available)
-  // on a light time throttle, so the dashboard Coach view updates steadily.
-  if (Date.now() - lastBoardAt > 5000) { logBoard(round, round, available); lastBoardAt = Date.now(); }
+  // Observability: publish the live board view on a light time throttle, keyed
+  // to the REAL draft position so the dashboard doesn't read a round behind.
+  if (Date.now() - lastBoardAt > 5000) { logBoard(globalPick, round, available); lastBoardAt = Date.now(); }
 
   if (!onClock) {
     // Off the clock: troll a rival who took one of our targets, then adjust the
-    // PLAN (throttled, paused during agent backoff). The queue is a backstop,
-    // refreshed only right after we pick.
-    await maybeTroll(await sleeper.draftPicks(draftId)).catch(() => {});
+    // PLAN (throttled, paused during agent backoff).
+    await maybeTroll(picks).catch(() => {});
     if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) {
-      await refreshPlan(await sleeper.draftPicks(draftId), available);
+      await refreshPlan(picks, available);
     }
     await Bun.sleep(1500);
     continue;
   }
 
-  // Our button is live — debounce to reject the kickoff flash / a turn that
-  // passes in the same instant. Only a stable on-clock is genuinely our turn.
+  // Our button is live — debounce to reject the kickoff flash / a turn passing
+  // in the same instant. Only a stable on-clock is genuinely our turn.
   await Bun.sleep(700);
   const confirm = await draftState();
   if (!confirm.onClock) continue;
 
-  // ON THE CLOCK — pick from the LIVE available set (the DOM truth), best per
-  // our board + roster caps. Re-read once if the read came back empty.
+  // ON THE CLOCK — pick from the LIVE available set (the DOM truth), best per our
+  // board + roster caps. Re-read once if the read came back empty.
   let liveSet = new Set(confirm.available.map((a) => a.name));
   if (liveSet.size === 0) {
     const retry = await draftState();
     liveSet = new Set(retry.available.map((a) => a.name));
   }
-  const picks = await sleeper.draftPicks(draftId);
   const board = boardNow(picks);
   const byName = new Map(board.map((b) => [b.name, b]));
   const counts = myPositionCounts(picks, myDraftSlot);
@@ -363,10 +365,9 @@ for (;;) {
     await Bun.sleep(1500);
     continue;
   }
-  console.log(`[debug] our pick #${round} slot=${myDraftSlot} availN=${liveSet.size} target=${target.name} (${target.position}) inAvail=${liveSet.has(target.name)}`);
+  console.log(`[debug] our pick #${round} (global ${globalPick}) slot=${myDraftSlot} availN=${liveSet.size} target=${target.name} (${target.position})`);
   console.log(`[debug] avail(live): ${[...liveSet].slice(0, 8).join(", ") || "(empty)"}`);
-  console.log(`[debug] plan top: ${plan.slice(0, 5).join(", ") || "(none)"}`);
-  logBoard(round, round, confirm.available, target.name); // publish with the chosen target
+  logBoard(globalPick, round, confirm.available, target.name); // publish with the chosen target
   lastBoardAt = Date.now();
   const t0 = Date.now();
   try {
@@ -374,24 +375,19 @@ for (;;) {
   } catch (e) {
     console.log(`[draft-run] pick error: ${e instanceof Error ? e.message : String(e)}`);
   }
-  // Confirm by our button clearing (turn consumed), not by the API. Wait up to
-  // ~10s for it to disable; if it never does, the pick didn't take.
-  let consumed = false;
-  for (let i = 0; i < 12; i++) {
-    if (!(await draftState()).onClock) { consumed = true; break; }
-    await Bun.sleep(800);
+  // Confirm by OUR ROSTER GROWING (back-to-back safe). Poll the picks until our
+  // count exceeds what it was; if it never does, the pick didn't take.
+  let landed = false;
+  for (let i = 0; i < 14; i++) {
+    if (myRoster(await sleeper.draftPicks(draftId)).length > myCount) { landed = true; break; }
+    await Bun.sleep(1000);
   }
-  if (consumed) {
-    myPicksMade++;
+  if (landed) {
     const after = await sleeper.draftPicks(draftId);
-    // Log what we actually clicked (target). The API roster lags, so reading the
-    // "last" pick back would show the PREVIOUS pick — misleading. Only override
-    // if the clock autopicked something other than our target from the queue.
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     console.log(`[draft-run] our pick #${round} = ${target.name} (${secs}s)`);
     logEvent("coach", "draft-pick", `Our pick #${round} (R${round}): ${target.name} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
-    // Safe window: next turn is a full snake cycle away. Refresh the small
-    // backstop queue and adjust the plan now, off the clock.
+    // Off-clock work: refresh the small backstop queue and adjust the plan.
     await pushQueue(after).catch(() => {});
     if (Date.now() > agentBackoffUntil) await refreshPlan(after, confirm.available).catch(() => {});
   } else {
