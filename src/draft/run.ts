@@ -234,6 +234,11 @@ for (;;) {
     console.log("[draft-run] no target available");
     break;
   }
+  console.log(`[debug] pick ${pickNo} R${round} slot=${myDraftSlot} onClock=${onClock} availN=${availSet.size}`);
+  console.log(`[debug] avail(live): ${[...availSet].slice(0, 8).join(", ") || "(empty)"}`);
+  console.log(`[debug] board top: ${board.slice(0, 5).map((b) => `${b.position}:${b.name}`).join(", ")}`);
+  console.log(`[debug] plan top: ${plan.slice(0, 5).join(", ") || "(none)"}`);
+  console.log(`[debug] target=${target.name} (${target.position}) inAvail=${availSet.has(target.name)}`);
   console.log(`[draft-run] ON THE CLOCK pick ${pickNo} (R${round}) → ${target.name} (${target.position})`);
   const t0 = Date.now();
   try {

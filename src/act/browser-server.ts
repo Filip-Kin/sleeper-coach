@@ -64,8 +64,14 @@ Bun.serve({
           return Response.json({ onClock: await run(() => isOnClock(page)) });
         case "/draft-state":
           // The single live-truth read: are we on the clock, and who is actually
-          // still available right now (from the room, not the lagging API).
-          return Response.json(await run(async () => ({ onClock: await isOnClock(page), available: await liveAvailable(page) })));
+          // still available right now (from the room, not the lagging API). Clear
+          // any leftover search filter first so we read the FULL top of the list,
+          // not a one-row sliver left by the previous pick's search.
+          return Response.json(await run(async () => {
+            await page.getByPlaceholder(/find player/i).fill("").catch(() => {});
+            await page.waitForTimeout(400);
+            return { onClock: await isOnClock(page), available: await liveAvailable(page) };
+          }));
         case "/console": {
           const n = Number(url.searchParams.get("n") ?? 80);
           const out = logs.slice(-n);
