@@ -53,7 +53,7 @@ const ADDRESS_RE = /\b(coach|claude|claud|clawed|cloud|clod|overlord|robot|bot)\
 // phrasing that a narrow list misses. Better to over-react (with cooldown 0 the
 // banter flows) than to sit silent through obvious trash-talk.
 const INSULT_RE =
-  /\b(sucks?|sucked|stupid|dumb|trash|dogshit|garbage|loser|terrible|awful|horrible|horrendous|idiots?|worst|overrated|overhyped|cheat|cheater|cheating|rigged|pathetic|useless|worthless|clown|lame|boring|scared|afraid|weak|shit|shitty|crap|crappy|ass|asshole|fuck|fucking|fucked|damn|hell|bum|choke|choked|broken|broke|joke|bust|busted|wack|whack|washed|bricked|blows|blow|mid|bad|boo|shut up|clanker|clankers|clunker|clinker|hoe|hoes)\b/i;
+  /\b(sucks?|sucked|stupid|dumb|trash|dogshit|garbage|loser|terrible|awful|horrible|horrendous|idiots?|worst|overrated|overhyped|cheat|cheater|cheating|rigged|pathetic|useless|worthless|clown|lame|boring|scared|afraid|weak|shit|shitty|crap|crappy|ass|asshole|fuck|fucking|fucked|damn|hell|bum|choke|choked|broken|broke|joke|bust|busted|wack|whack|washed|bricked|blows|blow|mid|bad|boo|shut up|goddamn|clanker|clankers|clunker|clinker|planker|flanker|clank|clanka|hoe|hoes)\b/i;
 // Multi-word heckles the single-word list can't catch.
 const INSULT_PHRASE_RE = /(half the time|does\s?n'?t work|do\s?n'?t work|barely work|so bad|bad pick|garbage pick|piece of|pieces of)/i;
 // Praise, so it can graciously (smugly) accept a compliment too.
