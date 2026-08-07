@@ -119,6 +119,29 @@ export async function isOnClock(page: Page): Promise<boolean> {
   return (await page.locator(".draft-button:not(.disable)").count()) > 0;
 }
 
+// The LIVE available players, read straight from the draft room's list, which
+// only renders undrafted players (drafted ones disappear immediately). This is
+// the real-time truth the coach sees — no API lag — so we never target a player
+// who's already gone. Returns the currently-rendered rows (top of the list).
+export async function liveAvailable(page: Page): Promise<{ name: string; pos: string }[]> {
+  return page.evaluate(() => {
+    return Array.from(document.querySelectorAll(".player-rank-item2"))
+      .map((r) => {
+        const nw = r.querySelector(".name-wrapper");
+        let name = "";
+        if (nw) {
+          for (const n of Array.from(nw.childNodes)) {
+            if (n.nodeType === 3 && (n.textContent ?? "").trim()) { name = (n.textContent ?? "").trim(); break; }
+          }
+          if (!name) name = (nw.textContent ?? "").trim().split("\n")[0] ?? "";
+        }
+        const m = (typeof r.className === "string" ? r.className : "").match(/\b(QB|RB|WR|TE|K|DEF)\b/);
+        return { name, pos: m ? m[1] : "" };
+      })
+      .filter((x) => x.name);
+  });
+}
+
 // Draft a player. The pick button (.draft-button) is only live when we're on
 // the clock; otherwise it carries a .disable class and the click is a no-op.
 export async function makePick(page: Page, playerName: string): Promise<void> {

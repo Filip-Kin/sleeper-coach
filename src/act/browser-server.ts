@@ -7,7 +7,7 @@
 
 import { launchContext, firstPage } from "./browser.ts";
 import {
-  leagueUrl, isLoggedIn, isOnClock, domFacts, screenshot,
+  leagueUrl, isLoggedIn, isOnClock, liveAvailable, domFacts, screenshot,
   makePick, setQueue, setLineup, respondTrade, sendTrade, importSession,
 } from "./sleeper.ts";
 
@@ -62,6 +62,10 @@ Bun.serve({
           return Response.json({ loggedIn: await run(() => isLoggedIn(page)) });
         case "/on-clock":
           return Response.json({ onClock: await run(() => isOnClock(page)) });
+        case "/draft-state":
+          // The single live-truth read: are we on the clock, and who is actually
+          // still available right now (from the room, not the lagging API).
+          return Response.json(await run(async () => ({ onClock: await isOnClock(page), available: await liveAvailable(page) })));
         case "/console": {
           const n = Number(url.searchParams.get("n") ?? 80);
           const out = logs.slice(-n);
