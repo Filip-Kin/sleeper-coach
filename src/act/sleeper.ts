@@ -175,6 +175,25 @@ export async function liveAvailable(page: Page): Promise<{ name: string; pos: st
   });
 }
 
+// Scrape the drafted board cells straight from the DOM — the source of truth for
+// what's been picked, since the picks API lags badly during a live draft. Each
+// .cell.drafted has .pick "R.P" (round.pick-in-round), .player-name (abbreviated,
+// e.g. "B. Robinson"), and .position "RB - ATL". Returns them in board order.
+export async function draftedCells(page: Page): Promise<{ round: number; pickInRound: number; name: string; pos: string }[]> {
+  return page.evaluate(() => {
+    return Array.from(document.querySelectorAll(".cell.drafted"))
+      .map((c) => {
+        const label = (c.querySelector(".pick")?.textContent ?? "").trim();
+        const name = (c.querySelector(".player-name")?.textContent ?? "").trim();
+        const posRaw = (c.querySelector(".position")?.textContent ?? "").trim();
+        const pos = (posRaw.split(/[\s-]/)[0] ?? "").trim();
+        const parts = label.split(".");
+        return { round: Number(parts[0]) || 0, pickInRound: Number(parts[1]) || 0, name, pos };
+      })
+      .filter((x) => x.name);
+  });
+}
+
 // Draft a player. The pick button (.draft-button) is only live when we're on
 // the clock; otherwise it carries a .disable class and the click is a no-op.
 export async function makePick(page: Page, playerName: string): Promise<void> {

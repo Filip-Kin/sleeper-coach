@@ -7,7 +7,7 @@
 
 import { launchContext, firstPage } from "./browser.ts";
 import {
-  leagueUrl, isLoggedIn, authState, isOnClock, liveAvailable, domFacts, screenshot,
+  leagueUrl, isLoggedIn, authState, isOnClock, liveAvailable, draftedCells, domFacts, screenshot,
   makePick, setQueue, reactToPick, setLineup, respondTrade, sendTrade, importSession,
 } from "./sleeper.ts";
 
@@ -73,8 +73,14 @@ Bun.serve({
           return Response.json(await run(async () => {
             await page.getByPlaceholder(/find player/i).fill("").catch(() => {});
             await page.waitForTimeout(400);
-            return { onClock: await isOnClock(page), available: await liveAvailable(page) };
+            // drafted = live count of filled board cells = accurate global pick
+            // count (the picks API lags); used only for the console position.
+            const drafted = await page.locator(".cell.drafted").count().catch(() => 0);
+            return { onClock: await isOnClock(page), available: await liveAvailable(page), drafted };
           }));
+        case "/board-picks":
+          // All drafted picks, scraped from the board DOM (not the lagging API).
+          return Response.json({ picks: await run(() => draftedCells(page)) });
         case "/console": {
           const n = Number(url.searchParams.get("n") ?? 80);
           const out = logs.slice(-n);

@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
 // Autonomous draft orchestrator.
 //
-// Model (per league strategy): the agent is the decision-maker and the queue is
-// its plan. BETWEEN picks (off the clock, where there's time) the agent produces
-// a ranked plan reacting to what everyone else is doing; the orchestrator pushes
-// it to the Sleeper queue as the autopick backstop. ON the clock the orchestrator
-// acts FAST and deterministically: it drafts the top still-available name from
-// the plan. No slow deliberation while the clock ticks.
+// ALL draft state comes from the live browser DOM + our own local record — never
+// the Sleeper picks API, which lags badly during a live draft (that lag caused
+// mistimed turns, duplicate QB/TE past the cap, and a missed pick). Specifically:
+//   - turn        = our pick button is live (DOM), debounced past the kickoff flash
+//   - available   = the draft room's player list (DOM), full names
+//   - our roster  = tracked LOCALLY as we pick (zero lag), seeded from the board
+//   - rival picks = scraped from the board cells (DOM)
+//   - pick landed = our cell count on the board grew (DOM)
+// The agent plans between picks; on the clock we act fast and deterministically.
 //
-//   bun run src/draft/run.ts [draftId]
+//   bun run src/draft/run.ts [draftId] [--rehearse] [--seat=N]
 
 import { unlinkSync } from "node:fs";
 import { config, trueScoring } from "../config.ts";
@@ -17,16 +20,11 @@ import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
 import { positionCap } from "./logic.ts";
-import type { DraftPick } from "../sleeper/types.ts";
 import { logEvent, logThink } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
-// args: <draftId> [--rehearse] [--seat=N]. --rehearse claims a seat and starts
-// the draft itself (for mock practice); without it, the script just joins the
-// (real) draft, queues, and picks when the commissioner starts it. This is one
-// fire-and-forget script that runs the whole draft — the production pattern.
 const argv = process.argv.slice(2);
 const draftId = argv.find((a) => !a.startsWith("--")) ?? config.draftId;
 const rehearse = argv.includes("--rehearse");
@@ -43,8 +41,9 @@ async function api(path: string, body?: unknown): Promise<Record<string, unknown
 }
 
 const draft = await sleeper.draft(draftId);
-const total = draft.settings.teams * draft.settings.rounds;
-console.log(`[draft-run] draft ${draftId}: ${draft.settings.teams}x${draft.settings.rounds}=${total} picks, ${draft.settings.pick_timer}s clock`);
+const teams = draft.settings.teams;
+const rounds = draft.settings.rounds;
+console.log(`[draft-run] draft ${draftId}: ${teams}x${rounds}=${teams * rounds} picks, ${draft.settings.pick_timer}s clock`);
 
 await Bun.write(DRAFT_LOCK, String(draftId)); // daemon: hands off the browser
 
@@ -65,30 +64,38 @@ if (rehearse) {
   await Bun.sleep(2500);
 }
 
-// Value the board by THIS draft's scoring (ppr | half_ppr | std).
+// Value the board by THIS league's scoring (half-PPR, Filip-confirmed).
 const league = await sleeper.league(config.leagueId);
-// The league is half-PPR (Filip-confirmed; see config.trueScoring).
 const scoring = trueScoring(league.scoring_settings);
 const scoringLabel = "half-PPR";
 console.log(`[draft-run] scoring: ${scoringLabel} (rec ${scoring.rec})`);
 const projections = await loadSeasonProjections(config.season, scoring);
 
-function boardNow(picks: DraftPick[]): RankedPlayer[] {
-  const drafted = new Set(picks.map((p) => p.player_id));
-  return rankByVor(projections, league).filter((r) => !drafted.has(r.playerId));
+// The static value board — VOR under our scoring. It does NOT depend on who's
+// been drafted (availability is judged live from the DOM), so compute it once.
+const fullBoard: RankedPlayer[] = rankByVor(projections, league);
+const byName = new Map(fullBoard.map((b) => [b.name, b]));
+
+// #region live state (all DOM)
+interface State { onClock: boolean; available: { name: string; pos: string }[]; drafted: number }
+async function draftState(): Promise<State> {
+  const s = (await api("/draft-state")) as { onClock?: boolean; available?: { name: string; pos: string }[]; drafted?: number };
+  return { onClock: s.onClock === true, available: s.available ?? [], drafted: s.drafted ?? 0 };
 }
 
-// How many of each position we've already drafted (our slot only).
-function myPositionCounts(picks: DraftPick[], slot: number | null): Record<string, number> {
-  const c: Record<string, number> = {};
-  if (slot == null) return c;
-  for (const p of picks) {
-    if (p.draft_slot !== slot) continue;
-    const pos = p.metadata?.position;
-    if (pos) c[pos] = (c[pos] ?? 0) + 1;
-  }
-  return c;
+// Snake: which team slot drafts at (round, pick-in-round).
+function slotOf(round: number, pickInRound: number): number {
+  return round % 2 === 1 ? pickInRound : teams - pickInRound + 1;
 }
+
+// Every drafted pick, scraped live from the board DOM, tagged with the drafting
+// slot derived from its round.pick label. Names here are abbreviated ("B.
+// Robinson") — fine for rival tracking; our own roster we keep in full locally.
+async function boardPicks(): Promise<{ round: number; slot: number; name: string; pos: string }[]> {
+  const r = (await api("/board-picks")) as { picks?: { round: number; pickInRound: number; name: string; pos: string }[] };
+  return (r.picks ?? []).map((p) => ({ round: p.round, slot: slotOf(p.round, p.pickInRound), name: p.name, pos: p.pos }));
+}
+// #endregion
 
 let plan: string[] = []; // ordered target names, best first
 let lastRefresh = 0;
@@ -96,38 +103,35 @@ let lastReasoning = "";
 let myDraftSlot: number | null = null;
 let agentBackoffUntil = 0; // pause agent calls after an error (limit hit, etc.)
 
-// Our own picks, read from the draft slot (robust vs. tracking makePick calls,
-// since some picks may come via the autopick queue).
+// Our slot, resolved once from the (static) draft order — not the picks feed.
 async function resolveSlot(): Promise<void> {
   if (myDraftSlot != null) return;
   const d = await sleeper.draft(draftId);
   const slot = d.draft_order?.[config.userId];
   if (typeof slot === "number") myDraftSlot = slot;
 }
-function myRoster(picks: DraftPick[]): string[] {
-  if (myDraftSlot == null) return [];
-  return picks
-    .filter((p) => p.draft_slot === myDraftSlot)
-    .sort((a, b) => a.pick_no - b.pick_no)
-    .map((p) => `${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""}`.trim());
+
+// #region our roster — tracked LOCALLY as we pick (full names, zero API lag)
+const myDrafted: { name: string; position: string }[] = [];
+function localCounts(): Record<string, number> {
+  const c: Record<string, number> = {};
+  for (const d of myDrafted) if (d.position) c[d.position] = (c[d.position] ?? 0) + 1;
+  return c;
 }
+// How many cells the board shows for our slot (DOM truth for "did our pick land").
+async function myBoardCount(): Promise<number> {
+  return (await boardPicks()).filter((p) => p.slot === myDraftSlot).length;
+}
+// #endregion
 
 const QUEUE_DEPTH = 8;
 
-// The autopick BACKSTOP queue (only used if the clock ever expires with the
-// automation dead). Rules learned from live mocks:
-//  1) Build it ONLY from the LIVE available set (the DOM truth), never the
-//     lagging picks API — so it can never contain a player already drafted, the
-//     bug that had it re-searching gone players and grinding for ~45s.
-//  2) Keep it SHORT (QUEUE_DEPTH). Setting the queue is per-player DOM work; a
-//     long queue starves the on-the-clock pick. It is only a dead-man's switch.
-//  3) Balance RB/WR by alternating on whichever we're shorter on, so a value-
-//     heavy RB board can't pile up. Ties break toward RB (slight half-PPR lean).
-//  4) NEVER queue DEF/K. Sleeper autopicks strictly down the queue, so a queued
-//     defense surfaces the instant the skill names drain. Left out, Sleeper's
-//     own ADP autopick fills the tail late where K/DEF belong.
-function buildQueue(board: RankedPlayer[], counts: Record<string, number>, availSet: Set<string>): string[] {
-  const live = availSet.size ? board.filter((b) => availSet.has(b.name)) : board;
+// The autopick BACKSTOP queue (only used if the clock expires with automation
+// dead). Built ONLY from the live-available set, kept short, balanced RB/WR, and
+// never DEF/K (Sleeper autopicks down the queue, so a queued defense would
+// surface early; left out, its native ADP autopick fills the tail late).
+function buildQueue(counts: Record<string, number>, availSet: Set<string>): string[] {
+  const live = availSet.size ? fullBoard.filter((b) => availSet.has(b.name)) : fullBoard;
   const rbs = live.filter((b) => b.position === "RB");
   const wrs = live.filter((b) => b.position === "WR");
   const out: RankedPlayer[] = [];
@@ -143,82 +147,70 @@ function buildQueue(board: RankedPlayer[], counts: Record<string, number>, avail
   return [...out, ...te, ...qb].map((b) => b.name);
 }
 
-// Push the backstop queue. Reads a FRESH live-available set itself, so it's
-// always valid, and is only ever called OFF the clock (at start and right after
-// we pick) — never while our clock is ticking.
-async function pushQueue(picks: DraftPick[]): Promise<void> {
-  const s = (await api("/draft-state")) as { available?: { name: string; pos: string }[] };
-  const availSet = new Set((s.available ?? []).map((a) => a.name));
-  const q = buildQueue(boardNow(picks), myPositionCounts(picks, myDraftSlot), availSet);
+// Push the backstop queue. Reads a fresh live-available set itself, and is only
+// ever called OFF the clock (start + right after we pick) — never mid-clock.
+async function pushQueue(): Promise<void> {
+  const s = await draftState();
+  const q = buildQueue(localCounts(), new Set(s.available.map((a) => a.name)));
   if (q.length) await api("/queue", { players: q }).catch(() => {});
 }
 
 // #region emoji troll — react on Sleeper when a rival snipes a player we wanted
 const TROLL = process.env.TROLL !== "0"; // on by default; TROLL=0 disables
-const reactedPicks = new Set<number>();
-function pickName(p: DraftPick): string {
-  return `${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""}`.trim();
+const reactedPicks = new Set<string>(); // keyed by "round.slot.name"
+function lastName(n: string): string {
+  return (n.trim().split(/\s+/).slice(-1)[0] ?? n).toLowerCase();
 }
-// If a rival just took someone in our current shortlist, react — "crying" if
-// they grabbed one of our very top targets, "shock" if further down the plan.
-// One reaction per call so it never bursts, and each pick is trolled only once.
-async function maybeTroll(picks: DraftPick[]): Promise<void> {
+async function maybeTroll(picks: { round: number; slot: number; name: string; pos: string }[]): Promise<void> {
   if (!TROLL || myDraftSlot == null || plan.length === 0) return;
-  const top3 = new Set(plan.slice(0, 3));
-  const top8 = new Set(plan.slice(0, 8));
+  const top3 = plan.slice(0, 3).map(lastName);
+  const top8 = plan.slice(0, 8).map(lastName);
   for (const p of picks) {
-    if (reactedPicks.has(p.pick_no) || p.draft_slot === myDraftSlot) continue;
-    const nm = pickName(p);
-    if (!nm || !top8.has(nm)) continue;
-    reactedPicks.add(p.pick_no);
-    const emoji = top3.has(nm) ? "crying" : "shock";
-    const ok = (await api("/react", { player: nm, emoji }).catch(() => ({ ok: false }))) as { ok?: boolean };
-    logEvent("coach", "troll", `Reacted ${emoji} to team ${p.draft_slot} taking ${nm} (one I wanted).`, { player: nm, emoji, landed: ok.ok === true });
-    return; // one per pass
+    const key = `${p.round}.${p.slot}.${p.name}`;
+    if (reactedPicks.has(key) || p.slot === myDraftSlot) continue;
+    const ln = lastName(p.name);
+    if (!top8.includes(ln)) continue;
+    reactedPicks.add(key);
+    const emoji = top3.includes(ln) ? "crying" : "shock";
+    const ok = (await api("/react", { player: p.name, emoji }).catch(() => ({ ok: false }))) as { ok?: boolean };
+    logEvent("coach", "troll", `Reacted ${emoji} to ${p.name} (${p.pos}) — one I wanted.`, { player: p.name, emoji, landed: ok.ok === true });
+    return; // one per pass, never a burst
   }
 }
 // #endregion
 
-// Observability: publish what the coach currently sees as available (the live
-// DOM read) plus the pick it's leaning toward, so the dashboard's Coach view
-// shows exactly the board state the engine is deciding from.
-function logBoard(pickNo: number, round: number, available: { name: string; pos: string }[], target?: string): void {
+// Observability: publish what the coach sees as available (live DOM) + the pick
+// it's leaning toward, keyed to the REAL draft position, for the dashboard.
+function logBoard(globalPick: number, round: number, available: { name: string; pos: string }[], target?: string): void {
   logEvent(
     "coach",
     "board",
-    `Board @pick ${pickNo} (R${round}): ${available.length} available${target ? `, leaning ${target}` : ""}`,
-    { pickNo, round, available: available.slice(0, 20), target, reasoning: lastReasoning },
+    `Pick ${globalPick} · our R${round}: ${available.length} available${target ? `, leaning ${target}` : ""}`,
+    { pickNo: globalPick, round, available: available.slice(0, 20), target, reasoning: lastReasoning },
   );
 }
 
-// The agent adjusts the PLAN (a ranked shortlist) reacting to the live draft.
-// It never touches the queue and never blocks a pick — picking is deterministic
-// off this plan + the value board. `available` is the live DOM read, so the
-// shortlist only ever contains players actually still in the room. On any agent
-// error (usage limit, crash) we log it, fall back to the pure value board, and
-// back off so we don't hammer a failing agent.
-async function refreshPlan(picks: DraftPick[], available: { name: string; pos: string }[]): Promise<void> {
+// The agent adjusts the PLAN (a ranked shortlist) reacting to the live draft. It
+// never blocks a pick. On any agent error we log it, fall back to the value
+// board, and back off so we don't hammer a failing agent.
+async function refreshPlan(available: { name: string; pos: string }[], recent: { round: number; slot: number; name: string; pos: string }[]): Promise<void> {
   await resolveSlot();
-  const roster = myRoster(picks);
+  const roster = myDrafted.map((d) => `${d.name} (${d.position})`);
   const availSet = new Set(available.map((a) => a.name));
-  const board = boardNow(picks).filter((b) => availSet.size === 0 || availSet.has(b.name)).slice(0, 22);
+  const board = fullBoard.filter((b) => availSet.size === 0 || availSet.has(b.name)).slice(0, 22);
   const availNames = new Set(board.map((b) => b.name));
-  const pickNo = picks.length + 1;
-  const round = Math.floor((pickNo - 1) / draft.settings.teams) + 1;
+  const round = myDrafted.length + 1;
   const have = roster.length ? `Your roster so far: ${roster.join(", ")}.` : "Your roster is empty.";
   const shortlist = board
     .map((r, i) => `${i + 1}. ${r.name} — ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier}${r.injuryStatus ? ` [${r.injuryStatus}]` : ""}`)
     .join("\n");
-  // The live draft flow: what's been picked and by whom, so the coach reacts to
-  // runs and to what rivals are building.
-  const recent = picks
+  const recentStr = recent
     .slice(-10)
-    .map((p) => `${p.pick_no}. ${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""} (${p.metadata?.["position"] ?? "?"}) → team ${p.draft_slot}${p.draft_slot === myDraftSlot ? " [YOU]" : ""}`)
+    .map((p) => `R${p.round} team ${p.slot}${p.slot === myDraftSlot ? " [YOU]" : ""}: ${p.name} (${p.pos})`)
     .join("\n") || "(no picks yet)";
   const res = await runAgent({
     partial: false, // whole assistant messages → clean full reasoning in the console
     onEvent: (ev) => {
-      // Stream the model's full output to the live console as it arrives.
       if (ev.type !== "assistant") return;
       const msg = ev["message"];
       const content = msg && typeof msg === "object" ? (msg as { content?: unknown }).content : undefined;
@@ -231,8 +223,8 @@ async function refreshPlan(picks: DraftPick[], available: { name: string; pos: s
       }
     },
     prompt:
-      `You are the coach in a ${draft.settings.teams}-team ${scoringLabel} snake draft, approaching pick ${pickNo} (round ${round}). ${have}\n` +
-      `Recent picks (react to runs and what rivals are stacking):\n${recent}\n\n` +
+      `You are the coach in a ${teams}-team ${scoringLabel} snake draft, about to make your round ${round} pick. ${have}\n` +
+      `Recent picks (react to runs and what rivals are stacking):\n${recentStr}\n\n` +
       `Best available right now, by value under our scoring:\n${shortlist}\n\n` +
       `Build the strongest STARTING lineup. Prioritise RB and WR heavily early (you start 2 RB, 2 WR, and 2 FLEX). ` +
       `Because RB is scarcer and fills your FLEX, build real RB depth — aim for about five RBs by the end — and don't ` +
@@ -241,10 +233,9 @@ async function refreshPlan(picks: DraftPick[], available: { name: string; pos: s
       `the best value AND you have none. Take exactly ONE QB in this 1-QB league and only from the mid rounds; do NOT ` +
       `draft a backup QB (leave that to the very last round, if at all). Draft K and DEF only in the final 2-3 rounds. ` +
       `Anticipate RB/WR runs and respect tiers over raw rank. ` +
-      `First write two or three sentences of reasoning explaining your thinking about the board, runs, and roster needs. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
+      `First write two or three sentences of reasoning about the board, runs, and roster needs. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
   });
   if (res.error || !res.text.trim()) {
-    // Agent unavailable — keep drafting deterministically off the value board.
     plan = board.map((b) => b.name);
     lastReasoning = `Agent unavailable (${res.error ?? "empty response"}); using value board.`;
     agentBackoffUntil = Date.now() + 60_000;
@@ -263,16 +254,14 @@ async function refreshPlan(picks: DraftPick[], available: { name: string; pos: s
     .filter((n) => availNames.has(n));
   plan = parsed.length ? parsed : board.map((b) => b.name);
   lastRefresh = Date.now();
-  logEvent("coach", "plan", `Plan @pick ${pickNo} (R${round}): ${plan.slice(0, 4).join(", ")}`, { reasoning: lastReasoning, plan, roster });
+  logEvent("coach", "plan", `Plan @R${round}: ${plan.slice(0, 4).join(", ")}`, { reasoning: lastReasoning, plan, roster });
 }
 
-// Initial plan + backstop queue (read the live board once so both are built
-// from what's actually in the room).
+// Initial plan + backstop queue (read the live board once).
 {
-  const picks0 = await sleeper.draftPicks(draftId);
-  const s0 = (await api("/draft-state")) as { available?: { name: string; pos: string }[] };
-  await refreshPlan(picks0, s0.available ?? []);
-  await pushQueue(picks0);
+  const s0 = await draftState();
+  await refreshPlan(s0.available, await boardPicks());
+  await pushQueue();
 }
 
 // Rehearsal: start the draft ourselves once the queue is set.
@@ -282,57 +271,40 @@ if (rehearse) {
   await Bun.sleep(4000);
 }
 
-// Resolve our draft slot before picking anything — draft_order populates when
-// the draft starts and may lag a moment. Never pick until we know our slot.
+// Resolve our slot before picking anything (draft_order populates on start).
 for (let i = 0; i < 40 && myDraftSlot == null; i++) {
   await resolveSlot();
   if (myDraftSlot == null) await Bun.sleep(1500);
 }
 console.log(`[draft-run] our draft slot: ${myDraftSlot ?? "unresolved"}`);
-console.log("[draft-run] entering pick loop (waiting for our turns)…");
-const rounds = draft.settings.rounds;
 
-// Deterministic state from the LIVE browser + our ACTUAL roster count:
-//  - Our turn = our pick button is live (onClock), debounced across two reads to
-//    dodge the brief all-buttons flash at kickoff.
-//  - Our round = how many players we've actually drafted + 1 (our Nth pick is in
-//    round N in a snake). Read from the roster, so it can't drift.
-//  - A pick is confirmed by our ROSTER GROWING, not by the button clearing —
-//    which was wrong for back-to-back turns (slots 1 and 8 pick twice around the
-//    round turn, so the button stays lit and a real pick looked like a miss).
-//  - Because the pick button is only clickable on our real turn, a stray attempt
-//    off-turn just fails harmlessly, so re-entering for a back-to-back is safe.
-let lastBoardAt = 0;
-
-async function draftState(): Promise<{ onClock: boolean; available: { name: string; pos: string }[] }> {
-  const s = (await api("/draft-state")) as { onClock?: boolean; available?: { name: string; pos: string }[] };
-  return { onClock: s.onClock === true, available: s.available ?? [] };
+// Seed our local roster from any picks already on the board at our slot (e.g.
+// keepers), so round counting starts from reality.
+for (const p of (await boardPicks()).filter((p) => p.slot === myDraftSlot)) {
+  myDrafted.push({ name: p.name, position: p.pos });
 }
+console.log(`[draft-run] entering pick loop (seeded ${myDrafted.length} of our picks)…`);
 
+let lastBoardAt = 0;
 for (;;) {
   await ensureRoom();
   await resolveSlot();
-  const picks = await sleeper.draftPicks(draftId);
-  const myCount = myRoster(picks).length; // players we've actually drafted
-  if (myCount >= rounds) {
+  if (myDraftSlot == null) { await Bun.sleep(1500); continue; }
+  if (myDrafted.length >= rounds) {
     console.log(`[draft-run] all ${rounds} of our picks made`);
     break;
   }
-  const round = myCount + 1;
-  const globalPick = picks.length + 1; // real draft position, for the console
-  const { onClock, available } = await draftState();
+  const round = myDrafted.length + 1;
+  const counts = localCounts();
+  const { onClock, available, drafted } = await draftState();
+  const globalPick = drafted + 1;
 
-  // Observability: publish the live board view on a light time throttle, keyed
-  // to the REAL draft position so the dashboard doesn't read a round behind.
   if (Date.now() - lastBoardAt > 5000) { logBoard(globalPick, round, available); lastBoardAt = Date.now(); }
 
   if (!onClock) {
-    // Off the clock: troll a rival who took one of our targets, then adjust the
-    // PLAN (throttled, paused during agent backoff).
+    const picks = await boardPicks();
     await maybeTroll(picks).catch(() => {});
-    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) {
-      await refreshPlan(picks, available);
-    }
+    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) await refreshPlan(available, picks);
     await Bun.sleep(1500);
     continue;
   }
@@ -343,31 +315,35 @@ for (;;) {
   const confirm = await draftState();
   if (!confirm.onClock) continue;
 
-  // ON THE CLOCK — pick from the LIVE available set (the DOM truth), best per our
-  // board + roster caps. Re-read once if the read came back empty.
   let liveSet = new Set(confirm.available.map((a) => a.name));
-  if (liveSet.size === 0) {
-    const retry = await draftState();
-    liveSet = new Set(retry.available.map((a) => a.name));
-  }
-  const board = boardNow(picks);
-  const byName = new Map(board.map((b) => [b.name, b]));
-  const counts = myPositionCounts(picks, myDraftSlot);
+  if (liveSet.size === 0) { liveSet = new Set((await draftState()).available.map((a) => a.name)); }
+
   const availOk = (b: RankedPlayer): boolean => liveSet.size === 0 || liveSet.has(b.name);
   const needOk = (pos: string): boolean => (counts[pos] ?? 0) < positionCap(pos, round);
-  const target =
-    plan.map((nm) => byName.get(nm)).find((b): b is RankedPlayer => !!b && availOk(b) && needOk(b.position)) ??
-    board.find((b) => availOk(b) && needOk(b.position)) ??
-    board.find((b) => availOk(b)) ??
-    board[0];
-  if (!target) {
-    console.log("[draft-run] no target available");
-    await Bun.sleep(1500);
-    continue;
+
+  // Must-fill the mandatory starters (DEF, K): value never prioritises them, so
+  // reserve the final picks. They're usually outside the visible window, so pick
+  // the best by value and let makePick search for it (no availOk gate).
+  const mandatoryMissing = ["DEF", "K"].filter((p) => (counts[p] ?? 0) === 0);
+  const remaining = rounds - myDrafted.length; // picks left, including this one
+  let target: RankedPlayer | undefined;
+  let forcedMandatory = false;
+  if (mandatoryMissing.length && remaining <= mandatoryMissing.length) {
+    const pos = mandatoryMissing[0]!;
+    target = fullBoard.find((b) => b.position === pos);
+    forcedMandatory = !!target;
   }
-  console.log(`[debug] our pick #${round} (global ${globalPick}) slot=${myDraftSlot} availN=${liveSet.size} target=${target.name} (${target.position})`);
-  console.log(`[debug] avail(live): ${[...liveSet].slice(0, 8).join(", ") || "(empty)"}`);
-  logBoard(globalPick, round, confirm.available, target.name); // publish with the chosen target
+  if (!target) {
+    target =
+      plan.map((nm) => byName.get(nm)).find((b): b is RankedPlayer => !!b && availOk(b) && needOk(b.position)) ??
+      fullBoard.find((b) => availOk(b) && needOk(b.position)) ??
+      fullBoard.find((b) => availOk(b)) ??
+      fullBoard[0];
+  }
+  if (!target) { console.log("[draft-run] no target available"); await Bun.sleep(1500); continue; }
+
+  console.log(`[debug] our R${round} (global ${globalPick}) slot=${myDraftSlot} availN=${liveSet.size} target=${target.name} (${target.position})${forcedMandatory ? " [must-fill]" : ""}`);
+  logBoard(globalPick, round, confirm.available, target.name);
   lastBoardAt = Date.now();
   const t0 = Date.now();
   try {
@@ -375,25 +351,24 @@ for (;;) {
   } catch (e) {
     console.log(`[draft-run] pick error: ${e instanceof Error ? e.message : String(e)}`);
   }
-  // Confirm by OUR ROSTER GROWING (back-to-back safe). Poll the picks until our
-  // count exceeds what it was; if it never does, the pick didn't take.
+  // Confirm the pick landed by OUR cell count on the board growing (DOM truth;
+  // works for both visible picks and out-of-window DEF/K, and for back-to-back).
   let landed = false;
-  for (let i = 0; i < 14; i++) {
-    if (myRoster(await sleeper.draftPicks(draftId)).length > myCount) { landed = true; break; }
-    await Bun.sleep(1000);
+  for (let i = 0; i < 16; i++) {
+    if ((await myBoardCount()) > myDrafted.length) { landed = true; break; }
+    await Bun.sleep(800);
   }
   if (landed) {
-    const after = await sleeper.draftPicks(draftId);
+    myDrafted.push({ name: target.name, position: target.position });
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`[draft-run] our pick #${round} = ${target.name} (${secs}s)`);
-    logEvent("coach", "draft-pick", `Our pick #${round} (R${round}): ${target.name} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
-    // Off-clock work: refresh the small backstop queue and adjust the plan.
-    await pushQueue(after).catch(() => {});
-    if (Date.now() > agentBackoffUntil) await refreshPlan(after, confirm.available).catch(() => {});
+    console.log(`[draft-run] our R${round} = ${target.name} (${secs}s)`);
+    logEvent("coach", "draft-pick", `Our R${round} pick: ${target.name} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
+    await pushQueue().catch(() => {});
+    if (Date.now() > agentBackoffUntil) await refreshPlan(confirm.available, await boardPicks()).catch(() => {});
   } else {
-    console.log(`[draft-run] our pick #${round} did NOT register (target ${target.name})`);
-    logEvent("coach", "pick-miss", `Our pick #${round} target ${target.name} didn't register.`, { target: target.name });
-    if (!rehearse) await sendAlert("Draft: pick may have failed", `Our pick #${round} target ${target.name} didn't register — check the draft.`);
+    console.log(`[draft-run] our R${round} did NOT register (target ${target.name})`);
+    logEvent("coach", "pick-miss", `Our R${round} target ${target.name} didn't register.`, { target: target.name });
+    if (!rehearse) await sendAlert("Draft: pick may have failed", `Round ${round} target ${target.name} didn't register — check the draft.`);
     await Bun.sleep(1500);
   }
 }
@@ -403,7 +378,7 @@ try {
 } catch {
   /* already gone */
 }
-const finalRoster = myRoster(await sleeper.draftPicks(draftId));
+const finalRoster = myDrafted.map((d) => d.name);
 logEvent("coach", "draft-complete", `Draft complete. Roster: ${finalRoster.join(", ")}`, { roster: finalRoster });
 console.log(`[draft-run] my roster: ${finalRoster.join(", ")}`);
 
