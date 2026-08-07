@@ -77,6 +77,39 @@ export async function open(): Promise<{ ctx: BrowserContext; page: Page }> {
   return { ctx, page };
 }
 
+// Import an existing Sleeper session (captured from a browser where the user is
+// already logged in) into the container profile, sidestepping the login/captcha
+// entirely. `entries` is the logged-in origin's localStorage (key -> value).
+// Optionally also seeds cookies. Persists to the profile on success.
+export async function importSession(
+  entries: Record<string, string>,
+  cookies?: { name: string; value: string; domain: string; path: string }[],
+): Promise<boolean> {
+  const ctx = await launchContext();
+  const page = await firstPage(ctx);
+  try {
+    if (cookies?.length) await ctx.addCookies(cookies);
+    await page.goto(SLEEPER, { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(1500);
+    await page.evaluate((data) => {
+      for (const [k, v] of Object.entries(data)) {
+        try {
+          window.localStorage.setItem(k, v as string);
+        } catch {
+          /* ignore quota/read-only keys */
+        }
+      }
+    }, entries);
+    await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(3500);
+    const ok = await currentPageLoggedIn(page);
+    await screenshot(page, ok ? "import-success" : "import-failed");
+    return ok;
+  } finally {
+    await ctx.close();
+  }
+}
+
 // #region actions (selector bodies completed in Phase C against the live DOM)
 
 // Draft a specific player by name from the draft board.

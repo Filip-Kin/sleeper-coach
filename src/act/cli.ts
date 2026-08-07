@@ -13,7 +13,7 @@
 //
 // Kept intentionally small and explicit so the agent's authority is auditable.
 
-import { open, isLoggedIn, openForLogin, screenshot, makePick, setQueue, setLineup, respondTrade, sendTrade, leagueUrl } from "./sleeper.ts";
+import { open, isLoggedIn, openForLogin, importSession, screenshot, makePick, setQueue, setLineup, respondTrade, sendTrade, leagueUrl } from "./sleeper.ts";
 
 const [command, ...args] = process.argv.slice(2);
 
@@ -36,6 +36,19 @@ async function main(): Promise<void> {
       const ok = await openForLogin(minutes * 60_000);
       console.log(ok ? "LOGIN_SUCCESS" : "LOGIN_TIMEOUT");
       process.exit(ok ? 0 : 4);
+      break;
+    }
+    case "import-session": {
+      // Reads a JSON file: either {localStorage entries...} or
+      // { localStorage: {...}, cookies: [...] }. Default path avoids putting
+      // the token on the command line.
+      const file = args[0] ?? "/data/sleeper-coach/session.json";
+      const raw = (await Bun.file(file).json()) as Record<string, unknown>;
+      const entries = (raw.localStorage && typeof raw.localStorage === "object" ? raw.localStorage : raw) as Record<string, string>;
+      const cookies = Array.isArray(raw.cookies) ? (raw.cookies as { name: string; value: string; domain: string; path: string }[]) : undefined;
+      const ok = await importSession(entries, cookies);
+      console.log(ok ? "SESSION_OK" : "SESSION_FAILED");
+      process.exit(ok ? 0 : 5);
       break;
     }
     case "shot": {
