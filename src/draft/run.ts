@@ -159,6 +159,20 @@ async function pushQueue(): Promise<void> {
   if (q.length) await api("/queue", { players: q }).catch(() => {});
 }
 
+// Log every NEW board pick once, so downstream consumers (the Discord announcer)
+// have the full draft — who took whom, in which round — to make pick-specific
+// commentary. Names here are the board's abbreviated form ("B. Robinson").
+const seenBoardPicks = new Set<string>();
+function logNewBoardPicks(picks: { round: number; slot: number; name: string; pos: string }[]): void {
+  for (const p of picks) {
+    const key = `${p.round}.${p.slot}.${p.name}`;
+    if (seenBoardPicks.has(key)) continue;
+    seenBoardPicks.add(key);
+    const mine = p.slot === myDraftSlot;
+    logEvent("coach", "board-pick", `${mine ? "WE" : `Team ${p.slot}`} drafted ${p.name} (${p.pos}) in R${p.round}`, { round: p.round, slot: p.slot, name: p.name, pos: p.pos, mine });
+  }
+}
+
 // #region emoji troll — react on Sleeper when a rival snipes a player we wanted
 const TROLL = process.env.TROLL !== "0"; // on by default; TROLL=0 disables
 const reactedPicks = new Set<string>(); // keyed by "round.slot.name"
@@ -307,6 +321,7 @@ for (;;) {
 
   if (!onClock) {
     const picks = await boardPicks();
+    logNewBoardPicks(picks);
     await maybeTroll(picks).catch(() => {});
     if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) await refreshPlan(available, picks);
     await Bun.sleep(1500);

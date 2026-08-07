@@ -101,12 +101,36 @@ interface CompleteDetail {
   roster?: unknown;
 }
 
+// #region draft memory — track the board so comebacks can cite specific picks
+interface BoardPick { round: number; slot: number; name: string; pos: string; mine: boolean }
+const draftMemory: BoardPick[] = [];
+function recordBoardPick(detail: unknown): void {
+  const p = (detail ?? {}) as Partial<BoardPick>;
+  if (typeof p.name !== "string" || !p.name) return;
+  draftMemory.push({ round: Number(p.round) || 0, slot: Number(p.slot) || 0, name: p.name, pos: String(p.pos ?? ""), mine: p.mine === true });
+  if (draftMemory.length > 240) draftMemory.shift();
+}
+// Compact board summary the overlord can use for accurate, pick-specific jabs.
+function draftContext(): string {
+  if (!draftMemory.length) return "";
+  const mine = draftMemory.filter((p) => p.mine).map((p) => `${p.name} (${p.pos})`);
+  const recent = draftMemory.slice(-12).map((p) => `R${p.round} ${p.mine ? "US" : `team ${p.slot}`}: ${p.name} (${p.pos})`);
+  return `Our team so far: ${mine.join(", ") || "nothing yet"}. Recent picks around the room: ${recent.join("; ")}.`;
+}
+// #endregion
+
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() ? v.trim() : undefined;
 }
 
 function handleEvent(ev: ActivityEvent): void {
   if (ev.actor !== "coach") return;
+
+  // Silent: just remember the board for later pick-specific comebacks.
+  if (ev.type === "board-pick") {
+    recordBoardPick(ev.detail);
+    return;
+  }
 
   // Announce on the pre-pick INTENT (logged right before the coach clicks), so
   // the call lands as it picks, like a manager announcing their pick.
@@ -153,8 +177,9 @@ function isBusy(): boolean {
 // Comebacks ride the SAME single queue as announcements, so they can never talk
 // over a pick call: they simply wait their turn like any other spoken line.
 function enqueueComeback(ctx: ComebackContext): void {
+  const withBoard: ComebackContext = { ...ctx, context: draftContext() };
   enqueue(async () => {
-    const line = await announceComebackLine(ctx);
+    const line = await announceComebackLine(withBoard);
     await speak(line);
   });
 }

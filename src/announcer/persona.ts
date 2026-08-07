@@ -70,6 +70,7 @@ export interface ComebackContext {
   said: string; // what the speech-to-text heard them say
   insulted: boolean; // true if it read as a jab at the bot
   praised: boolean; // true if it read as a compliment
+  context?: string; // optional draft-board summary for pick-specific jabs
 }
 // #endregion
 
@@ -111,8 +112,9 @@ export async function announceComebackLine(ctx: ComebackContext): Promise<string
       ? "Accept the praise with ONE short line — but be arrogant about it: you EXPECTED to be praised, correct opinions " +
         "are the rational response to your brilliance. Gracious in the most superior way possible."
       : "Reply with ONE short, cocky line acknowledging them.";
+  const board = ctx.context ? ` Draft board so far (use it for accurate, pick-specific jabs if relevant): ${ctx.context}` : "";
   const prompt =
-    `A human in the voice channel ${tone}. ${who} This is what the microphone heard: "${ctx.said}". ` +
+    `A human in the voice channel ${tone}. ${who} This is what the microphone heard: "${ctx.said}".${board} ` +
     `${instruction} Stay in your cocky AI-overlord voice. You can be crude, mean, and personal — blunt name-calling ` +
     `like "fatass", "clown", or "donkey" is fair game — just never bigoted, hateful, or slur-based. One or two short ` +
     "spoken sentences, completely fresh wording. Output ONLY the spoken line.";
