@@ -94,20 +94,51 @@ export async function importSession(
 
 // #region actions (selector bodies completed in Phase C against the live DOM)
 
-// Draft a specific player by name from the draft board.
-export async function makePick(page: Page, playerName: string): Promise<void> {
-  await page.goto(draftUrl(), { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(2000);
-  await screenshot(page, `pick-before-${slug(playerName)}`);
-  throw new Error("makePick: selectors pending Phase C DOM capture");
+// Ensure we're in a draft room. If already in one (e.g. a mock), stay; else go
+// to this league's real draft.
+async function ensureDraftRoom(page: Page): Promise<void> {
+  if (!page.url().includes("/draft/")) {
+    await page.goto(draftUrl(), { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(3000);
+  }
 }
 
-// Set the Sleeper draft queue (the autopick fallback) to a ranked list.
+// Locate a player's row in the draft board by name (searches to narrow first).
+async function findPlayerRow(page: Page, playerName: string) {
+  const search = page.getByPlaceholder(/find player/i);
+  await search.click();
+  await search.fill("");
+  await search.fill(playerName);
+  await page.waitForTimeout(800);
+  return page.locator(".player-rank-item2").filter({ hasText: playerName }).first();
+}
+
+// Draft a player. The pick button (.draft-button) is only live when we're on
+// the clock; otherwise it carries a .disable class and the click is a no-op.
+export async function makePick(page: Page, playerName: string): Promise<void> {
+  await ensureDraftRoom(page);
+  const row = await findPlayerRow(page, playerName);
+  const btn = row.locator(".draft-button:not(.disable)");
+  await btn.click({ timeout: 8000 });
+  await page.waitForTimeout(600);
+  // Sleeper shows a confirm ("Draft <player>") for the on-the-clock pick.
+  const confirm = page.getByRole("button", { name: /^draft/i }).first();
+  if (await confirm.isVisible().catch(() => false)) await confirm.click().catch(() => {});
+  await page.waitForTimeout(800);
+  await screenshot(page, `picked-${slug(playerName)}`);
+}
+
+// Set the Sleeper draft queue (the autopick fallback) to a ranked list, in
+// order. Each player's .queue-action adds them to the queue.
 export async function setQueue(page: Page, playerNames: string[]): Promise<void> {
-  await page.goto(draftUrl(), { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(2000);
-  await screenshot(page, "queue-before");
-  throw new Error(`setQueue: selectors pending Phase C (${playerNames.length} players)`);
+  await ensureDraftRoom(page);
+  for (const name of playerNames) {
+    const row = await findPlayerRow(page, name);
+    await row.locator(".queue-action").click({ timeout: 5000 });
+    await page.waitForTimeout(350);
+  }
+  await page.getByPlaceholder(/find player/i).fill("");
+  await screenshot(page, "queue-set");
 }
 
 // Set this week's starting lineup. `starters` is an ordered list of player ids

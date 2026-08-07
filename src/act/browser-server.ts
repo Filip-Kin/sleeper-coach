@@ -50,6 +50,15 @@ Bun.serve({
         }
         case "/shot":
           return Response.json({ path: await run(() => screenshot(page, str(b.name, "current"))) });
+        case "/eval":
+          // Dev/authoring tool: evaluate an expression in the page. Internal only.
+          return Response.json({ result: await run(() => page.evaluate(str(b.expr))) });
+        case "/click":
+          await run(async () => {
+            if (b.text) await page.getByText(new RegExp(str(b.text), "i")).first().click({ timeout: 8000 });
+            else await page.click(str(b.selector), { timeout: 8000 });
+          });
+          return Response.json({ ok: true });
         case "/pick":
           await run(() => makePick(page, str(b.player))); return Response.json({ ok: true });
         case "/queue":
