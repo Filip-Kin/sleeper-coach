@@ -15,6 +15,11 @@ const PORT = Number(process.env.BROWSER_API_PORT ?? 9223);
 
 const ctx = await launchContext();
 const page = await firstPage(ctx);
+// Playwright auto-DISMISSES native dialogs by default, which silently cancels
+// confirmations like "Start the draft?". Auto-accept them instead.
+const acceptDialogs = (p: import("playwright").Page) => p.on("dialog", (d) => d.accept().catch(() => {}));
+acceptDialogs(page);
+ctx.on("page", acceptDialogs);
 await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" }).catch(() => {});
 console.log("[browser-server] launched; league open");
 
