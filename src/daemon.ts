@@ -5,6 +5,7 @@ import { config } from "./config.ts";
 import { sleeper } from "./sleeper/client.ts";
 import { runAgent } from "./agent/runner.ts";
 import { sendAlert } from "./alert.ts";
+import { logEvent } from "./log.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
 // shape: an infinite poll loop with durable SQLite state, each cycle wrapped so
@@ -48,14 +49,16 @@ function markSeen(txId: string, status: string): void {
 }
 
 async function handlePendingTrade(tx: TransactionLike): Promise<void> {
-  await sendAlert("Trade offer", `Pending trade ${tx.transaction_id} involves your roster. Evaluating.`);
+  // Trades are the coach's call, not Filip's — evaluate and decide autonomously.
+  // Logged to the activity feed for watching; no phone ping (per Filip).
+  logEvent("coach", "trade-offer", `Pending trade ${tx.transaction_id} involves us; evaluating.`, { transaction_id: tx.transaction_id });
   const prompt = `A pending trade (transaction id ${tx.transaction_id}) has been offered involving your roster (roster_id ${config.rosterId}). Investigate it with the coach CLI, evaluate it on the merits for winning the league, and either accept or reject it using the act CLI. Explain your reasoning as you go.`;
   const result = await runAgent({ prompt });
   db.run("INSERT INTO agent_runs (kind, ref, session_id, exit_code, started) VALUES (?, ?, ?, ?, ?)", [
     "trade", tx.transaction_id, result.sessionId, result.exitCode, Date.now(),
   ]);
   markSeen(tx.transaction_id, "handled");
-  await sendAlert("Trade handled", `Finished evaluating trade ${tx.transaction_id} (exit ${result.exitCode}).`);
+  logEvent("coach", "trade-decided", `Handled trade ${tx.transaction_id}.`, { transaction_id: tx.transaction_id, reasoning: result.text.slice(0, 400) });
 }
 
 // #region auth watch
@@ -75,9 +78,10 @@ async function checkAuth(): Promise<void> {
   });
   const ok = (await proc.exited) === 0;
   if (!ok && lastAuthOk) {
-    await sendAlert("Sleeper login lost", "The coach's Sleeper session is no longer valid. Re-import a session (act import-session) so it can set lineups and make picks.");
+    // This genuinely needs Filip: re-export/import a session. Ping the phone.
+    await sendAlert("Sleeper login lost", "The coach's Sleeper session is no longer valid. Re-import a session so it can act on your team.");
   } else if (ok && !lastAuthOk) {
-    await sendAlert("Sleeper login restored", "The coach is authenticated again.");
+    logEvent("system", "auth-restored", "Sleeper session valid again.");
   }
   lastAuthOk = ok;
   lastAuthCheck = Date.now();
@@ -101,16 +105,16 @@ async function pollOnce(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await sendAlert("Coach online", "Daemon started; watching for trade offers.");
+  logEvent("daemon", "online", "Daemon started; watching for trades and auth.");
   console.log(`[daemon] polling every ${POLL_INTERVAL_MS / 1000}s, db=${DB_PATH}`);
   for (;;) {
     try {
       await pollOnce();
-      if (Date.now() - lastAuthCheck > AUTH_CHECK_MS) await checkAuth();
+      if (!draftActive() && Date.now() - lastAuthCheck > AUTH_CHECK_MS) await checkAuth();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[daemon] poll error: ${msg}`);
-      await sendAlert("Poll error", msg);
+      logEvent("daemon", "poll-error", msg);
     }
     await Bun.sleep(POLL_INTERVAL_MS);
   }

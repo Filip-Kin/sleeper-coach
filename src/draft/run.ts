@@ -18,6 +18,7 @@ import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
 import type { DraftPick } from "../sleeper/types.ts";
 import { logEvent } from "../log.ts";
+import { sendAlert } from "../alert.ts";
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
@@ -76,6 +77,39 @@ function boardNow(picks: DraftPick[]): RankedPlayer[] {
   return rankByVor(projections, league).filter((r) => !drafted.has(r.playerId));
 }
 
+// Whose slot is on the clock at pickNo, in a snake draft.
+function slotOnClock(pickNo: number, teams: number): number {
+  const idx = (pickNo - 1) % teams;
+  const round = Math.ceil(pickNo / teams);
+  return round % 2 === 1 ? idx + 1 : teams - idx;
+}
+
+// How many of each position we've already drafted (our slot only).
+function myPositionCounts(picks: DraftPick[], slot: number | null): Record<string, number> {
+  const c: Record<string, number> = {};
+  if (slot == null) return c;
+  for (const p of picks) {
+    if (p.draft_slot !== slot) continue;
+    const pos = p.metadata?.position;
+    if (pos) c[pos] = (c[pos] ?? 0) + 1;
+  }
+  return c;
+}
+
+// Roster-construction guardrail (8-team, 1QB/2RB/2WR/1TE/2FLEX/K/DEF + bench).
+// Encodes Filip's sense: one TE, don't reach; RB/WR depth; no early K/DEF/2nd QB.
+function positionCap(pos: string, round: number): number {
+  switch (pos) {
+    case "QB": return round >= 9 ? 2 : 1;
+    case "TE": return round >= 13 ? 2 : 1;
+    case "K": return round >= 14 ? 1 : 0;
+    case "DEF": return round >= 13 ? 1 : 0;
+    case "RB": return 7;
+    case "WR": return 7;
+    default: return 6;
+  }
+}
+
 let plan: string[] = []; // ordered target names, best first
 let lastRefresh = 0;
 let lastReasoning = "";
@@ -110,12 +144,21 @@ async function refreshPlan(picks: DraftPick[]): Promise<void> {
   const shortlist = board
     .map((r, i) => `${i + 1}. ${r.name} — ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier}${r.injuryStatus ? ` [${r.injuryStatus}]` : ""}`)
     .join("\n");
+  // The live draft flow: what's been picked and by whom, so the coach reacts to
+  // runs and to what rivals are building.
+  const recent = picks
+    .slice(-10)
+    .map((p) => `${p.pick_no}. ${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""} (${p.metadata?.["position"] ?? "?"}) → team ${p.draft_slot}${p.draft_slot === myDraftSlot ? " [YOU]" : ""}`)
+    .join("\n") || "(no picks yet)";
   const res = await runAgent({
     prompt:
       `You are the coach in a ${draft.settings.teams}-team ${scoringLabel} snake draft, approaching pick ${pickNo} (round ${round}). ${have}\n` +
+      `Recent picks (react to runs and what rivals are stacking):\n${recent}\n\n` +
       `Best available right now, by value under our scoring:\n${shortlist}\n\n` +
-      `Give your ranked plan for your upcoming pick(s): weigh roster needs, tiers, positional scarcity and runs, and value. ` +
-      `Early rounds favour the best RB/WR and genuinely elite/scarce TE; don't reach for QB/K/DEF. Anticipate runs. ` +
+      `Build the strongest STARTING lineup. Prioritise RB and WR heavily early (you start 2 RB, 2 WR, and 2 FLEX). ` +
+      `You need only ONE tight end: do NOT reach for a TE, and never plan a second TE until the very last rounds; ` +
+      `a TE is worth an early pick only if it is clearly the best value AND you have none. Take at most one QB and not ` +
+      `before mid-draft. Draft K and DEF only in the final 2-3 rounds. Anticipate RB/WR runs and respect tiers over raw rank. ` +
       `First write ONE short sentence of reasoning. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
   });
   const lines = res.text.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -143,54 +186,67 @@ if (rehearse) {
 }
 
 console.log("[draft-run] entering pick loop (waiting for our turns)…");
+const teams = draft.settings.teams;
 for (;;) {
   await ensureRoom();
+  await resolveSlot();
   const picks = await sleeper.draftPicks(draftId);
   const n = picks.length;
   if (n >= total) {
     console.log(`[draft-run] draft complete (${n} picks)`);
     break;
   }
-  const availNames = new Set(boardNow(picks).map((b) => b.name));
-  const onClock = (await api("/on-clock")).onClock === true;
+  const pickNo = n + 1;
+  const round = Math.floor((pickNo - 1) / teams) + 1;
+  const domReady = (await api("/on-clock")).onClock === true;
+  // It is our turn only when the snake math says our slot is up AND the board
+  // is live. Falls back to the DOM if we couldn't resolve our slot.
+  const myTurn = myDraftSlot == null ? domReady : slotOnClock(pickNo, teams) === myDraftSlot && domReady;
 
-  if (onClock) {
-    const pickNo = n + 1;
-    if (!plan.some((nm) => availNames.has(nm))) await refreshPlan(picks);
-    const target = plan.find((nm) => availNames.has(nm)) ?? boardNow(picks)[0]?.name;
-    if (!target) {
-      console.log("[draft-run] no target available?!");
-      break;
-    }
-    console.log(`[draft-run] ON THE CLOCK pick ${pickNo} → drafting ${target}`);
-    const t0 = Date.now();
-    try {
-      await api("/pick", { player: target });
-    } catch (e) {
-      console.log(`[draft-run] pick error: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    // Poll a few seconds for the pick to register (API lags the click a moment).
-    let after = await sleeper.draftPicks(draftId);
-    for (let i = 0; i < 5 && !after.find((p) => p.pick_no === pickNo); i++) {
-      await Bun.sleep(1200);
-      after = await sleeper.draftPicks(draftId);
-    }
-    const mine = after.find((p) => p.pick_no === pickNo);
-    const round = Math.floor((pickNo - 1) / draft.settings.teams) + 1;
-    if (mine) {
-      const nm = `${mine.metadata?.["first_name"] ?? ""} ${mine.metadata?.["last_name"] ?? ""}`.trim();
-      const secs = ((Date.now() - t0) / 1000).toFixed(1);
-      console.log(`[draft-run] pick ${pickNo} = ${nm} (${secs}s)`);
-      logEvent("coach", "draft-pick", `R${round} pick ${pickNo}: ${nm}`, { target, reasoning: lastReasoning, seconds: Number(secs) });
-    } else {
-      console.log(`[draft-run] pick ${pickNo} not registered (target ${target})`);
-    }
-    await refreshPlan(after); // adjust for the next turn, reacting to what just happened
-  } else {
-    // Between picks: adjust the plan periodically as others draft (throttled so
-    // a mock's instant CPU picks don't trigger a refresh storm).
-    if (Date.now() - lastRefresh > 30_000) await refreshPlan(picks);
+  if (!myTurn) {
+    // Between picks: adjust the plan (agent) + refresh the queue backstop.
+    // Throttled so a mock's instant CPU picks don't storm the agent.
+    if (Date.now() - lastRefresh > 20_000) await refreshPlan(picks);
     await Bun.sleep(2500);
+    continue;
+  }
+
+  // ON THE CLOCK — pick FAST from the plan, respecting roster caps. No agent
+  // call and no queue-building here; that all happens between picks.
+  const board = boardNow(picks);
+  const byName = new Map(board.map((b) => [b.name, b]));
+  const counts = myPositionCounts(picks, myDraftSlot);
+  const needOk = (pos: string): boolean => (counts[pos] ?? 0) < positionCap(pos, round);
+  const target =
+    plan.map((nm) => byName.get(nm)).find((b): b is RankedPlayer => !!b && needOk(b.position)) ??
+    board.find((b) => needOk(b.position)) ??
+    board[0];
+  if (!target) {
+    console.log("[draft-run] no target available");
+    break;
+  }
+  console.log(`[draft-run] ON THE CLOCK pick ${pickNo} (R${round}) → ${target.name} (${target.position})`);
+  const t0 = Date.now();
+  try {
+    await api("/pick", { player: target.name });
+  } catch (e) {
+    console.log(`[draft-run] pick error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  let after = await sleeper.draftPicks(draftId);
+  for (let i = 0; i < 6 && !after.find((p) => p.pick_no === pickNo); i++) {
+    await Bun.sleep(1200);
+    after = await sleeper.draftPicks(draftId);
+  }
+  const mine = after.find((p) => p.pick_no === pickNo && p.draft_slot === myDraftSlot);
+  if (mine) {
+    const nm = `${mine.metadata?.["first_name"] ?? ""} ${mine.metadata?.["last_name"] ?? ""}`.trim();
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    console.log(`[draft-run] pick ${pickNo} = ${nm} (${secs}s)`);
+    logEvent("coach", "draft-pick", `R${round} pick ${pickNo}: ${nm} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
+  } else {
+    // Pick didn't land — during a live draft this needs a human. Alert once.
+    console.log(`[draft-run] pick ${pickNo} did NOT register (target ${target.name})`);
+    if (!rehearse) await sendAlert("Draft: pick may have failed", `Pick ${pickNo} target ${target.name} didn't register — check the draft.`);
   }
 }
 

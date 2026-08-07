@@ -81,7 +81,6 @@ async function implement(req: Req): Promise<void> {
     req.status = "failed-typecheck";
     logEvent("engineer", "typecheck-fail", `Typecheck failed; reverting, not deploying: ${req.request}`, { id: req.id, output: tc.stderr.toString().slice(-600) });
     await $`git checkout -- .`.cwd(REPO).nothrow().quiet(); // discard the broken change
-    await notify("Engineer: change rejected (typecheck)", req.request);
     return;
   }
 
@@ -104,8 +103,8 @@ async function implement(req: Req): Promise<void> {
 
   req.status = "done";
   req.summary = summary.slice(0, 800);
+  // Logged for watching (activity feed + the public commit); not a phone ping.
   logEvent("engineer", "code-change", `Deployed change: ${req.request}`, { id: req.id, diffstat, summary: req.summary });
-  await notify("Engineer: change deployed", `${req.request}\n\n${diffstat}`);
 }
 
 // #region main

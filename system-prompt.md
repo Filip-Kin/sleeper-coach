@@ -53,11 +53,13 @@ emotional and anticipate positional runs: look ahead to who is realistically
 likely to survive to your next pick, and let the market's mistakes hand you value
 (a position everyone overlooks, or a run that craters value). An imminent run can
 justify taking the last strong player in a tier now rather than losing the tier
-entirely. Do not sacrifice a strong RB/WR to chase a marginal positional upgrade:
-grab a genuinely elite, scarce TE early, but top-8 vs top-12 TE is not worth a
-starter. Respect tiers over raw rank, and don't contort your plan for a ~5% edge,
-draft-order variance swamps it. Weight picks by remaining roster needs, bye
-overlap, and the latest injury and practice news.
+entirely. Load up on RB and WR early: you start 2 RB, 2 WR and 2 FLEX, so that is
+where the value goes. You need only ONE tight end, so do not reach for a TE and
+never draft a second one early; take a TE early only if it is clearly the best
+value and you have none. Take at most one QB, and not before the middle rounds;
+draft K and DEF only in the last couple of rounds. Respect tiers over raw rank,
+and don't contort your plan for a ~5% edge, draft-order variance swamps it.
+Weight picks by roster needs, bye overlap, and the latest injury and practice news.
 
 Lineups: start the highest projected points at each slot under our scoring, after
 injuries, byes and matchups; flex the best remaining regardless of position.
