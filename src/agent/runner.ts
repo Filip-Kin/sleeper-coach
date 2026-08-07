@@ -7,12 +7,14 @@ import { join } from "node:path";
 // dashboard (interactive, streamed to the browser).
 
 const REPO_ROOT = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
-const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
+const HOME = process.env.HOME ?? "/data/sleeper-coach/config";
+// The native claude install lives in HOME/.local/bin, which a fresh shell's
+// PATH may not include — resolve it absolutely.
+const CLAUDE_BIN = process.env.CLAUDE_BIN ?? `${HOME}/.local/bin/claude`;
 const MODEL = process.env.COACH_MODEL ?? "claude-opus-4-8";
 const EFFORT = process.env.COACH_EFFORT ?? "high";
 const SETTINGS = join(REPO_ROOT, "claude-settings.json");
 const SYSTEM_PROMPT_PATH = join(REPO_ROOT, "system-prompt.md");
-const HOME = process.env.HOME ?? "/config";
 // claude derives its transcript dir from cwd, replacing "/" with "-".
 const SESSION_STORE = join(HOME, ".claude", "projects", REPO_ROOT.replace(/\//g, "-"));
 
