@@ -49,7 +49,11 @@ export async function launchContext(): Promise<BrowserContext> {
       "--disable-dev-shm-usage",
     ],
   });
-  await ctx.addInitScript(STEALTH);
+  // Stealth is vestigial now that we authenticate via a transplanted session,
+  // and its navigator/chrome shims appear to break Sleeper's mock-draft
+  // creation (an internal "reading 'type'" error). Leave it off unless a
+  // detection problem returns. (STEALTH kept exported for that case.)
+  void STEALTH;
   return ctx;
 }
 
