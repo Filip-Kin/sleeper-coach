@@ -25,8 +25,8 @@ services:
       context: .
       dockerfile: Dockerfile.announcer
     container_name: sleeper-announcer
-    depends_on:
-      - sleeper-coach
+    # No depends_on the coach: the announcer only tails a file on the shared
+    # volume, and a depends_on made `up announcer` recreate the coach mid-draft.
     volumes:
       - /data/sleeper-coach:/data/sleeper-coach:ro
     env_file: /data/sleeper-coach/env

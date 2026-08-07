@@ -143,8 +143,12 @@ client.once(Events.ClientReady, async (c) => {
     voice = await connectVoice(client, config.guildId, config.voiceChannelId);
     console.log(`[announcer] joined voice channel ${config.voiceChannelId}; tailing ${config.activityLog}`);
   } catch (err) {
+    // A bad guild/channel or an un-invited bot is a permanent misconfig — exit
+    // CLEANLY so `restart: on-failure` doesn't hammer Discord's login. Fix the
+    // config (invite the bot / correct the IDs) and start the service again.
     console.error(`[announcer] could not join voice: ${err instanceof Error ? err.message : String(err)}`);
-    await shutdown(1);
+    console.error("[announcer] check the bot is invited to the guild and DISCORD_GUILD_ID / DISCORD_VOICE_CHANNEL_ID are correct, then restart.");
+    await shutdown(0);
     return;
   }
   stopTail = startTail({
