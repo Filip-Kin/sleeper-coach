@@ -1,0 +1,10 @@
+node_modules/
+data/
+*.log
+.env
+.env.*
+.DS_Store
+
+# Working notes and the agent's persistent brain stay local, not in git.
+brain/
+scratch/
