@@ -16,7 +16,7 @@ import { sleeper } from "../sleeper/client.ts";
 import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
-import { slotOnClock, positionCap } from "./logic.ts";
+import { positionCap } from "./logic.ts";
 import type { DraftPick } from "../sleeper/types.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
@@ -185,17 +185,16 @@ for (;;) {
   }
   const pickNo = n + 1;
   const round = Math.floor((pickNo - 1) / teams) + 1;
-  // Turn detection is PURELY deterministic: our turn iff our slot is on the
-  // clock per the snake math (our slot resolved from draft_order = draft is
-  // live). No DOM check — that both mis-fired on rivals' turns and made us sit
-  // idle on our own. makePick handles the actual clickability.
-  const myTurn = myDraftSlot != null && slotOnClock(pickNo, teams) === myDraftSlot;
-
-  if (!myTurn) {
-    // Between picks: adjust the plan (agent) + refresh the queue backstop.
-    // Throttled so a mock's instant CPU picks don't storm the agent.
+  // Trigger on the LIVE signal: Sleeper enables our draft button ONLY on our
+  // turn (confirmed: rivals' turns show it disabled). That's real-time, whereas
+  // the picks API lags, so we grab the pick the instant the clock opens. The
+  // snake math (slotOnClock) is used only to sanity-log the pick number.
+  const onClock = (await api("/on-clock")).onClock === true;
+  if (!onClock) {
+    // Between picks: adjust the plan (agent) + refresh the queue backstop,
+    // throttled so a mock's instant CPU picks don't storm the agent.
     if (Date.now() - lastRefresh > 20_000) await refreshPlan(picks);
-    await Bun.sleep(2500);
+    await Bun.sleep(1500);
     continue;
   }
 

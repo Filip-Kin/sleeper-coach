@@ -140,8 +140,11 @@ export async function setQueue(page: Page, playerNames: string[]): Promise<void>
   await requireDraftRoom(page);
   for (const name of playerNames) {
     const row = await findPlayerRow(page, name);
-    await row.locator(".queue-action").click({ timeout: 5000 });
-    await page.waitForTimeout(350);
+    // The queue "+" is hover-gated (row class show-watchlist-action), so plain
+    // clicks hesitate; hover to reveal it, then force the click.
+    await row.hover().catch(() => {});
+    await row.locator(".queue-action").click({ timeout: 5000, force: true }).catch(() => {});
+    await page.waitForTimeout(300);
   }
   await page.getByPlaceholder(/find player/i).fill("");
   await screenshot(page, "queue-set");
