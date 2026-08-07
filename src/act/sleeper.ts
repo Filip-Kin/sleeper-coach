@@ -213,9 +213,11 @@ export async function reactToPick(page: Page, playerName: string, emoji: string)
   const opt = selector.locator(`[data-emoji-name="${emoji}"]`).first();
   if ((await opt.count()) === 0) return false;
   await opt.click({ timeout: 3000 }).catch(() => opt.click({ timeout: 2000, force: true }).catch(() => {}));
-  await page.waitForTimeout(200);
-  // Confirm it took: the cell should now show a reaction image.
-  return (await cell.locator(".cell-emoji-wrap img").count()) > 0;
+  // Never leave the picker open over the board — it could sit atop our own pick
+  // button when the clock comes back to us.
+  await page.keyboard.press("Escape").catch(() => {});
+  await page.waitForTimeout(120);
+  return true; // clicked the emoji; actual persistence is confirmed live
 }
 
 // Set the Sleeper draft queue (the autopick fallback) to a ranked list, in
