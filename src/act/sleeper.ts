@@ -1,7 +1,6 @@
 import type { BrowserContext, Page } from "playwright";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { launchContext, firstPage } from "./browser.ts";
 import { config } from "../config.ts";
 
 // Page-object layer over the Sleeper web app (https://sleeper.com). The action
@@ -45,36 +44,23 @@ export async function isLoggedIn(page: Page): Promise<boolean> {
   return currentPageLoggedIn(page);
 }
 
-// Open the Sleeper login page and hold the browser open on the display so a
-// human can sign in over noVNC. Polls the *current* page (no navigation, so it
-// never disrupts typing) until signed in, then persists the profile. Returns
-// true on success, false on timeout.
-export async function openForLogin(timeoutMs = 15 * 60 * 1000): Promise<boolean> {
-  const ctx = await launchContext();
-  const page = await firstPage(ctx);
-  await page.goto(`${SLEEPER}/login`, { waitUntil: "domcontentloaded" }).catch(() => page.goto(SLEEPER));
-  const deadline = Date.now() + timeoutMs;
-  try {
-    while (Date.now() < deadline) {
-      await page.waitForTimeout(5000);
-      if (await currentPageLoggedIn(page).catch(() => false)) {
-        await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });
-        await page.waitForTimeout(2500);
-        await screenshot(page, "login-success");
-        return true;
-      }
-    }
-    return false;
-  } finally {
-    await ctx.close();
-  }
-}
+// (login is done out-of-band: a real Brave logs in and the session is imported
+// via importSession, or transplanted with `act import-session`.)
 
-// Open a context+page ready for use. Callers close the context when done.
-export async function open(): Promise<{ ctx: BrowserContext; page: Page }> {
-  const ctx = await launchContext();
-  const page = await firstPage(ctx);
-  return { ctx, page };
+// DOM discovery for Phase C: dump the facts needed to build reliable selectors.
+export async function domFacts(page: Page): Promise<unknown> {
+  return page.evaluate(() => {
+    const inputs = Array.from(document.querySelectorAll("input")).map((el) => ({
+      type: el.getAttribute("type"),
+      placeholder: el.getAttribute("placeholder"),
+      name: el.getAttribute("name"),
+    }));
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+      .map((el) => (el.textContent ?? "").trim())
+      .filter((t) => t.length > 0 && t.length < 40)
+      .slice(0, 60);
+    return { url: location.href, title: document.title, inputs, buttons };
+  });
 }
 
 // Import an existing Sleeper session (captured from a browser where the user is
@@ -82,32 +68,28 @@ export async function open(): Promise<{ ctx: BrowserContext; page: Page }> {
 // entirely. `entries` is the logged-in origin's localStorage (key -> value).
 // Optionally also seeds cookies. Persists to the profile on success.
 export async function importSession(
+  ctx: BrowserContext,
+  page: Page,
   entries: Record<string, string>,
   cookies?: { name: string; value: string; domain: string; path: string }[],
 ): Promise<boolean> {
-  const ctx = await launchContext();
-  const page = await firstPage(ctx);
-  try {
-    if (cookies?.length) await ctx.addCookies(cookies);
-    await page.goto(SLEEPER, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(1500);
-    await page.evaluate((data) => {
-      for (const [k, v] of Object.entries(data)) {
-        try {
-          window.localStorage.setItem(k, v as string);
-        } catch {
-          /* ignore quota/read-only keys */
-        }
+  if (cookies?.length) await ctx.addCookies(cookies);
+  await page.goto(SLEEPER, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(1500);
+  await page.evaluate((data) => {
+    for (const [k, v] of Object.entries(data)) {
+      try {
+        window.localStorage.setItem(k, v as string);
+      } catch {
+        /* ignore quota/read-only keys */
       }
-    }, entries);
-    await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(3500);
-    const ok = await currentPageLoggedIn(page);
-    await screenshot(page, ok ? "import-success" : "import-failed");
-    return ok;
-  } finally {
-    await ctx.close();
-  }
+    }
+  }, entries);
+  await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(3500);
+  const ok = await currentPageLoggedIn(page);
+  await screenshot(page, ok ? "import-success" : "import-failed");
+  return ok;
 }
 
 // #region actions (selector bodies completed in Phase C against the live DOM)

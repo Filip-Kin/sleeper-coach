@@ -41,6 +41,10 @@ if [ ! -x "${HOME}/.local/bin/claude" ]; then
 fi
 export PATH="${HOME}/.local/bin:${PATH}"
 
+# Persistent headed browser (visible over noVNC, holds the Sleeper session,
+# exposes CDP for the act commands to attach to).
+supervise browser-server bun run /app/src/act/browser-server.ts
+
 # Web dashboard in the background (Phase D wires the UI); daemon in foreground.
 if [ -f /app/src/web/server.ts ]; then
     supervise web bun run /app/src/web/server.ts

@@ -54,6 +54,32 @@ async function handlePendingTrade(tx: TransactionLike): Promise<void> {
   await sendAlert("Trade handled", `Finished evaluating trade ${tx.transaction_id} (exit ${result.exitCode}).`);
 }
 
+// #region auth watch
+// The Sleeper session (a ~1-year JWT in the browser profile) should last the
+// season, but a server-side logout would silently break the coach's hands. So
+// we periodically confirm login and push an HA alert on any change, per Filip.
+const AUTH_CHECK_MS = Number(process.env.AUTH_CHECK_MS ?? 30 * 60 * 1000);
+let lastAuthCheck = 0;
+let lastAuthOk = true;
+
+async function checkAuth(): Promise<void> {
+  const proc = Bun.spawn(["bun", "run", "act", "login-check"], {
+    cwd: "/app",
+    env: process.env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const ok = (await proc.exited) === 0;
+  if (!ok && lastAuthOk) {
+    await sendAlert("Sleeper login lost", "The coach's Sleeper session is no longer valid. Re-import a session (act import-session) so it can set lineups and make picks.");
+  } else if (ok && !lastAuthOk) {
+    await sendAlert("Sleeper login restored", "The coach is authenticated again.");
+  }
+  lastAuthOk = ok;
+  lastAuthCheck = Date.now();
+}
+// #endregion
+
 async function pollOnce(): Promise<void> {
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
@@ -75,6 +101,7 @@ async function main(): Promise<void> {
   for (;;) {
     try {
       await pollOnce();
+      if (Date.now() - lastAuthCheck > AUTH_CHECK_MS) await checkAuth();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[daemon] poll error: ${msg}`);
