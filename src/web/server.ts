@@ -6,6 +6,9 @@ import { loadPlayers } from "../data/players.ts";
 import { describeScoring } from "../analysis/scoring.ts";
 import { runAgent, type AgentEvent } from "../agent/runner.ts";
 import { recentEvents } from "../log.ts";
+import { statSync, openSync, readSync, closeSync } from "node:fs";
+
+const ACTIVITY_LOG = process.env.ACTIVITY_LOG ?? "/data/sleeper-coach/activity.jsonl";
 
 // The dashboard server. Serves the single-page UI, a state endpoint for the
 // board/roster panels, and an SSE chat endpoint that streams the agent's
@@ -84,11 +87,64 @@ function sseChat(req: Request): Response {
   });
 }
 
+// Live activity stream: tail the append-only JSONL and push each new event over
+// SSE as it's written. The draft engine runs in a SEPARATE process and only
+// shares the log file, so we tail the file (poll its size) rather than an
+// in-process bus. This is what makes the coach's draft thinking — its live board
+// view, plans and picks — visible in the dashboard console in real time.
+function sseActivityStream(): Response {
+  const enc = new TextEncoder();
+  let tick: ReturnType<typeof setInterval> | undefined;
+  let ping: ReturnType<typeof setInterval> | undefined;
+  let offset = 0;
+  try { offset = statSync(ACTIVITY_LOG).size; } catch { offset = 0; }
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (event: string, data: unknown) =>
+        controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      // Seed with recent history so a freshly-opened console isn't blank.
+      for (const ev of recentEvents(40)) send("event", ev);
+      tick = setInterval(() => {
+        let size: number;
+        try { size = statSync(ACTIVITY_LOG).size; } catch { return; }
+        if (size < offset) offset = 0; // truncated/rotated
+        if (size <= offset) return;
+        try {
+          const fd = openSync(ACTIVITY_LOG, "r");
+          const buf = Buffer.allocUnsafe(size - offset);
+          const read = readSync(fd, buf, 0, buf.length, offset);
+          closeSync(fd);
+          const chunk = buf.subarray(0, read).toString("utf8");
+          const lastNl = chunk.lastIndexOf("\n");
+          if (lastNl === -1) return; // no complete line yet; wait for more
+          offset += Buffer.byteLength(chunk.slice(0, lastNl + 1), "utf8");
+          for (const line of chunk.slice(0, lastNl).split("\n")) {
+            const t = line.trim();
+            if (!t) continue;
+            try { send("event", JSON.parse(t)); } catch { /* skip bad line */ }
+          }
+        } catch { /* ignore read races */ }
+      }, 1000);
+      ping = setInterval(() => controller.enqueue(enc.encode(`: ping\n\n`)), 15000);
+    },
+    cancel() { if (tick) clearInterval(tick); if (ping) clearInterval(ping); },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+      Connection: "keep-alive",
+    },
+  });
+}
+
 Bun.serve({
   port: PORT,
   idleTimeout: 0,
   async fetch(req) {
     const url = new URL(req.url);
+    if (url.pathname === "/api/stream") return sseActivityStream();
     if (url.pathname === "/api/activity") return Response.json({ events: recentEvents(150) });
     if (url.pathname === "/api/state") return stateJson().catch((e) => Response.json({ error: String(e) }, { status: 500 }));
     if (url.pathname === "/api/chat" && req.method === "POST") return sseChat(req);

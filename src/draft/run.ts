@@ -94,6 +94,7 @@ let plan: string[] = []; // ordered target names, best first
 let lastRefresh = 0;
 let lastReasoning = "";
 let myDraftSlot: number | null = null;
+let agentBackoffUntil = 0; // pause agent calls after an error (limit hit, etc.)
 
 // Our own picks, read from the draft slot (robust vs. tracking makePick calls,
 // since some picks may come via the autopick queue).
@@ -111,40 +112,70 @@ function myRoster(picks: DraftPick[]): string[] {
     .map((p) => `${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""}`.trim());
 }
 
+const QUEUE_DEPTH = 8;
+
 // The autopick BACKSTOP queue (only used if the clock ever expires with the
-// automation dead). Two rules learned from mocks:
-//  1) Balance RB/WR by alternating on whichever we're shorter on, so a value-
-//     heavy RB board can't produce a 6-RB/1-WR pile-up. Best-available of the
-//     chosen position each step; ties break toward RB (slight half-PPR lean).
-//  2) NEVER queue DEF/K. Sleeper autopicks strictly down the queue, so a queued
-//     defense surfaces the instant the skill names drain (that's how a DEF/K
-//     landed at R9/R10). Leave them out: when the queue empties, Sleeper's own
-//     ADP autopick fills the tail, which lands K/DEF late where they belong.
-// One TE and one QB sit behind the skill core so we still end up with each.
-function buildQueue(board: RankedPlayer[], counts: Record<string, number>): string[] {
-  const rbs = board.filter((b) => b.position === "RB");
-  const wrs = board.filter((b) => b.position === "WR");
+// automation dead). Rules learned from live mocks:
+//  1) Build it ONLY from the LIVE available set (the DOM truth), never the
+//     lagging picks API — so it can never contain a player already drafted, the
+//     bug that had it re-searching gone players and grinding for ~45s.
+//  2) Keep it SHORT (QUEUE_DEPTH). Setting the queue is per-player DOM work; a
+//     long queue starves the on-the-clock pick. It is only a dead-man's switch.
+//  3) Balance RB/WR by alternating on whichever we're shorter on, so a value-
+//     heavy RB board can't pile up. Ties break toward RB (slight half-PPR lean).
+//  4) NEVER queue DEF/K. Sleeper autopicks strictly down the queue, so a queued
+//     defense surfaces the instant the skill names drain. Left out, Sleeper's
+//     own ADP autopick fills the tail late where K/DEF belong.
+function buildQueue(board: RankedPlayer[], counts: Record<string, number>, availSet: Set<string>): string[] {
+  const live = availSet.size ? board.filter((b) => availSet.has(b.name)) : board;
+  const rbs = live.filter((b) => b.position === "RB");
+  const wrs = live.filter((b) => b.position === "WR");
   const out: RankedPlayer[] = [];
   let ri = 0, wi = 0;
   let rc = counts["RB"] ?? 0, wc = counts["WR"] ?? 0;
-  const cap = Math.min(rbs.length + wrs.length, 40); // deep enough to outlast the draft
-  while (out.length < cap) {
+  while (out.length < QUEUE_DEPTH && (ri < rbs.length || wi < wrs.length)) {
     const takeRb = wi >= wrs.length ? true : ri >= rbs.length ? false : rc <= wc;
     if (takeRb && ri < rbs.length) { out.push(rbs[ri++]!); rc++; }
     else if (wi < wrs.length) { out.push(wrs[wi++]!); wc++; }
-    else break;
   }
-  const te = (counts["TE"] ?? 0) >= 1 ? [] : board.filter((b) => b.position === "TE").slice(0, 1);
-  const qb = (counts["QB"] ?? 0) >= 1 ? [] : board.filter((b) => b.position === "QB").slice(0, 1);
+  const te = (counts["TE"] ?? 0) >= 1 ? [] : live.filter((b) => b.position === "TE").slice(0, 1);
+  const qb = (counts["QB"] ?? 0) >= 1 ? [] : live.filter((b) => b.position === "QB").slice(0, 1);
   return [...out, ...te, ...qb].map((b) => b.name);
 }
 
-// The agent adjusts the plan reacting to the current draft; we push it to the
-// Sleeper queue as the autopick backstop and log its reasoning.
-async function refreshPlan(picks: DraftPick[]): Promise<void> {
+// Push the backstop queue. Reads a FRESH live-available set itself, so it's
+// always valid, and is only ever called OFF the clock (at start and right after
+// we pick) — never while our clock is ticking.
+async function pushQueue(picks: DraftPick[]): Promise<void> {
+  const s = (await api("/draft-state")) as { available?: { name: string; pos: string }[] };
+  const availSet = new Set((s.available ?? []).map((a) => a.name));
+  const q = buildQueue(boardNow(picks), myPositionCounts(picks, myDraftSlot), availSet);
+  if (q.length) await api("/queue", { players: q }).catch(() => {});
+}
+
+// Observability: publish what the coach currently sees as available (the live
+// DOM read) plus the pick it's leaning toward, so the dashboard's Coach view
+// shows exactly the board state the engine is deciding from.
+function logBoard(pickNo: number, round: number, available: { name: string; pos: string }[], target?: string): void {
+  logEvent(
+    "coach",
+    "board",
+    `Board @pick ${pickNo} (R${round}): ${available.length} available${target ? `, leaning ${target}` : ""}`,
+    { pickNo, round, available: available.slice(0, 20), target },
+  );
+}
+
+// The agent adjusts the PLAN (a ranked shortlist) reacting to the live draft.
+// It never touches the queue and never blocks a pick — picking is deterministic
+// off this plan + the value board. `available` is the live DOM read, so the
+// shortlist only ever contains players actually still in the room. On any agent
+// error (usage limit, crash) we log it, fall back to the pure value board, and
+// back off so we don't hammer a failing agent.
+async function refreshPlan(picks: DraftPick[], available: { name: string; pos: string }[]): Promise<void> {
   await resolveSlot();
   const roster = myRoster(picks);
-  const board = boardNow(picks).slice(0, 22);
+  const availSet = new Set(available.map((a) => a.name));
+  const board = boardNow(picks).filter((b) => availSet.size === 0 || availSet.has(b.name)).slice(0, 22);
   const availNames = new Set(board.map((b) => b.name));
   const pickNo = picks.length + 1;
   const round = Math.floor((pickNo - 1) / draft.settings.teams) + 1;
@@ -169,6 +200,15 @@ async function refreshPlan(picks: DraftPick[]): Promise<void> {
       `before mid-draft. Draft K and DEF only in the final 2-3 rounds. Anticipate RB/WR runs and respect tiers over raw rank. ` +
       `First write ONE short sentence of reasoning. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
   });
+  if (res.error || !res.text.trim()) {
+    // Agent unavailable — keep drafting deterministically off the value board.
+    plan = board.map((b) => b.name);
+    lastReasoning = `Agent unavailable (${res.error ?? "empty response"}); using value board.`;
+    agentBackoffUntil = Date.now() + 60_000;
+    lastRefresh = Date.now();
+    logEvent("coach", "plan-error", `Agent unavailable; drafting off the value board. (${res.error ?? "empty"})`, { error: res.error, plan: plan.slice(0, 6) });
+    return;
+  }
   const lines = res.text.split("\n").map((s) => s.trim()).filter(Boolean);
   const picksLine = lines.find((l) => /^picks\s*:/i.test(l)) ?? lines[lines.length - 1] ?? "";
   lastReasoning = (lines.filter((l) => l !== picksLine).join(" ") || res.text).slice(0, 300);
@@ -180,14 +220,17 @@ async function refreshPlan(picks: DraftPick[]): Promise<void> {
     .filter((n) => availNames.has(n));
   plan = parsed.length ? parsed : board.map((b) => b.name);
   lastRefresh = Date.now();
-  // Backstop queue is the disciplined deep list (RB/WR-first), NOT the agent's
-  // plan — so a missed clock can never autopick an early TE.
-  const queue = buildQueue(boardNow(picks), myPositionCounts(picks, myDraftSlot));
-  await api("/queue", { players: queue }).catch(() => {});
   logEvent("coach", "plan", `Plan @pick ${pickNo} (R${round}): ${plan.slice(0, 4).join(", ")}`, { reasoning: lastReasoning, plan, roster });
 }
 
-await refreshPlan(await sleeper.draftPicks(draftId)); // initial plan + queue (backstop ready)
+// Initial plan + backstop queue (read the live board once so both are built
+// from what's actually in the room).
+{
+  const picks0 = await sleeper.draftPicks(draftId);
+  const s0 = (await api("/draft-state")) as { available?: { name: string; pos: string }[] };
+  await refreshPlan(picks0, s0.available ?? []);
+  await pushQueue(picks0);
+}
 
 // Rehearsal: start the draft ourselves once the queue is set.
 if (rehearse) {
@@ -205,6 +248,7 @@ for (let i = 0; i < 40 && myDraftSlot == null; i++) {
 console.log(`[draft-run] our draft slot: ${myDraftSlot ?? "unresolved"}`);
 console.log("[draft-run] entering pick loop (waiting for our turns)…");
 const teams = draft.settings.teams;
+let lastBoardPicks = -1; // publish a fresh board view each time a pick lands
 for (;;) {
   await ensureRoom();
   await resolveSlot();
@@ -224,23 +268,36 @@ for (;;) {
   // Single live-truth read: on the clock + who is ACTUALLY still available.
   const state = (await api("/draft-state")) as { onClock?: boolean; available?: { name: string; pos: string }[] };
   const onClock = state.onClock === true;
-  const availSet = new Set((state.available ?? []).map((a) => a.name));
+  const available = state.available ?? [];
+  const availSet = new Set(available.map((a) => a.name));
   const myTurn = onClock && myDraftSlot != null && slotOnClock(pickNo, teams) === myDraftSlot;
+
+  // Observability: each time the board changes (a pick landed), publish the live
+  // available read so the dashboard's Coach view shows what the engine sees.
+  if (n !== lastBoardPicks) { logBoard(pickNo, round, available); lastBoardPicks = n; }
+
   if (!myTurn) {
-    // Between picks: adjust the plan (agent) + refresh the queue backstop,
-    // throttled so a mock's instant CPU picks don't storm the agent.
-    if (Date.now() - lastRefresh > 20_000) await refreshPlan(picks);
+    // Between picks: adjust the PLAN only (throttled, and paused while the agent
+    // is backing off after an error). The queue is NOT touched here — it's a
+    // backstop refreshed off the clock, so it never competes with a pick.
+    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) await refreshPlan(picks, available);
     await Bun.sleep(1500);
     continue;
   }
 
   // ON THE CLOCK — pick FAST from the LIVE available set only (never a player
   // who's already gone), best per our board + roster caps. If the live read is
-  // empty for any reason, fall back to the board so we still pick.
+  // empty, re-read once before falling back to the board, so we don't target
+  // off a blank read.
+  let liveSet = availSet;
+  if (liveSet.size === 0) {
+    const s2 = (await api("/draft-state")) as { available?: { name: string; pos: string }[] };
+    liveSet = new Set((s2.available ?? []).map((a) => a.name));
+  }
   const board = boardNow(picks);
   const byName = new Map(board.map((b) => [b.name, b]));
   const counts = myPositionCounts(picks, myDraftSlot);
-  const availOk = (b: RankedPlayer): boolean => availSet.size === 0 || availSet.has(b.name);
+  const availOk = (b: RankedPlayer): boolean => liveSet.size === 0 || liveSet.has(b.name);
   const needOk = (pos: string): boolean => (counts[pos] ?? 0) < positionCap(pos, round);
   const target =
     plan.map((nm) => byName.get(nm)).find((b): b is RankedPlayer => !!b && availOk(b) && needOk(b.position)) ??
@@ -251,12 +308,16 @@ for (;;) {
     console.log("[draft-run] no target available");
     break;
   }
-  console.log(`[debug] pick ${pickNo} R${round} slot=${myDraftSlot} onClock=${onClock} availN=${availSet.size}`);
-  console.log(`[debug] avail(live): ${[...availSet].slice(0, 8).join(", ") || "(empty)"}`);
+  console.log(`[debug] pick ${pickNo} R${round} slot=${myDraftSlot} onClock=${onClock} availN=${liveSet.size}`);
+  console.log(`[debug] avail(live): ${[...liveSet].slice(0, 8).join(", ") || "(empty)"}`);
   console.log(`[debug] board top: ${board.slice(0, 5).map((b) => `${b.position}:${b.name}`).join(", ")}`);
   console.log(`[debug] plan top: ${plan.slice(0, 5).join(", ") || "(none)"}`);
-  console.log(`[debug] target=${target.name} (${target.position}) inAvail=${availSet.has(target.name)}`);
+  console.log(`[debug] target=${target.name} (${target.position}) inAvail=${liveSet.has(target.name)}`);
   console.log(`[draft-run] ON THE CLOCK pick ${pickNo} (R${round}) → ${target.name} (${target.position})`);
+  // Publish the board view WITH the chosen target so the dashboard shows what
+  // it's about to do and why.
+  logBoard(pickNo, round, available, target.name);
+  lastBoardPicks = n;
   const t0 = Date.now();
   try {
     await api("/pick", { player: target.name });
@@ -274,9 +335,14 @@ for (;;) {
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     console.log(`[draft-run] pick ${pickNo} = ${nm} (${secs}s)`);
     logEvent("coach", "draft-pick", `R${round} pick ${pickNo}: ${nm} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
+    // Safe window: we just picked, so our next turn is a full snake cycle away.
+    // Refresh the small backstop queue now (off the clock) and adjust the plan.
+    await pushQueue(after).catch(() => {});
+    if (Date.now() > agentBackoffUntil) await refreshPlan(after, available).catch(() => {});
   } else {
     // Pick didn't land — during a live draft this needs a human. Alert once.
     console.log(`[draft-run] pick ${pickNo} did NOT register (target ${target.name})`);
+    logEvent("coach", "pick-miss", `Pick ${pickNo} target ${target.name} didn't register.`, { target: target.name });
     if (!rehearse) await sendAlert("Draft: pick may have failed", `Pick ${pickNo} target ${target.name} didn't register — check the draft.`);
   }
 }

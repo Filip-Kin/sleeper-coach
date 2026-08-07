@@ -62,6 +62,12 @@
   .act-time { margin-left: auto; }
   .act-sum { margin-top: 4px; font-size: 13.5px; }
   .reason { margin-top: 4px; color: var(--muted); font-style: italic; font-size: 12.5px; }
+  .act-line { border-bottom: 1px solid var(--line); padding: 8px 2px; }
+  .act-line .badge { margin-right: 6px; }
+  .act-line .act-type { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .act-line .act-time { float: right; color: var(--muted); font-size: 11px; }
+  .board-peek { margin-top: 4px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: normal; }
+  .cv-target { color: var(--good); font-weight: 600; }
   iframe { width: 100%; height: 100%; border: 0; background: #000; }
   .status { padding: 8px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
 </style>
@@ -90,12 +96,14 @@
   <div class="col">
     <div class="card" style="flex:1">
       <div class="tabs">
-        <button data-tab="board" class="on">Board</button>
+        <button data-tab="coachview" class="on">Coach view</button>
+        <button data-tab="board">Value board</button>
         <button data-tab="roster">My roster</button>
         <button data-tab="activity">Activity</button>
         <button id="takeoverBtn" title="Open the browser takeover in a new tab">Takeover ↗</button>
       </div>
-      <div class="tabwrap" id="tab-board"></div>
+      <div class="tabwrap" id="tab-coachview"></div>
+      <div class="tabwrap" id="tab-board" style="display:none"></div>
       <div class="tabwrap" id="tab-roster" style="display:none"></div>
       <div class="tabwrap" id="tab-activity" style="display:none"></div>
     </div>
@@ -176,9 +184,52 @@ $("#newBtn").addEventListener("click", () => { sessionId = null; localStorage.re
 // tabs (Takeover is not a tab — it opens the noVNC view in a new tab)
 document.querySelectorAll(".tabs button[data-tab]").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button[data-tab]").forEach(x=>x.classList.remove("on")); b.classList.add("on");
-  for (const t of ["board","roster","activity"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
+  for (const t of ["coachview","board","roster","activity"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
   if (b.dataset.tab === "activity") renderActivity();
 }));
+
+// #region live activity stream (SSE tail of the activity log)
+// Everything the coach and engineer log lands here in real time — plans, picks,
+// board reads, errors — so the draft is watchable live, not just in hindsight.
+const seenKeys = new Set();
+function evKey(ev){ return ev.ts + "|" + ev.type + "|" + ev.summary; }
+function addActivity(ev) {
+  const k = evKey(ev); if (seenKeys.has(k)) return; seenKeys.add(k);
+  if (seenKeys.size > 400) seenKeys.clear();
+  // A board read updates the Coach view panel (what the AI thinks is available).
+  if (ev.type === "board" && ev.detail) renderCoachView(ev.detail);
+  const d = document.createElement("div");
+  d.className = "act-line";
+  const time = new Date(ev.ts).toLocaleTimeString();
+  let extra = "";
+  if (ev.detail && ev.detail.reasoning) extra += `<div class="reason">“${escapeHtml(ev.detail.reasoning)}”</div>`;
+  if (ev.detail && Array.isArray(ev.detail.available))
+    extra += `<div class="board-peek">sees: ${ev.detail.available.slice(0,12).map(a=>escapeHtml(a.name?`${a.name}${a.pos?` ${a.pos}`:""}`:String(a))).join(" · ")}</div>`;
+  d.innerHTML = `<span class="act-time">${time}</span><span class="badge ${ev.actor}">${ev.actor}</span>`
+    + `<span class="act-type">${escapeHtml(ev.type)}</span><div class="act-sum">${escapeHtml(ev.summary)}</div>${extra}`;
+  stream.appendChild(d); stream.scrollTop = stream.scrollHeight;
+}
+let lastCoachView = null;
+function renderCoachView(detail) {
+  lastCoachView = detail;
+  const avail = Array.isArray(detail.available) ? detail.available : [];
+  const head = `<div style="padding:8px 10px;color:var(--muted);font-size:12px">`
+    + `Pick ${detail.pickNo ?? "–"} · Round ${detail.round ?? "–"}`
+    + (detail.target ? ` · target <span class="cv-target">${escapeHtml(detail.target)}</span>` : "")
+    + ` · ${avail.length} seen available</div>`;
+  const rows = avail.map((a,i)=>`<tr><td class="num">${i+1}</td><td>${escapeHtml(a.name||String(a))}</td><td>${escapeHtml(a.pos||"")}</td></tr>`).join("");
+  $("#tab-coachview").innerHTML = head + (rows
+    ? `<table><thead><tr><th>#</th><th>Player (as read from the draft room)</th><th>Pos</th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<p style='color:var(--muted);padding:14px'>No live board read yet. This fills in when a draft is running — it's exactly what the coach sees as still-available.</p>`);
+}
+renderCoachView({});
+function connectStream() {
+  const es = new EventSource("/api/stream");
+  es.addEventListener("event", (e) => { try { addActivity(JSON.parse(e.data)); } catch {} });
+  es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+connectStream();
+// #endregion
 
 async function renderActivity() {
   try {

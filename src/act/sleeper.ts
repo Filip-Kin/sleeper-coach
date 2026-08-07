@@ -142,7 +142,7 @@ async function findPlayerRow(page: Page, playerName: string) {
   await search.click();
   await search.fill("");
   await search.fill(playerName);
-  await page.waitForTimeout(800);
+  await page.waitForTimeout(500);
   return page.locator(".player-rank-item2").filter({ hasText: playerName }).first();
 }
 
@@ -180,8 +180,11 @@ export async function liveAvailable(page: Page): Promise<{ name: string; pos: st
 export async function makePick(page: Page, playerName: string): Promise<void> {
   await requireDraftRoom(page);
   const row = await findPlayerRow(page, playerName);
+  // Fail fast if the player isn't in the room (already drafted / not rendered):
+  // don't burn the full click timeout on a row that will never appear.
+  if ((await row.count()) === 0) throw new Error(`player not in draft room: ${playerName}`);
   const btn = row.locator(".draft-button:not(.disable)");
-  await btn.click({ timeout: 8000 });
+  await btn.click({ timeout: 5000 });
   await page.waitForTimeout(600);
   // Sleeper shows a confirm ("Draft <player>") for the on-the-clock pick.
   const confirm = page.getByRole("button", { name: /^draft/i }).first();
@@ -196,14 +199,15 @@ export async function setQueue(page: Page, playerNames: string[]): Promise<void>
   await requireDraftRoom(page);
   for (const name of playerNames) {
     const row = await findPlayerRow(page, name);
+    // Skip fast if the player isn't in the room — never grind on a gone player.
+    if ((await row.count()) === 0) continue;
     // The queue "+" is hover-gated (row class show-watchlist-action), so plain
     // clicks hesitate; hover to reveal it, then force the click.
     await row.hover().catch(() => {});
-    await row.locator(".queue-action").click({ timeout: 5000, force: true }).catch(() => {});
-    await page.waitForTimeout(300);
+    await row.locator(".queue-action").click({ timeout: 3000, force: true }).catch(() => {});
+    await page.waitForTimeout(200);
   }
-  await page.getByPlaceholder(/find player/i).fill("");
-  await screenshot(page, "queue-set");
+  await page.getByPlaceholder(/find player/i).fill("").catch(() => {});
 }
 
 // Set this week's starting lineup. `starters` is an ordered list of player ids
