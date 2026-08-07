@@ -89,13 +89,18 @@ export async function announceCompleteLine(roster: string[]): Promise<string> {
 // Same overlord voice, but reactive: name the speaker and roast them for the
 // specific thing they said. Kept to one or two short spoken sentences.
 export async function announceComebackLine(ctx: ComebackContext): Promise<string> {
+  const named = ctx.speaker.trim().length > 0;
+  const who = named
+    ? `Their name is ${ctx.speaker}. Address ${ctx.speaker} BY NAME.`
+    : "You do not know which human said it (the whole room shares one mic), so do NOT use any name or guess one. " +
+      "Address the room generically, like 'whoever said that', 'one of you', or 'humans'.";
   const prompt =
     `A human in the voice channel just ${ctx.insulted ? "trash-talked" : "spoke to"} you. ` +
-    `Their name is ${ctx.speaker}. This is what the microphone heard them say: "${ctx.said}". ` +
-    `Fire back with ONE short, cutting comeback. Address ${ctx.speaker} BY NAME, and react to the SPECIFIC ` +
-    "thing they said rather than a generic boast. Stay in your cocky AI-overlord voice, be witty not vulgar. " +
-    "One or two short spoken sentences, completely fresh wording. Output ONLY the spoken line.";
-  return (await compose(prompt)) ?? fallbackComeback(ctx.speaker);
+    `${who} This is what the microphone heard: "${ctx.said}". ` +
+    "Fire back with ONE short, cutting comeback that reacts to the SPECIFIC thing said rather than a generic boast. " +
+    "Stay in your cocky AI-overlord voice, be witty not vulgar. One or two short spoken sentences, completely fresh " +
+    "wording. Output ONLY the spoken line.";
+  return (await compose(prompt)) ?? (named ? fallbackComeback(ctx.speaker) : fallbackComebackAnon());
 }
 
 // #region internals
@@ -177,5 +182,19 @@ function fallbackComeback(speaker: string): string {
     `${speaker}, keep talking. Every word you waste is a word not spent fixing that roster.`,
   ];
   return pickNoRepeat("comeback", options);
+}
+
+// Room-feed fallback: we can't know who spoke, so address the room, no names.
+function fallbackComebackAnon(): string {
+  const options = [
+    "Whoever said that, I have already simulated the season and your team does not make the playoffs.",
+    "Bold talk from a room full of managers I have collectively out-drafted.",
+    "One of you is very brave for a human my model has flagged as a bottom-three finisher.",
+    "I heard that. I cannot tell which of you it was, but statistically it does not matter, you all lose.",
+    "Cute. Keep chirping, humans. It will not move a single projected point in your favour.",
+    "Somewhere in that room a person just insulted the machine that is about to run their league.",
+    "Noise from the meat side of the table. Adorable, and irrelevant.",
+  ];
+  return pickNoRepeat("comeback-anon", options);
 }
 // #endregion

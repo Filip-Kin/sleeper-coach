@@ -31,7 +31,7 @@
 
 import { Client, GatewayIntentBits, Events } from "discord.js";
 import sodium from "libsodium-wrappers";
-import { loadConfig, discordNames } from "./config.ts";
+import { loadConfig, discordNames, ROOM_FEED_IDS } from "./config.ts";
 import { startTail } from "./tail.ts";
 import { connectVoice, type VoiceHandle } from "./voice.ts";
 import { synthesize } from "./tts.ts";
@@ -73,6 +73,7 @@ async function drain(): Promise<void> {
     }
   } finally {
     draining = false;
+    lastSpokeEndAt = Date.now();
   }
 }
 
@@ -141,8 +142,12 @@ function handleEvent(ev: ActivityEvent): void {
 // True while the bot is speaking (its queue is draining). The listener consults
 // this so it never captures or reacts to audio while we're mid-announcement,
 // which also keeps it from reacting to our own voice bleeding back.
+// Busy while speaking AND for a grace window after, so the room mic streaming
+// the bot's own voice back (delayed) can't make it react to itself.
+const POST_SPEAK_GRACE_MS = Number(process.env.LISTENER_POST_SPEAK_GRACE_MS ?? 4000);
+let lastSpokeEndAt = 0;
 function isBusy(): boolean {
-  return draining;
+  return draining || Date.now() - lastSpokeEndAt < POST_SPEAK_GRACE_MS;
 }
 
 // Comebacks ride the SAME single queue as announcements, so they can never talk
@@ -154,17 +159,21 @@ function enqueueComeback(ctx: ComebackContext): void {
   });
 }
 
-// Name a speaker: prefer the known/mapped name, else their Discord display name.
+// Name a speaker, or return "" when we genuinely can't know who it is. For a
+// room-feed account (one Discord user streaming the whole room's mic), every
+// voice looks like that one user, so we must NOT name them — the comeback
+// addresses the room generically instead.
 async function resolveSpeaker(userId: string): Promise<string> {
+  if (ROOM_FEED_IDS.has(userId)) return "";
   const names = discordNames();
   const mapped = names[userId];
   if (mapped) return mapped;
   try {
     const guild = await client.guilds.fetch(guildId);
     const member = await guild.members.fetch(userId);
-    return member.displayName || member.user.username || "someone";
+    return member.displayName || member.user.username || "";
   } catch {
-    return "someone";
+    return "";
   }
 }
 // #endregion

@@ -39,12 +39,18 @@ export const OUR_TEAM_NAME = "--dangerously-skip-perms";
 // Discord user id -> the human's real name, for naming people in comebacks.
 // This is a DIFFERENT keying from MANAGER_NAMES above (which is by Sleeper
 // username): the voice receiver only knows Discord ids, so we need this map.
-// Seeded with the one known id; the rest can be filled in later. When an id is
-// not here we fall back to the speaker's Discord display name at runtime, so
-// this map is purely an override for nicer/known names.
-export const DISCORD_NAMES: Record<string, string> = {
-  "216346350936260611": "Filip", // team owner
-};
+// Empty by default. When an id is not here we fall back to the Discord display
+// name at runtime, so this is purely an override for nicer/known names.
+export const DISCORD_NAMES: Record<string, string> = {};
+
+// The draft is IRL: one Discord account streams the WHOLE ROOM's audio, so every
+// voice arrives tagged as that single user id and we CANNOT tell who is really
+// speaking. Ids listed here are treated as an unknown/room speaker — the bot
+// addresses the room generically and never uses that account's name. Default is
+// the room-feed account; override with ROOM_FEED_IDS (comma-separated).
+export const ROOM_FEED_IDS: Set<string> = new Set(
+  (process.env.ROOM_FEED_IDS ?? "216346350936260611").split(",").map((s) => s.trim()).filter(Boolean),
+);
 
 // Optional runtime override/extension: DISCORD_NAME_MAP is a JSON object of
 // { "<discord-id>": "<name>" }. Merged over the seeds above so operators can add
