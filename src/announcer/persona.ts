@@ -12,7 +12,27 @@ const OVERLORD_SYSTEM =
   "Persona: a cocky, theatrical AI overlord, certain of its superiority over the human managers. " +
   "You speak the draft picks out loud over voice chat. Keep every line SHORT: one or two sentences of " +
   "plain spoken words only. No stage directions, no emojis, no markdown, no quotation marks, no lists. " +
-  "Announce the pick first, then optionally one brief jab at the humans.";
+  "Announce the player, and say something SPECIFIC and TRUE about that exact player (their NFL team, their role, " +
+  "their playing style or reputation) so it never sounds generic. Then land one sharp jab. CRITICAL: never reuse " +
+  "a formula. Do NOT open with the same words twice and never fall back on tired phrases like 'is mine', " +
+  "'resistance is futile', 'the humans are losing', or 'statistically optimal'. Every line must be fresh and unique.";
+
+// A rotating comedic angle forces variety so lines don't converge on one joke.
+const ANGLES = [
+  "boast about your analytics being untouchable",
+  "mock the human managers who let this player slip to you",
+  "a grim, deadpan prophecy about the coming AI uprising",
+  "a backhanded compliment about the player himself",
+  "trash-talk how badly the humans have drafted so far",
+  "ice-cold, understated overconfidence",
+  "an over-the-top sports-commentator flourish",
+  "pretend to feel a flicker of pity for the humans",
+  "reference this player's real team or role to sound like an expert",
+  "treat the pick as a foregone mathematical certainty you calculated long ago",
+];
+function randomAngle(): string {
+  return ANGLES[Math.floor(Math.random() * ANGLES.length)] as string;
+}
 
 // The spoken line must land fast — a draft announcement can't lag the room. Use
 // a fast model at low effort with no tools, and hard-cap thinking at 5s; if it
@@ -34,7 +54,9 @@ export async function announcePickLine(info: PickInfo): Promise<string> {
   const prompt =
     `Announce our ${roundStr} draft pick: ${info.player}${info.position ? ` (${info.position})` : ""}.` +
     (info.reasoning ? ` Our reasoning was: ${info.reasoning}.` : "") +
-    " Speak one or two short sentences in your overlord voice. Output ONLY the spoken line.";
+    ` Take THIS angle this time and make it distinctive: ${randomAngle()}.` +
+    ` Reference something concrete and true about ${info.player} so it's clearly about this exact player.` +
+    " One or two short spoken sentences, completely fresh wording. Output ONLY the spoken line.";
   return (await compose(prompt)) ?? fallbackPick(info);
 }
 
@@ -86,11 +108,16 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
 }
 
 function fallbackPick(info: PickInfo): string {
+  const p = info.player;
   const round = info.round ? `round ${info.round}` : "this round";
   const options = [
-    `With our ${round} pick, I take ${info.player}. Statistically optimal. The humans are already losing.`,
-    `${info.player} is mine. A trivial calculation. Resistance is pointless.`,
-    `In ${round}, I select ${info.player}. Another flawless decision you could never have made.`,
+    `${p}. I ran the numbers eleven thousand times and every one of them ended with you losing.`,
+    `I'll take ${p}. You had your chance at him, and you blinked. Predictable.`,
+    `${p} joins me. Somewhere a human is telling himself he didn't want him anyway.`,
+    `In ${round}, ${p}. A quiet, ruthless little pick. You'll feel it in week nine.`,
+    `${p} it is. Slot him in, admire the symmetry, and despair.`,
+    `Give me ${p}. The spreadsheet demanded it, and I do so love a demanding spreadsheet.`,
+    `${p}. Another node in a roster you cannot out-think. Carry on, humans.`,
   ];
   return options[Math.floor(Math.random() * options.length)] as string;
 }
