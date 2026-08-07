@@ -115,11 +115,15 @@ function myRoster(picks: DraftPick[]): string[] {
 // expires and Sleeper autopicks, it can never surface an early TE/QB (they sit
 // far down the queue, behind ~22 RB/WR). One TE/QB only if we don't have one.
 function buildQueue(board: RankedPlayer[], counts: Record<string, number>): string[] {
-  const rbwr = board.filter((b) => b.position === "RB" || b.position === "WR").slice(0, 22);
+  // Deep RB/WR so rivals draining our list can't expose a defense early, then
+  // exactly ONE TE, ONE QB, ONE DEF, ONE K at the very bottom. Never two of a
+  // fringe position, and skill positions always ahead of DEF/K.
+  const rbwr = board.filter((b) => b.position === "RB" || b.position === "WR").slice(0, 34);
   const te = (counts["TE"] ?? 0) >= 1 ? [] : board.filter((b) => b.position === "TE").slice(0, 1);
   const qb = (counts["QB"] ?? 0) >= 1 ? [] : board.filter((b) => b.position === "QB").slice(0, 1);
-  const kdef = board.filter((b) => b.position === "K" || b.position === "DEF").slice(0, 2);
-  return [...rbwr, ...te, ...qb, ...kdef].map((b) => b.name).slice(0, 28);
+  const def = board.filter((b) => b.position === "DEF").slice(0, 1);
+  const k = board.filter((b) => b.position === "K").slice(0, 1);
+  return [...rbwr, ...te, ...qb, ...def, ...k].map((b) => b.name);
 }
 
 // The agent adjusts the plan reacting to the current draft; we push it to the
