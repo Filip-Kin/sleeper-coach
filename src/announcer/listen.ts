@@ -31,7 +31,7 @@ const MAX_SEGMENT_MS = Number(process.env.LISTENER_MAX_SEGMENT_MS ?? 15_000);
 // Ignore blips shorter than this (ms): coughs, keyboard clicks, "mm".
 const MIN_SEGMENT_MS = Number(process.env.LISTENER_MIN_SEGMENT_MS ?? 400);
 // At most one comeback per this window (ms), to avoid chatter.
-const COOLDOWN_MS = Number(process.env.LISTENER_COOLDOWN_MS ?? 20_000);
+const COOLDOWN_MS = Number(process.env.LISTENER_COOLDOWN_MS ?? 7_000);
 
 const MAX_SEGMENT_BYTES = MAX_SEGMENT_MS * BYTES_PER_MS;
 const MIN_SEGMENT_BYTES = MIN_SEGMENT_MS * BYTES_PER_MS;
@@ -40,7 +40,9 @@ const MIN_SEGMENT_BYTES = MIN_SEGMENT_MS * BYTES_PER_MS;
 // #region address / insult detection (conservative)
 // Only react when the transcript clearly addresses the bot, or plainly insults
 // it. Everything else is ignored so the bot doesn't butt into normal chatter.
-const ADDRESS_RE = /\b(coach|claude|overlord|robot|bot)\b/i;
+// Include common tiny.en mishears of "claude" (clawed / cloud / claud / clod)
+// so a garbled address still triggers a comeback.
+const ADDRESS_RE = /\b(coach|claude|claud|clawed|cloud|clod|overlord|robot|bot)\b/i;
 const INSULT_RE =
   /\b(suck|sucks|stupid|dumb|trash|garbage|loser|terrible|awful|idiot|idiots|worst|overrated|cheat|cheater|cheating|rigged|pathetic|useless|clown|lame|boring|scared|afraid|weak|shut up)\b/i;
 
