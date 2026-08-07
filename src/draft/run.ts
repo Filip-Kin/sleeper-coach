@@ -111,19 +111,32 @@ function myRoster(picks: DraftPick[]): string[] {
     .map((p) => `${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""}`.trim());
 }
 
-// The autopick BACKSTOP queue. Deep and RB/WR-first so that if the clock ever
-// expires and Sleeper autopicks, it can never surface an early TE/QB (they sit
-// far down the queue, behind ~22 RB/WR). One TE/QB only if we don't have one.
+// The autopick BACKSTOP queue (only used if the clock ever expires with the
+// automation dead). Two rules learned from mocks:
+//  1) Balance RB/WR by alternating on whichever we're shorter on, so a value-
+//     heavy RB board can't produce a 6-RB/1-WR pile-up. Best-available of the
+//     chosen position each step; ties break toward RB (slight half-PPR lean).
+//  2) NEVER queue DEF/K. Sleeper autopicks strictly down the queue, so a queued
+//     defense surfaces the instant the skill names drain (that's how a DEF/K
+//     landed at R9/R10). Leave them out: when the queue empties, Sleeper's own
+//     ADP autopick fills the tail, which lands K/DEF late where they belong.
+// One TE and one QB sit behind the skill core so we still end up with each.
 function buildQueue(board: RankedPlayer[], counts: Record<string, number>): string[] {
-  // Deep RB/WR so rivals draining our list can't expose a defense early, then
-  // exactly ONE TE, ONE QB, ONE DEF, ONE K at the very bottom. Never two of a
-  // fringe position, and skill positions always ahead of DEF/K.
-  const rbwr = board.filter((b) => b.position === "RB" || b.position === "WR").slice(0, 34);
+  const rbs = board.filter((b) => b.position === "RB");
+  const wrs = board.filter((b) => b.position === "WR");
+  const out: RankedPlayer[] = [];
+  let ri = 0, wi = 0;
+  let rc = counts["RB"] ?? 0, wc = counts["WR"] ?? 0;
+  const cap = Math.min(rbs.length + wrs.length, 40); // deep enough to outlast the draft
+  while (out.length < cap) {
+    const takeRb = wi >= wrs.length ? true : ri >= rbs.length ? false : rc <= wc;
+    if (takeRb && ri < rbs.length) { out.push(rbs[ri++]!); rc++; }
+    else if (wi < wrs.length) { out.push(wrs[wi++]!); wc++; }
+    else break;
+  }
   const te = (counts["TE"] ?? 0) >= 1 ? [] : board.filter((b) => b.position === "TE").slice(0, 1);
   const qb = (counts["QB"] ?? 0) >= 1 ? [] : board.filter((b) => b.position === "QB").slice(0, 1);
-  const def = board.filter((b) => b.position === "DEF").slice(0, 1);
-  const k = board.filter((b) => b.position === "K").slice(0, 1);
-  return [...rbwr, ...te, ...qb, ...def, ...k].map((b) => b.name);
+  return [...out, ...te, ...qb].map((b) => b.name);
 }
 
 // The agent adjusts the plan reacting to the current draft; we push it to the
