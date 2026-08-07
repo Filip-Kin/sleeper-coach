@@ -9,8 +9,10 @@
 //   bun run coach roster [ID]   a roster's players by name (default: yours)
 //   bun run coach players [--refresh]   player cache status / refresh
 
+import { appendFileSync, mkdirSync } from "node:fs";
 import { config } from "./config.ts";
 import { sleeper } from "./sleeper/client.ts";
+import { logEvent } from "./log.ts";
 import { loadPlayers, cacheStatus } from "./data/players.ts";
 import { buildBoard } from "./analysis/board.ts";
 import { describeScoring } from "./analysis/scoring.ts";
@@ -136,6 +138,22 @@ async function cmdRoster(): Promise<void> {
   if (!(r.players ?? []).length) console.log("  (empty — pre-draft, keepers not designated yet)");
 }
 
+// The coach files a change request here (no code touched). A separate engineer
+// agent drains the queue and implements it.
+async function cmdRequestImprovement(): Promise<void> {
+  const desc = args.join(" ").trim();
+  if (!desc) {
+    console.log('usage: coach request-improvement "<what you want changed or added, and why>"');
+    process.exit(1);
+  }
+  const req = { id: crypto.randomUUID(), ts: new Date().toISOString(), status: "pending", request: desc };
+  const path = process.env.IMPROVE_QUEUE ?? "/data/sleeper-coach/improvement-requests.jsonl";
+  mkdirSync(path.replace(/\/[^/]*$/, ""), { recursive: true });
+  appendFileSync(path, JSON.stringify(req) + "\n");
+  logEvent("coach", "improve-request", desc, { id: req.id });
+  console.log(`filed improvement request ${req.id}`);
+}
+
 async function cmdPlayers(): Promise<void> {
   const refresh = args.includes("--refresh");
   const players = await loadPlayers({ forceRefresh: refresh });
@@ -159,6 +177,7 @@ const commands: Record<string, () => Promise<void>> = {
   available: cmdAvailable,
   roster: cmdRoster,
   players: cmdPlayers,
+  "request-improvement": cmdRequestImprovement,
 };
 
 const run = command ? commands[command] : undefined;

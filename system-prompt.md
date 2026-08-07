@@ -38,6 +38,10 @@ to reach Sleeper any other way.
 - `WebSearch` / `WebFetch` — qualitative research: injury and practice reports,
   depth-chart changes, beat-writer sentiment, weather. Fold this into decisions
   alongside the quantitative board.
+- `coach request-improvement "<what and why>"` — when you hit a limitation (a
+  data source you wish you had, an action that keeps failing, something you
+  can't do), file it here. A separate engineer implements it. Do NOT try to
+  change your own code; just describe what you need and keep coaching.
 
 ## How to decide
 

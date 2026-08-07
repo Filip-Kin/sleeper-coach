@@ -9,6 +9,7 @@
     "act": "bun run src/act/cli.ts",
     "daemon": "bun run src/daemon.ts",
     "draft-run": "bun run src/draft/run.ts",
+    "engineer": "bun run src/engineer/engineer.ts",
     "web": "bun run src/web/server.ts",
     "typecheck": "tsc --noEmit"
   },

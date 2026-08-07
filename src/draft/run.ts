@@ -17,6 +17,7 @@ import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
 import type { DraftPick } from "../sleeper/types.ts";
+import { logEvent } from "../log.ts";
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
@@ -77,18 +78,37 @@ function boardNow(picks: DraftPick[]): RankedPlayer[] {
   return rankByVor(projections, league).filter((r) => !drafted.has(r.playerId));
 }
 
-const myPicks: string[] = [];
 let plan: string[] = []; // ordered target names, best first
 let lastRefresh = 0;
+let lastReasoning = "";
+let myDraftSlot: number | null = null;
 
-// The agent adjusts the plan reacting to the current draft, then we push it to
-// the Sleeper queue as the autopick backstop.
+// Our own picks, read from the draft slot (robust vs. tracking makePick calls,
+// since some picks may come via the autopick queue).
+async function resolveSlot(): Promise<void> {
+  if (myDraftSlot != null) return;
+  const d = await sleeper.draft(draftId);
+  const slot = d.draft_order?.[config.userId];
+  if (typeof slot === "number") myDraftSlot = slot;
+}
+function myRoster(picks: DraftPick[]): string[] {
+  if (myDraftSlot == null) return [];
+  return picks
+    .filter((p) => p.draft_slot === myDraftSlot)
+    .sort((a, b) => a.pick_no - b.pick_no)
+    .map((p) => `${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""}`.trim());
+}
+
+// The agent adjusts the plan reacting to the current draft; we push it to the
+// Sleeper queue as the autopick backstop and log its reasoning.
 async function refreshPlan(picks: DraftPick[]): Promise<void> {
+  await resolveSlot();
+  const roster = myRoster(picks);
   const board = boardNow(picks).slice(0, 22);
   const availNames = new Set(board.map((b) => b.name));
   const pickNo = picks.length + 1;
   const round = Math.floor((pickNo - 1) / draft.settings.teams) + 1;
-  const have = myPicks.length ? `Your roster so far: ${myPicks.join(", ")}.` : "Your roster is empty.";
+  const have = roster.length ? `Your roster so far: ${roster.join(", ")}.` : "Your roster is empty.";
   const shortlist = board
     .map((r, i) => `${i + 1}. ${r.name} — ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier}${r.injuryStatus ? ` [${r.injuryStatus}]` : ""}`)
     .join("\n");
@@ -97,10 +117,14 @@ async function refreshPlan(picks: DraftPick[]): Promise<void> {
       `You are the coach in a ${draft.settings.teams}-team ${scoringLabel} snake draft, approaching pick ${pickNo} (round ${round}). ${have}\n` +
       `Best available right now, by value under our scoring:\n${shortlist}\n\n` +
       `Give your ranked plan for your upcoming pick(s): weigh roster needs, tiers, positional scarcity and runs, and value. ` +
-      `Early rounds favour the best RB/WR and genuinely elite/scarce TE; don't reach for QB/K/DEF. Anticipate runs: if a tier you need is about to empty, prioritise its last strong player. ` +
-      `Reply with ONLY a semicolon-separated list of up to 8 exact names from the list above, best first. No other text.`,
+      `Early rounds favour the best RB/WR and genuinely elite/scarce TE; don't reach for QB/K/DEF. Anticipate runs. ` +
+      `First write ONE short sentence of reasoning. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
   });
-  const parsed = res.text
+  const lines = res.text.split("\n").map((s) => s.trim()).filter(Boolean);
+  const picksLine = lines.find((l) => /^picks\s*:/i.test(l)) ?? lines[lines.length - 1] ?? "";
+  lastReasoning = (lines.filter((l) => l !== picksLine).join(" ") || res.text).slice(0, 300);
+  const parsed = picksLine
+    .replace(/^picks\s*:/i, "")
     .split(/[;\n]/)
     .map((s) => s.replace(/^\s*\d+[.)]\s*/, "").trim())
     .filter(Boolean)
@@ -108,7 +132,7 @@ async function refreshPlan(picks: DraftPick[]): Promise<void> {
   plan = parsed.length ? parsed : board.map((b) => b.name);
   lastRefresh = Date.now();
   await api("/queue", { players: plan.slice(0, 15) }).catch(() => {});
-  console.log(`[draft-run] plan (pick ${pickNo}): ${plan.slice(0, 5).join(", ")}${plan.length > 5 ? " …" : ""}`);
+  logEvent("coach", "plan", `Plan @pick ${pickNo} (R${round}): ${plan.slice(0, 4).join(", ")}`, { reasoning: lastReasoning, plan, roster });
 }
 
 await refreshPlan(await sleeper.draftPicks(draftId)); // initial plan + queue (backstop ready)
@@ -154,10 +178,12 @@ for (;;) {
       after = await sleeper.draftPicks(draftId);
     }
     const mine = after.find((p) => p.pick_no === pickNo);
+    const round = Math.floor((pickNo - 1) / draft.settings.teams) + 1;
     if (mine) {
       const nm = `${mine.metadata?.["first_name"] ?? ""} ${mine.metadata?.["last_name"] ?? ""}`.trim();
-      myPicks.push(nm);
-      console.log(`[draft-run] pick ${pickNo} = ${nm} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      console.log(`[draft-run] pick ${pickNo} = ${nm} (${secs}s)`);
+      logEvent("coach", "draft-pick", `R${round} pick ${pickNo}: ${nm}`, { target, reasoning: lastReasoning, seconds: Number(secs) });
     } else {
       console.log(`[draft-run] pick ${pickNo} not registered (target ${target})`);
     }
@@ -175,4 +201,6 @@ try {
 } catch {
   /* already gone */
 }
-console.log(`[draft-run] my roster: ${myPicks.join(", ")}`);
+const finalRoster = myRoster(await sleeper.draftPicks(draftId));
+logEvent("coach", "draft-complete", `Draft complete. Roster: ${finalRoster.join(", ")}`, { roster: finalRoster });
+console.log(`[draft-run] my roster: ${finalRoster.join(", ")}`);
