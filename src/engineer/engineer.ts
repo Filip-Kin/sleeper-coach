@@ -38,6 +38,12 @@ function saveQueue(reqs: Req[]): void {
 }
 
 async function notify(title: string, message: string): Promise<void> {
+  // On the host, reuse the proven HA helper (localhost:8123 + ~/.ha_token).
+  const helper = "/home/filip/scripts/ha-notify.sh";
+  if (existsSync(helper)) {
+    await $`${helper} ${`Coach engineer: ${title}`} ${message}`.nothrow().quiet();
+    return;
+  }
   const url = process.env.HA_NOTIFY_URL;
   const token = process.env.HA_TOKEN;
   if (!url || !token) return;
