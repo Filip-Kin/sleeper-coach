@@ -25,8 +25,10 @@ RUN git clone --depth 1 --branch "${WHISPER_VERSION}" https://github.com/ggml-or
  && cmake --build /tmp/whisper.cpp/build -j --config Release --target whisper-cli \
  && mkdir -p /opt/whisper/models \
  && cp /tmp/whisper.cpp/build/bin/whisper-cli /opt/whisper/whisper-cli \
- && curl -fsSL -o "/opt/whisper/models/ggml-${WHISPER_MODEL}.bin" \
-      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL}.bin?download=true"
+ && for m in tiny.en base.en; do \
+      curl -fsSL -o "/opt/whisper/models/ggml-${m}.bin" \
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${m}.bin?download=true"; \
+    done
 # #endregion
 
 FROM oven/bun:1-debian
@@ -57,8 +59,10 @@ ENV PIPER_BIN=/opt/piper/piper \
 
 # whisper.cpp binary + English model from the builder stage (LISTEN phase STT).
 COPY --from=whisper-build /opt/whisper /opt/whisper
+# Default to tiny.en for speed (fast enough to read short trash-talk); base.en is
+# also baked in and can be selected via WHISPER_MODEL if accuracy matters more.
 ENV WHISPER_BIN=/opt/whisper/whisper-cli \
-    WHISPER_MODEL=/opt/whisper/models/ggml-base.en.bin
+    WHISPER_MODEL=/opt/whisper/models/ggml-tiny.en.bin
 
 # Claude CLI, used by the runner to compose the overlord lines. Installed at
 # build into a fixed HOME so no writable data mount is needed at runtime; auth

@@ -25,7 +25,7 @@ const BYTES_PER_SAMPLE = 2;
 const BYTES_PER_MS = (SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE) / 1_000; // 192
 
 // End a speech segment after this much silence (ms).
-const SILENCE_MS = Number(process.env.LISTENER_SILENCE_MS ?? 800);
+const SILENCE_MS = Number(process.env.LISTENER_SILENCE_MS ?? 500);
 // Hard cap on a single segment so a hot mic can't buffer forever (ms).
 const MAX_SEGMENT_MS = Number(process.env.LISTENER_MAX_SEGMENT_MS ?? 15_000);
 // Ignore blips shorter than this (ms): coughs, keyboard clicks, "mm".

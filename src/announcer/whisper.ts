@@ -12,8 +12,10 @@ import { join } from "node:path";
 // down with ffmpeg before calling here).
 
 const WHISPER_BIN = process.env.WHISPER_BIN ?? "/opt/whisper/whisper-cli";
-const WHISPER_MODEL = process.env.WHISPER_MODEL ?? "/opt/whisper/models/ggml-base.en.bin";
-const WHISPER_THREADS = process.env.WHISPER_THREADS ?? "4";
+const WHISPER_MODEL = process.env.WHISPER_MODEL ?? "/opt/whisper/models/ggml-tiny.en.bin";
+// The host has 24 cores; 8 threads is a good speed/return point for these short
+// clips. Greedy decode (beam 1) is faster with negligible loss on short phrases.
+const WHISPER_THREADS = process.env.WHISPER_THREADS ?? "8";
 
 // Transcribe a 16kHz mono WAV to text. Returns the trimmed transcript (possibly
 // empty for silence). Throws on a failed whisper run so the caller can log it
@@ -31,6 +33,8 @@ export async function transcribe(wavPath: string): Promise<string> {
         "--file", wavPath,
         "--language", "en",
         "--threads", WHISPER_THREADS,
+        "--beam-size", "1",
+        "--best-of", "1",
         "--no-timestamps",
         "--output-txt",
         "--output-file", outBase,
