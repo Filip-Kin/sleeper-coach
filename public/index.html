@@ -30,6 +30,7 @@
   #stream { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
   .msg { white-space: pre-wrap; }
   .msg.you { color: var(--accent); }
+  .msg.think { border-left: 2px solid var(--accent); padding-left: 10px; color: var(--text); }
   .tool { font-family: var(--mono); font-size: 12.5px; background: var(--panel2);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
   .tool .cmd { color: var(--good); }
@@ -192,10 +193,19 @@ document.querySelectorAll(".tabs button[data-tab]").forEach(b => b.addEventListe
 // Everything the coach and engineer log lands here in real time — plans, picks,
 // board reads, errors — so the draft is watchable live, not just in hindsight.
 const seenKeys = new Set();
-function evKey(ev){ return ev.ts + "|" + ev.type + "|" + ev.summary; }
+function evKey(ev){ return ev.ts + "|" + ev.type + "|" + (ev.summary || (ev.text||"").slice(0,50)); }
 function addActivity(ev) {
   const k = evKey(ev); if (seenKeys.has(k)) return; seenKeys.add(k);
-  if (seenKeys.size > 400) seenKeys.clear();
+  if (seenKeys.size > 600) seenKeys.clear();
+  // The model's live reasoning streams as "think" events — render as flowing
+  // console text, the way the interactive chat shows the coach's own output.
+  if (ev.type === "think") {
+    const d = document.createElement("div");
+    d.className = "msg bot think";
+    d.textContent = ev.text || "";
+    stream.appendChild(d); stream.scrollTop = stream.scrollHeight;
+    return;
+  }
   // A board read updates the Coach view panel (what the AI thinks is available).
   if (ev.type === "board" && ev.detail) renderCoachView(ev.detail);
   const d = document.createElement("div");

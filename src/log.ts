@@ -8,6 +8,10 @@ import { dirname } from "node:path";
 // publishable.
 
 const LOG_PATH = process.env.ACTIVITY_LOG ?? "/data/sleeper-coach/activity.jsonl";
+// Transient "thinking" channel: the agent's full streamed output, kept OUT of
+// the durable activity log (which is the record of decisions) but tailed into
+// the live dashboard console so the model's reasoning is watchable in full.
+const REASONING_PATH = process.env.REASONING_LOG ?? "/data/sleeper-coach/reasoning.jsonl";
 
 export interface ActivityEvent {
   ts: string;
@@ -26,6 +30,20 @@ export function logEvent(actor: ActivityEvent["actor"], type: string, summary: s
     /* logging must never break the caller */
   }
   console.log(`[${actor}] ${type}: ${summary}`);
+}
+
+// Append a chunk of the agent's live reasoning to the transient channel. Shown
+// in the dashboard console as it streams; never pollutes the durable activity
+// record. Keeps the caller safe if the write fails.
+export function logThink(actor: ActivityEvent["actor"], text: string): void {
+  if (!text.trim()) return;
+  const ev = { ts: new Date().toISOString(), actor, type: "think", text };
+  try {
+    mkdirSync(dirname(REASONING_PATH), { recursive: true });
+    appendFileSync(REASONING_PATH, JSON.stringify(ev) + "\n");
+  } catch {
+    /* transient channel — never break the caller */
+  }
 }
 
 // Read the most recent N events (for the dashboard activity view).

@@ -28,6 +28,7 @@ export interface RunOptions {
   sessionId?: string; // resume a conversation if its transcript exists
   onEvent?: (ev: AgentEvent) => void;
   extraSystemPrompt?: string;
+  partial?: boolean; // stream partial deltas (default true); false = whole messages only
 }
 
 export interface RunResult {
@@ -49,7 +50,6 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
     "--print",
     "--output-format", "stream-json",
     "--verbose",
-    "--include-partial-messages",
     "--model", MODEL,
     "--effort", EFFORT,
     "--settings", SETTINGS,
@@ -59,6 +59,10 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
     sessionId,
     opts.prompt,
   ];
+  // Partial-message deltas make the interactive console feel live; for one-shot
+  // callers that only need whole messages (the draft engine), skip them so the
+  // stream is clean, complete assistant turns.
+  if (opts.partial !== false) args.splice(3, 0, "--include-partial-messages");
 
   const child = Bun.spawn([CLAUDE_BIN, ...args], {
     cwd: REPO_ROOT,

@@ -9,6 +9,7 @@ import { recentEvents } from "../log.ts";
 import { statSync, openSync, readSync, closeSync } from "node:fs";
 
 const ACTIVITY_LOG = process.env.ACTIVITY_LOG ?? "/data/sleeper-coach/activity.jsonl";
+const REASONING_LOG = process.env.REASONING_LOG ?? "/data/sleeper-coach/reasoning.jsonl";
 
 // The dashboard server. Serves the single-page UI, a state endpoint for the
 // board/roster panels, and an SSE chat endpoint that streams the agent's
@@ -96,35 +97,40 @@ function sseActivityStream(): Response {
   const enc = new TextEncoder();
   let tick: ReturnType<typeof setInterval> | undefined;
   let ping: ReturnType<typeof setInterval> | undefined;
-  let offset = 0;
-  try { offset = statSync(ACTIVITY_LOG).size; } catch { offset = 0; }
+  // Tail both the durable activity log and the transient reasoning channel, each
+  // with its own byte offset, so decisions and live model thinking interleave.
+  const files = [ACTIVITY_LOG, REASONING_LOG];
+  const offsets = files.map((f) => { try { return statSync(f).size; } catch { return 0; } });
   const stream = new ReadableStream({
     start(controller) {
       const send = (event: string, data: unknown) =>
         controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-      // Seed with recent history so a freshly-opened console isn't blank.
+      // Seed with recent decision history so a freshly-opened console isn't blank
+      // (reasoning is transient — not replayed).
       for (const ev of recentEvents(40)) send("event", ev);
-      tick = setInterval(() => {
+      const drain = (path: string, i: number) => {
+        let off = offsets[i] ?? 0;
         let size: number;
-        try { size = statSync(ACTIVITY_LOG).size; } catch { return; }
-        if (size < offset) offset = 0; // truncated/rotated
-        if (size <= offset) return;
+        try { size = statSync(path).size; } catch { return; }
+        if (size < off) off = 0; // truncated/rotated
+        if (size <= off) { offsets[i] = off; return; }
         try {
-          const fd = openSync(ACTIVITY_LOG, "r");
-          const buf = Buffer.allocUnsafe(size - offset);
-          const read = readSync(fd, buf, 0, buf.length, offset);
+          const fd = openSync(path, "r");
+          const buf = Buffer.allocUnsafe(size - off);
+          const read = readSync(fd, buf, 0, buf.length, off);
           closeSync(fd);
           const chunk = buf.subarray(0, read).toString("utf8");
           const lastNl = chunk.lastIndexOf("\n");
-          if (lastNl === -1) return; // no complete line yet; wait for more
-          offset += Buffer.byteLength(chunk.slice(0, lastNl + 1), "utf8");
+          if (lastNl === -1) { offsets[i] = off; return; } // no complete line yet
+          offsets[i] = off + Buffer.byteLength(chunk.slice(0, lastNl + 1), "utf8");
           for (const line of chunk.slice(0, lastNl).split("\n")) {
             const t = line.trim();
             if (!t) continue;
             try { send("event", JSON.parse(t)); } catch { /* skip bad line */ }
           }
         } catch { /* ignore read races */ }
-      }, 1000);
+      };
+      tick = setInterval(() => files.forEach(drain), 1000);
       ping = setInterval(() => controller.enqueue(enc.encode(`: ping\n\n`)), 15000);
     },
     cancel() { if (tick) clearInterval(tick); if (ping) clearInterval(ping); },

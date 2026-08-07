@@ -18,7 +18,7 @@ import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
 import { positionCap } from "./logic.ts";
 import type { DraftPick } from "../sleeper/types.ts";
-import { logEvent } from "../log.ts";
+import { logEvent, logThink } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
@@ -190,6 +190,20 @@ async function refreshPlan(picks: DraftPick[], available: { name: string; pos: s
     .map((p) => `${p.pick_no}. ${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""} (${p.metadata?.["position"] ?? "?"}) → team ${p.draft_slot}${p.draft_slot === myDraftSlot ? " [YOU]" : ""}`)
     .join("\n") || "(no picks yet)";
   const res = await runAgent({
+    partial: false, // whole assistant messages → clean full reasoning in the console
+    onEvent: (ev) => {
+      // Stream the model's full output to the live console as it arrives.
+      if (ev.type !== "assistant") return;
+      const msg = ev["message"];
+      const content = msg && typeof msg === "object" ? (msg as { content?: unknown }).content : undefined;
+      if (!Array.isArray(content)) return;
+      for (const b of content) {
+        if (b && typeof b === "object" && (b as { type?: unknown }).type === "text") {
+          const t = (b as { text?: unknown }).text;
+          if (typeof t === "string") logThink("coach", t);
+        }
+      }
+    },
     prompt:
       `You are the coach in a ${draft.settings.teams}-team ${scoringLabel} snake draft, approaching pick ${pickNo} (round ${round}). ${have}\n` +
       `Recent picks (react to runs and what rivals are stacking):\n${recent}\n\n` +
@@ -198,7 +212,7 @@ async function refreshPlan(picks: DraftPick[], available: { name: string; pos: s
       `You need only ONE tight end: do NOT reach for a TE, and never plan a second TE until the very last rounds; ` +
       `a TE is worth an early pick only if it is clearly the best value AND you have none. Take at most one QB and not ` +
       `before mid-draft. Draft K and DEF only in the final 2-3 rounds. Anticipate RB/WR runs and respect tiers over raw rank. ` +
-      `First write ONE short sentence of reasoning. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
+      `First write two or three sentences of reasoning explaining your thinking about the board, runs, and roster needs. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
   });
   if (res.error || !res.text.trim()) {
     // Agent unavailable — keep drafting deterministically off the value board.
@@ -339,11 +353,12 @@ for (;;) {
   if (consumed) {
     myPicksMade++;
     const after = await sleeper.draftPicks(draftId);
-    const roster = myRoster(after);
-    const nm = roster[roster.length - 1] ?? target.name; // real pick if API caught up
+    // Log what we actually clicked (target). The API roster lags, so reading the
+    // "last" pick back would show the PREVIOUS pick — misleading. Only override
+    // if the clock autopicked something other than our target from the queue.
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`[draft-run] our pick #${round} = ${nm} (${secs}s)`);
-    logEvent("coach", "draft-pick", `Our pick #${round} (R${round}): ${nm} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
+    console.log(`[draft-run] our pick #${round} = ${target.name} (${secs}s)`);
+    logEvent("coach", "draft-pick", `Our pick #${round} (R${round}): ${target.name} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
     // Safe window: next turn is a full snake cycle away. Refresh the small
     // backstop queue and adjust the plan now, off the clock.
     await pushQueue(after).catch(() => {});
