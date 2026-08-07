@@ -20,7 +20,14 @@ import type { DraftPick } from "../sleeper/types.ts";
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
-const draftId = process.argv[2] ?? config.draftId;
+// args: <draftId> [--rehearse] [--seat=N]. --rehearse claims a seat and starts
+// the draft itself (for mock practice); without it, the script just joins the
+// (real) draft, queues, and picks when the commissioner starts it. This is one
+// fire-and-forget script that runs the whole draft — the production pattern.
+const argv = process.argv.slice(2);
+const draftId = argv.find((a) => !a.startsWith("--")) ?? config.draftId;
+const rehearse = argv.includes("--rehearse");
+const seat = Number(argv.find((a) => a.startsWith("--seat="))?.split("=")[1] ?? "0"); // 0-indexed CLAIM
 const roomUrl = `https://sleeper.com/draft/nfl/${draftId}`;
 
 async function api(path: string, body?: unknown): Promise<Record<string, unknown>> {
@@ -47,6 +54,13 @@ async function ensureRoom(): Promise<void> {
 }
 await api("/goto", { url: roomUrl });
 await Bun.sleep(3000);
+
+// Rehearsal: claim a seat (position variety via --seat) before setting the queue.
+if (rehearse) {
+  console.log(`[draft-run] rehearse: claiming seat ${seat + 1}`);
+  await api("/click", { text: "CLAIM", nth: seat }).catch(() => {});
+  await Bun.sleep(2500);
+}
 
 // Value the board by THIS draft's scoring (ppr | half_ppr | std).
 const league = await sleeper.league(config.leagueId);
@@ -97,8 +111,16 @@ async function refreshPlan(picks: DraftPick[]): Promise<void> {
   console.log(`[draft-run] plan (pick ${pickNo}): ${plan.slice(0, 5).join(", ")}${plan.length > 5 ? " …" : ""}`);
 }
 
-await refreshPlan(await sleeper.draftPicks(draftId)); // initial plan + queue
+await refreshPlan(await sleeper.draftPicks(draftId)); // initial plan + queue (backstop ready)
 
+// Rehearsal: start the draft ourselves once the queue is set.
+if (rehearse) {
+  console.log("[draft-run] rehearse: starting draft");
+  await api("/click", { selector: ".start-draft-button" }).catch(() => {});
+  await Bun.sleep(4000);
+}
+
+console.log("[draft-run] entering pick loop (waiting for our turns)…");
 for (;;) {
   await ensureRoom();
   const picks = await sleeper.draftPicks(draftId);
@@ -125,8 +147,12 @@ for (;;) {
     } catch (e) {
       console.log(`[draft-run] pick error: ${e instanceof Error ? e.message : String(e)}`);
     }
-    await Bun.sleep(1500);
-    const after = await sleeper.draftPicks(draftId);
+    // Poll a few seconds for the pick to register (API lags the click a moment).
+    let after = await sleeper.draftPicks(draftId);
+    for (let i = 0; i < 5 && !after.find((p) => p.pick_no === pickNo); i++) {
+      await Bun.sleep(1200);
+      after = await sleeper.draftPicks(draftId);
+    }
     const mine = after.find((p) => p.pick_no === pickNo);
     if (mine) {
       const nm = `${mine.metadata?.["first_name"] ?? ""} ${mine.metadata?.["last_name"] ?? ""}`.trim();

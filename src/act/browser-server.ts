@@ -83,9 +83,10 @@ Bun.serve({
           return Response.json({ result: await run(() => page.evaluate(str(b.expr))) });
         case "/click":
           await run(async () => {
-            if (b.role) await page.getByRole(str(b.role) as "button", { name: new RegExp(str(b.text), "i") }).first().click({ timeout: 8000 });
-            else if (b.text) await page.getByText(new RegExp(str(b.text), "i")).first().click({ timeout: 8000 });
-            else await page.click(str(b.selector), { timeout: 8000 });
+            const nth = typeof b.nth === "number" ? b.nth : 0;
+            if (b.role) await page.getByRole(str(b.role) as "button", { name: new RegExp(str(b.text), "i") }).nth(nth).click({ timeout: 8000 });
+            else if (b.text) await page.getByText(new RegExp(str(b.text), "i")).nth(nth).click({ timeout: 8000 });
+            else await page.locator(str(b.selector)).nth(nth).click({ timeout: 8000 });
           });
           return Response.json({ ok: true });
         case "/pick":
