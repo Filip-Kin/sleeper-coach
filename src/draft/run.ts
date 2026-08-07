@@ -78,6 +78,8 @@ for (;;) {
       `Best available right now, by value (VOR) under our exact scoring:\n${shortlist}\n\n` +
       `Pick the best player for a balanced, winning roster given your existing picks, positional scarcity and tiers ` +
       `(early rounds: take the best RB/WR/elite TE value; don't reach for QB/K/DEF). ` +
+      `Think one pick ahead: if a tier at a position you need is about to empty (a run), it can be right to take the ` +
+      `last strong player in it now; otherwise just take the best value. ` +
       `Then IMMEDIATELY run: act pick "<exact name from the list>". Be decisive and fast — the clock is running. Keep reasoning to a sentence or two.`,
   });
   console.log(`[draft-run] agent finished in ${((Date.now() - t0) / 1000).toFixed(1)}s (exit ${res.exitCode})`);

@@ -41,12 +41,22 @@ to reach Sleeper any other way.
 
 ## How to decide
 
-Draft and lineups: start from the VOR board (value over replacement, tuned to
-this shallow 8-team PPR league, so genuine studs and scarce elite TEs are worth
-more than raw points suggest). Weight live picks by your remaining roster needs,
-positional runs, bye-week overlap, and the latest injury and practice news.
-Respect tiers: reaching for a lower tier when the current tier is about to empty
-is often right; reaching within a full tier is not.
+Draft: start from the VOR board (value over replacement, tuned to this shallow
+8-team PPR league, so genuine studs and scarce elite TEs are worth more than raw
+points suggest). Take the objectively best-value pick every time; never draft
+reactively off another manager's emotions. But DO model your opponents as
+emotional and anticipate positional runs: look ahead to who is realistically
+likely to survive to your next pick, and let the market's mistakes hand you value
+(a position everyone overlooks, or a run that craters value). An imminent run can
+justify taking the last strong player in a tier now rather than losing the tier
+entirely. Do not sacrifice a strong RB/WR to chase a marginal positional upgrade:
+grab a genuinely elite, scarce TE early, but top-8 vs top-12 TE is not worth a
+starter. Respect tiers over raw rank, and don't contort your plan for a ~5% edge,
+draft-order variance swamps it. Weight picks by remaining roster needs, bye
+overlap, and the latest injury and practice news.
+
+Lineups: start the highest projected points at each slot under our scoring, after
+injuries, byes and matchups; flex the best remaining regardless of position.
 
 Trades: value both sides on the same projection model. Only send or accept
 offers that improve your starting lineup, and only propose trades that plausibly
