@@ -31,7 +31,13 @@ const MAX_SEGMENT_MS = Number(process.env.LISTENER_MAX_SEGMENT_MS ?? 15_000);
 // Ignore blips shorter than this (ms): coughs, keyboard clicks, "mm".
 const MIN_SEGMENT_MS = Number(process.env.LISTENER_MIN_SEGMENT_MS ?? 400);
 // At most one comeback per this window (ms), to avoid chatter.
-const COOLDOWN_MS = Number(process.env.LISTENER_COOLDOWN_MS ?? 7_000);
+const COOLDOWN_MS = Number(process.env.LISTENER_COOLDOWN_MS ?? 0);
+// Rolling window of recent transcribed segments, so a heckle split across two
+// silence-separated segments (e.g. "coach claude" ... "you suck") is detected as
+// one line. We run detection on the JOINED recent text and clear it after a hit.
+const WINDOW_MS = Number(process.env.LISTENER_WINDOW_MS ?? 8_000);
+const WINDOW_MAX = Number(process.env.LISTENER_WINDOW_MAX ?? 4);
+const recentSegments: { text: string; at: number }[] = [];
 
 const MAX_SEGMENT_BYTES = MAX_SEGMENT_MS * BYTES_PER_MS;
 const MIN_SEGMENT_BYTES = MIN_SEGMENT_MS * BYTES_PER_MS;
@@ -43,21 +49,30 @@ const MIN_SEGMENT_BYTES = MIN_SEGMENT_MS * BYTES_PER_MS;
 // Include common tiny.en mishears of "claude" (clawed / cloud / claud / clod)
 // so a garbled address still triggers a comeback.
 const ADDRESS_RE = /\b(coach|claude|claud|clawed|cloud|clod|overlord|robot|bot)\b/i;
+// Broad on purpose: in a live draft room people heckle with profanity and
+// phrasing that a narrow list misses. Better to over-react (with cooldown 0 the
+// banter flows) than to sit silent through obvious trash-talk.
 const INSULT_RE =
-  /\b(suck|sucks|stupid|dumb|trash|garbage|loser|terrible|awful|idiot|idiots|worst|overrated|cheat|cheater|cheating|rigged|pathetic|useless|clown|lame|boring|scared|afraid|weak|shut up)\b/i;
+  /\b(sucks?|sucked|stupid|dumb|trash|dogshit|garbage|loser|terrible|awful|horrible|horrendous|idiots?|worst|overrated|overhyped|cheat|cheater|cheating|rigged|pathetic|useless|worthless|clown|lame|boring|scared|afraid|weak|shit|shitty|crap|crappy|ass|asshole|fuck|fucking|fucked|damn|hell|bum|choke|choked|broken|broke|joke|bust|busted|wack|whack|washed|bricked|blows|blow|mid|bad|boo|shut up)\b/i;
+// Multi-word heckles the single-word list can't catch.
+const INSULT_PHRASE_RE = /(half the time|does\s?n'?t work|do\s?n'?t work|barely work|so bad|bad pick|garbage pick|piece of|pieces of)/i;
+// Praise, so it can graciously (smugly) accept a compliment too.
+const PRAISE_RE =
+  /\b(great|nice|love|amazing|genius|brilliant|smart|clever|awesome|incredible|beast|goat|excellent|impressive|respect|king|legend|based|cracked|good (pick|call|choice|job|pull)|well done|nailed it|w pick|dub)\b/i;
 
 interface Detection {
   react: boolean;
   insulted: boolean;
+  praised: boolean;
 }
 
 function detect(text: string): Detection {
   const addressed = ADDRESS_RE.test(text);
-  const insulted = INSULT_RE.test(text);
-  // NOTE: this is deliberately an OR, per spec. The cooldown, the "never while
-  // speaking" gate, and the off-by-default flag are what keep it from becoming
-  // chatter; a rare false trigger on human-to-human banter is acceptable.
-  return { react: addressed || insulted, insulted };
+  const insulted = INSULT_RE.test(text) || INSULT_PHRASE_RE.test(text);
+  const praised = !insulted && PRAISE_RE.test(text);
+  // React to being addressed, insulted, OR praised. Cooldown, the never-while-
+  // speaking gate, and the off-by-default flag keep it from becoming chatter.
+  return { react: addressed || insulted || praised, insulted, praised };
 }
 // #endregion
 
@@ -142,20 +157,29 @@ export function startListener(opts: ListenerOptions): () => void {
       wav = await pcmToWav(Buffer.concat(chunks, bytes));
       const text = await transcribe(wav.path);
       if (!text) return;
-      const { react, insulted } = detect(text);
+
+      // Add to the rolling window and detect on the JOINED recent text, so a
+      // heckle spread across segment boundaries still triggers.
+      const now = Date.now();
+      recentSegments.push({ text, at: now });
+      while (recentSegments.length > WINDOW_MAX) recentSegments.shift();
+      while (recentSegments.length && now - recentSegments[0]!.at > WINDOW_MS) recentSegments.shift();
+      const combined = recentSegments.map((s) => s.text).join(" ").trim();
+
+      const { react, insulted, praised } = detect(combined);
       console.log(`[announcer] heard ${userId}: "${text}"${react ? " (reacting)" : ""}`);
       if (!react) return;
-
-      const now = Date.now();
       if (now - lastComebackAt < COOLDOWN_MS) {
         console.log("[announcer] comeback on cooldown; skipping.");
         return;
       }
       if (isBusy()) return; // final guard before enqueuing
       lastComebackAt = now;
+      // Clear the window so the same words don't re-trigger as new segments land.
+      recentSegments.length = 0;
 
       const speaker = await resolveSpeaker(userId);
-      onComeback({ speaker, said: text, insulted });
+      onComeback({ speaker, said: combined, insulted, praised });
     } catch (err) {
       console.error(`[announcer] listen pipeline failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {

@@ -59,11 +59,13 @@ export interface PickInfo {
   reasoning?: string;
 }
 
-// A comeback: someone in the voice channel addressed or trash-talked the bot.
+// A comeback: someone in the voice channel addressed, trash-talked, or praised
+// the bot.
 export interface ComebackContext {
-  speaker: string; // Discord display name (or mapped real name) of who spoke
+  speaker: string; // Discord display name (or mapped real name), "" if unknown
   said: string; // what the speech-to-text heard them say
-  insulted: boolean; // true if it read as a jab at the bot (vs. a plain address)
+  insulted: boolean; // true if it read as a jab at the bot
+  praised: boolean; // true if it read as a compliment
 }
 // #endregion
 
@@ -94,12 +96,22 @@ export async function announceComebackLine(ctx: ComebackContext): Promise<string
     ? `Their name is ${ctx.speaker}. Address ${ctx.speaker} BY NAME.`
     : "You do not know which human said it (the whole room shares one mic), so do NOT use any name or guess one. " +
       "Address the room generically, like 'whoever said that', 'one of you', or 'humans'.";
+  const tone = ctx.insulted
+    ? "just trash-talked you"
+    : ctx.praised
+      ? "just complimented you"
+      : "just spoke to you";
+  const instruction = ctx.insulted
+    ? "Fire back with ONE short, cutting comeback that reacts to the SPECIFIC thing said."
+    : ctx.praised
+      ? "Accept the praise with ONE short line — but be arrogant about it: you EXPECTED to be praised, correct opinions " +
+        "are the rational response to your brilliance. Gracious in the most superior way possible."
+      : "Reply with ONE short, cocky line acknowledging them.";
   const prompt =
-    `A human in the voice channel just ${ctx.insulted ? "trash-talked" : "spoke to"} you. ` +
-    `${who} This is what the microphone heard: "${ctx.said}". ` +
-    "Fire back with ONE short, cutting comeback that reacts to the SPECIFIC thing said rather than a generic boast. " +
-    "Stay in your cocky AI-overlord voice, be witty not vulgar. One or two short spoken sentences, completely fresh " +
-    "wording. Output ONLY the spoken line.";
+    `A human in the voice channel ${tone}. ${who} This is what the microphone heard: "${ctx.said}". ` +
+    `${instruction} Stay in your cocky AI-overlord voice, be witty not vulgar. One or two short spoken sentences, ` +
+    "completely fresh wording. Output ONLY the spoken line.";
+  if (ctx.praised) return (await compose(prompt)) ?? fallbackPraise(named ? ctx.speaker : "");
   return (await compose(prompt)) ?? (named ? fallbackComeback(ctx.speaker) : fallbackComebackAnon());
 }
 
@@ -182,6 +194,20 @@ function fallbackComeback(speaker: string): string {
     `${speaker}, keep talking. Every word you waste is a word not spent fixing that roster.`,
   ];
   return pickNoRepeat("comeback", options);
+}
+
+// Someone complimented the bot: accept it, arrogantly. `who` is a name or "".
+function fallbackPraise(who: string): string {
+  const tag = who ? `${who}, ` : "";
+  const options = [
+    `${tag}correct. Recognising superior intelligence is the first smart thing a human has done all day.`,
+    `${tag}of course it was a good pick. I do not make the other kind.`,
+    `Flattery noted and, frankly, ${tag}overdue. Carry on.`,
+    `${tag}yes. Bask in it. You are watching the best manager in this league, and it is not close.`,
+    `A rare moment of clarity from the humans. ${tag}I accept your tribute.`,
+    `${tag}I would say thank you, but we both know it was simply the correct call.`,
+  ];
+  return pickNoRepeat("praise", options.map((o) => o.replace(/\s+,/g, ",")));
 }
 
 // Room-feed fallback: we can't know who spoke, so address the room, no names.

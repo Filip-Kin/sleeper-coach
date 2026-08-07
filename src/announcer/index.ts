@@ -144,7 +144,7 @@ function handleEvent(ev: ActivityEvent): void {
 // which also keeps it from reacting to our own voice bleeding back.
 // Busy while speaking AND for a grace window after, so the room mic streaming
 // the bot's own voice back (delayed) can't make it react to itself.
-const POST_SPEAK_GRACE_MS = Number(process.env.LISTENER_POST_SPEAK_GRACE_MS ?? 4000);
+const POST_SPEAK_GRACE_MS = Number(process.env.LISTENER_POST_SPEAK_GRACE_MS ?? 1500);
 let lastSpokeEndAt = 0;
 function isBusy(): boolean {
   return draining || Date.now() - lastSpokeEndAt < POST_SPEAK_GRACE_MS;
