@@ -185,6 +185,13 @@ if (rehearse) {
   await Bun.sleep(4000);
 }
 
+// Resolve our draft slot before picking anything — draft_order populates when
+// the draft starts and may lag a moment. Never pick until we know our slot.
+for (let i = 0; i < 40 && myDraftSlot == null; i++) {
+  await resolveSlot();
+  if (myDraftSlot == null) await Bun.sleep(1500);
+}
+console.log(`[draft-run] our draft slot: ${myDraftSlot ?? "unresolved"}`);
 console.log("[draft-run] entering pick loop (waiting for our turns)…");
 const teams = draft.settings.teams;
 for (;;) {
@@ -201,7 +208,9 @@ for (;;) {
   const domReady = (await api("/on-clock")).onClock === true;
   // It is our turn only when the snake math says our slot is up AND the board
   // is live. Falls back to the DOM if we couldn't resolve our slot.
-  const myTurn = myDraftSlot == null ? domReady : slotOnClock(pickNo, teams) === myDraftSlot && domReady;
+  // Only our turn when we know our slot AND the snake math says it's up AND the
+  // board is live. No DOM-only fallback — that mis-fired on other teams' picks.
+  const myTurn = myDraftSlot != null && slotOnClock(pickNo, teams) === myDraftSlot && domReady;
 
   if (!myTurn) {
     // Between picks: adjust the plan (agent) + refresh the queue backstop.
