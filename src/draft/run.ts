@@ -345,6 +345,9 @@ for (;;) {
   console.log(`[debug] our R${round} (global ${globalPick}) slot=${myDraftSlot} availN=${liveSet.size} target=${target.name} (${target.position})${forcedMandatory ? " [must-fill]" : ""}`);
   logBoard(globalPick, round, confirm.available, target.name);
   lastBoardAt = Date.now();
+  // Announce BEFORE we click. The announcer (a separate process) speaks off this
+  // event; we do NOT wait for it, so slow/failed voice never holds up the pick.
+  logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, round, reasoning: lastReasoning });
   const t0 = Date.now();
   try {
     await api("/pick", { player: target.name });

@@ -101,9 +101,10 @@ function str(v: unknown): string | undefined {
 function handleEvent(ev: ActivityEvent): void {
   if (ev.actor !== "coach") return;
 
-  if (ev.type === "draft-pick") {
+  // Announce on the pre-pick INTENT (logged right before the coach clicks), so
+  // the call lands as it picks, like a manager announcing their pick.
+  if (ev.type === "pick-intent") {
     const detail = (ev.detail ?? {}) as PickDetail;
-    // Player name: prefer detail.target (full name); fall back to the summary.
     const player = str(detail.target) ?? str(ev.summary.split(":").slice(1).join(":"))?.replace(/\s*\([A-Z]+\)\s*$/, "");
     if (!player) return;
     const round = Number(/R(\d+)/.exec(ev.summary)?.[1] ?? "") || undefined;
