@@ -1,5 +1,5 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
-import { existsSync, unlinkSync, mkdirSync } from "node:fs";
+import { unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 // Headed Chromium on Xvfb (:99 in the container), driven by Playwright, in a
@@ -11,14 +11,14 @@ const PROFILE_DIR = process.env.BROWSER_PROFILE ?? "/data/sleeper-coach/profile"
 
 // Chromium leaves three singleton symlinks that block re-launch after an
 // unclean exit; the profile is on a persistent volume so they outlive the
-// container. Clear them before every launch.
+// container. These are dangling symlinks (they point at a dead host-pid), so
+// existsSync returns false for them — we must unlink unconditionally.
 function clearSingletons(profileDir: string): void {
   for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
-    const p = join(profileDir, name);
     try {
-      if (existsSync(p)) unlinkSync(p);
+      unlinkSync(join(profileDir, name));
     } catch {
-      // Missing is fine; anything else surfaces on launch.
+      // Not present is the normal case; ignore.
     }
   }
 }

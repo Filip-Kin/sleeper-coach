@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Coach</title>
+<style>
+  :root {
+    --bg: #121316; --panel: #191b1f; --panel2: #212429; --line: #2a2e35;
+    --text: #e7e9ee; --muted: #9aa1ad; --accent: #7c8cff; --good: #46c78a;
+    --warn: #e0a63b; --bad: #e5675f; --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 18px;
+    border-bottom: 1px solid var(--line); background: var(--panel); }
+  header .team { font-weight: 650; font-size: 17px; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .pill { margin-left: auto; font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--muted); }
+  .pill.live { color: var(--good); border-color: var(--good); }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px; height: calc(100vh - 58px); }
+  .col { display: flex; flex-direction: column; min-height: 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .card h2 { margin: 0; padding: 11px 14px; font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--line); }
+  /* console */
+  #stream { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { white-space: pre-wrap; }
+  .msg.you { color: var(--accent); }
+  .tool { font-family: var(--mono); font-size: 12.5px; background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .tool .cmd { color: var(--good); }
+  .tool .out { color: var(--muted); margin-top: 6px; max-height: 140px; overflow: auto; }
+  form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
+  input[type=text] { flex: 1; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+  button { background: var(--accent); color: #0b0c10; border: 0; border-radius: 8px;
+    padding: 0 16px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
+  /* tabs */
+  .tabs { display: flex; gap: 6px; padding: 10px 12px 0; }
+  .tabs button { background: var(--panel2); color: var(--muted); border: 1px solid var(--line);
+    padding: 6px 12px; font-weight: 500; font-size: 13px; }
+  .tabs button.on { color: var(--text); border-color: var(--accent); }
+  .tabwrap { flex: 1; overflow: auto; padding: 6px 4px 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  td.num { text-align: right; font-family: var(--mono); }
+  .tier { color: var(--muted); }
+  .inj { color: var(--warn); font-size: 11px; }
+  iframe { width: 100%; height: 100%; border: 0; background: #000; }
+  .status { padding: 8px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="team" id="teamName">Coach</div>
+    <div class="sub" id="leagueSub">connecting…</div>
+  </div>
+  <div class="pill" id="statusPill">–</div>
+</header>
+<main>
+  <div class="col">
+    <div class="card" style="flex:1">
+      <h2>Coach console — live reasoning</h2>
+      <div id="stream"></div>
+      <form id="chatForm">
+        <input type="text" id="chatInput" placeholder="Talk to the coach: give it info or an instruction…" autocomplete="off" />
+        <button type="submit" id="sendBtn">Send</button>
+        <button type="button" class="ghost" id="newBtn" title="New conversation">New</button>
+      </form>
+      <div class="status" id="agentStatus">idle</div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card" style="flex:1">
+      <div class="tabs">
+        <button data-tab="board" class="on">Board</button>
+        <button data-tab="roster">My roster</button>
+        <button data-tab="vnc">Takeover</button>
+      </div>
+      <div class="tabwrap" id="tab-board"></div>
+      <div class="tabwrap" id="tab-roster" style="display:none"></div>
+      <div class="tabwrap" id="tab-vnc" style="display:none; padding:0"></div>
+    </div>
+  </div>
+</main>
+<script type="module">
+const $ = (s) => document.querySelector(s);
+const stream = $("#stream");
+let sessionId = localStorage.getItem("coach-session") || null;
+
+function addMsg(cls, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.textContent = text;
+  stream.appendChild(d); stream.scrollTop = stream.scrollHeight;
+  return d;
+}
+function addTool(name, input) {
+  const d = document.createElement("div");
+  d.className = "tool";
+  d.innerHTML = `<div class="cmd">$ ${name} ${escapeHtml(input)}</div><div class="out"></div>`;
+  stream.appendChild(d); stream.scrollTop = stream.scrollHeight;
+  return d;
+}
+function escapeHtml(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+
+let curAssistant = null;
+const toolBoxes = {};
+function handleEvent(ev) {
+  if (ev.type === "assistant" && ev.message?.content) {
+    for (const b of ev.message.content) {
+      if (b.type === "text" && b.text) curAssistant = addMsg("bot", b.text);
+      if (b.type === "tool_use") {
+        const inp = b.input?.command || JSON.stringify(b.input||{});
+        toolBoxes[b.id] = addTool(b.name || "tool", inp);
+      }
+    }
+  } else if (ev.type === "user" && ev.message?.content) {
+    for (const b of ev.message.content) {
+      if (b.type === "tool_result" && toolBoxes[b.tool_use_id]) {
+        const out = Array.isArray(b.content) ? b.content.map(c=>c.text||"").join("") : (b.content||"");
+        toolBoxes[b.tool_use_id].querySelector(".out").textContent = String(out).slice(0, 1200);
+      }
+    }
+  }
+}
+
+async function send(message) {
+  $("#agentStatus").textContent = "thinking…";
+  $("#sendBtn").disabled = true;
+  addMsg("you", message);
+  const res = await fetch("/api/chat", { method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ message, sessionId }) });
+  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i; while ((i = buf.indexOf("\n\n")) !== -1) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      const ev = chunk.split("\n").find(l=>l.startsWith("event:"))?.slice(6).trim();
+      const data = chunk.split("\n").find(l=>l.startsWith("data:"))?.slice(5).trim();
+      if (!data) continue;
+      const payload = JSON.parse(data);
+      if (ev === "session" && payload.sessionId) { sessionId = payload.sessionId; localStorage.setItem("coach-session", sessionId); }
+      else if (ev === "message") handleEvent(payload);
+      else if (ev === "done") { sessionId = payload.sessionId; localStorage.setItem("coach-session", sessionId); }
+      else if (ev === "error") addMsg("bot", "⚠ " + payload.message);
+    }
+  }
+  $("#agentStatus").textContent = "idle"; $("#sendBtn").disabled = false;
+}
+
+$("#chatForm").addEventListener("submit", (e) => { e.preventDefault();
+  const v = $("#chatInput").value.trim(); if (!v) return; $("#chatInput").value = ""; send(v); });
+$("#newBtn").addEventListener("click", () => { sessionId = null; localStorage.removeItem("coach-session"); stream.innerHTML=""; });
+
+// tabs
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".tabs button").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  for (const t of ["board","roster","vnc"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
+}));
+
+async function loadState() {
+  try {
+    const s = await (await fetch("/api/state")).json();
+    $("#teamName").textContent = s.team?.name || "Coach";
+    $("#leagueSub").textContent = `${s.league.name} · ${s.league.teams} teams · ${s.league.scoring.join(" · ")}`;
+    const pill = $("#statusPill");
+    pill.textContent = s.draft.status === "drafting" ? "DRAFT LIVE" : `draft: ${s.draft.status}`;
+    pill.className = "pill" + (s.draft.status === "drafting" ? " live" : "");
+    // board
+    $("#tab-board").innerHTML = "<table><thead><tr><th>#</th><th>Player</th><th>Pos</th><th>Tm</th>"
+      + "<th class='num'>Pts</th><th class='num'>VOR</th><th class='num'>ADP</th><th>Tier</th></tr></thead><tbody>"
+      + s.board.map((r,i)=>`<tr><td class="num">${i+1}</td><td>${r.name}${r.injury?` <span class='inj'>${r.injury}</span>`:""}</td>`
+      + `<td>${r.pos}</td><td>${r.team}</td><td class="num">${r.pts.toFixed(1)}</td><td class="num">${r.vor.toFixed(1)}</td>`
+      + `<td class="num">${r.adp?r.adp.toFixed(1):"–"}</td><td class="tier">T${r.tier}</td></tr>`).join("") + "</tbody></table>";
+    // roster
+    $("#tab-roster").innerHTML = s.roster.length ? "<table><tbody>"
+      + s.roster.map(p=>`<tr><td>${p.name}${p.injury?` <span class='inj'>${p.injury}</span>`:""}</td><td>${p.pos}</td><td>${p.team}</td></tr>`).join("")
+      + "</tbody></table>" : "<p style='color:var(--muted);padding:14px'>Roster empty (pre-draft).</p>";
+    // vnc
+    if (!$("#tab-vnc").dataset.loaded) { $("#tab-vnc").innerHTML = `<iframe src="${s.novncUrl}"></iframe>`; $("#tab-vnc").dataset.loaded="1"; }
+  } catch (e) { $("#leagueSub").textContent = "state error: " + e; }
+}
+loadState(); setInterval(loadState, 30000);
+</script>
+</body>
+</html>

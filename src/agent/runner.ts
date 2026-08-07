@@ -68,8 +68,11 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   const decoder = new TextDecoder();
   let buffer = "";
 
-  for await (const chunk of child.stdout) {
-    buffer += decoder.decode(chunk, { stream: true });
+  const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
     let nl: number;
     while ((nl = buffer.indexOf("\n")) !== -1) {
       const line = buffer.slice(0, nl).trim();

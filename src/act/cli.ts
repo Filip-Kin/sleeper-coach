@@ -13,7 +13,7 @@
 //
 // Kept intentionally small and explicit so the agent's authority is auditable.
 
-import { open, isLoggedIn, screenshot, makePick, setQueue, setLineup, respondTrade, sendTrade, leagueUrl } from "./sleeper.ts";
+import { open, isLoggedIn, openForLogin, screenshot, makePick, setQueue, setLineup, respondTrade, sendTrade, leagueUrl } from "./sleeper.ts";
 
 const [command, ...args] = process.argv.slice(2);
 
@@ -28,6 +28,13 @@ async function main(): Promise<void> {
       } finally {
         await ctx.close();
       }
+      break;
+    }
+    case "login-open": {
+      console.log("Opening Sleeper login. Sign in via noVNC (coach-vnc.filipkin.com). Waiting up to 15 min…");
+      const ok = await openForLogin();
+      console.log(ok ? "LOGIN_SUCCESS" : "LOGIN_TIMEOUT");
+      process.exit(ok ? 0 : 4);
       break;
     }
     case "shot": {

@@ -1,0 +1,101 @@
+import { config } from "../config.ts";
+import { sleeper } from "../sleeper/client.ts";
+import { loadSeasonProjections } from "../analysis/projections.ts";
+import { rankByVor } from "../analysis/vor.ts";
+import { loadPlayers } from "../data/players.ts";
+import { describeScoring } from "../analysis/scoring.ts";
+import { runAgent, type AgentEvent } from "../agent/runner.ts";
+
+// The dashboard server. Serves the single-page UI, a state endpoint for the
+// board/roster panels, and an SSE chat endpoint that streams the agent's
+// reasoning live (spotify-dj pattern). idleTimeout: 0 so SSE survives long
+// thinking pauses.
+
+const PORT = Number(process.env.WEB_PORT ?? 8770);
+const PUBLIC_DIR = new URL("../../public/", import.meta.url).pathname;
+// Build the noVNC embed URL, auto-supplying the VNC password from the server's
+// own env so the takeover tab connects with no prompt (behind Authelia + HTTPS).
+const NOVNC_BASE = process.env.NOVNC_BASE ?? "https://coach-vnc.filipkin.com/vnc.html";
+const NOVNC_URL = (() => {
+  const q = new URLSearchParams({ autoconnect: "1", resize: "scale" });
+  if (process.env.WEB_PASS) q.set("password", process.env.WEB_PASS);
+  return `${NOVNC_BASE}?${q.toString()}`;
+})();
+
+async function stateJson(): Promise<Response> {
+  const [league, users, rosters, players] = await Promise.all([
+    sleeper.league(config.leagueId),
+    sleeper.leagueUsers(config.leagueId),
+    sleeper.rosters(config.leagueId),
+    loadPlayers(),
+  ]);
+  const projections = await loadSeasonProjections(config.season, league.scoring_settings);
+  const ranked = rankByVor(projections, league).slice(0, 60);
+
+  const me = rosters.find((r) => r.roster_id === config.rosterId);
+  const myPlayers = (me?.players ?? []).map((pid) => {
+    const p = players[pid];
+    return { id: pid, name: p ? (p.full_name ?? `${p.first_name} ${p.last_name}`) : pid, pos: p?.position ?? "?", team: p?.team ?? "?", injury: p?.injury_status ?? null };
+  });
+
+  const draft = await sleeper.draft(config.draftId);
+
+  return Response.json({
+    league: { name: league.name, teams: league.total_rosters, scoring: describeScoring(league.scoring_settings), status: league.status },
+    draft: { type: draft.type, status: draft.status, rounds: draft.settings.rounds, clock: draft.settings.pick_timer, startTime: draft.start_time },
+    team: { name: users.find((u) => u.user_id === me?.owner_id)?.metadata?.team_name ?? "The Gays", rosterId: config.rosterId },
+    roster: myPlayers,
+    board: ranked.map((r) => ({ name: r.name, pos: `${r.position}${r.posRank}`, team: r.team, pts: r.points, vor: r.vor, adp: r.adp >= 999 ? null : r.adp, tier: r.tier, injury: r.injuryStatus })),
+    novncUrl: NOVNC_URL,
+  });
+}
+
+function sseChat(req: Request): Response {
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = new TextEncoder();
+      const send = (event: string, data: unknown) => controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      const ping = setInterval(() => controller.enqueue(enc.encode(`: ping\n\n`)), 15000);
+      try {
+        const body = (await req.json()) as { message: string; sessionId?: string };
+        send("session", { sessionId: body.sessionId ?? null });
+        const result = await runAgent({
+          prompt: body.message,
+          sessionId: body.sessionId,
+          onEvent: (ev: AgentEvent) => send("message", ev),
+        });
+        send("done", { sessionId: result.sessionId, exitCode: result.exitCode });
+      } catch (err) {
+        send("error", { message: err instanceof Error ? err.message : String(err) });
+      } finally {
+        clearInterval(ping);
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+Bun.serve({
+  port: PORT,
+  idleTimeout: 0,
+  async fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === "/api/state") return stateJson().catch((e) => Response.json({ error: String(e) }, { status: 500 }));
+    if (url.pathname === "/api/chat" && req.method === "POST") return sseChat(req);
+    // Static: index at root, else serve files from public/.
+    const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+    const file = Bun.file(`${PUBLIC_DIR}${rel}`);
+    if (await file.exists()) return new Response(file);
+    return new Response("not found", { status: 404 });
+  },
+});
+
+console.log(`[web] dashboard on http://127.0.0.1:${PORT}`);
