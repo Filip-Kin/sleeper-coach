@@ -94,12 +94,12 @@ export async function importSession(
 
 // #region actions (selector bodies completed in Phase C against the live DOM)
 
-// Ensure we're in a draft room. If already in one (e.g. a mock), stay; else go
-// to this league's real draft.
-async function ensureDraftRoom(page: Page): Promise<void> {
+// Require that we're already in a draft room. We deliberately do NOT navigate
+// here: the caller (orchestrator) owns which draft (real vs a mock) we're in.
+// Silently jumping to the real draft was a bug that hijacked mock rehearsals.
+async function requireDraftRoom(page: Page): Promise<void> {
   if (!page.url().includes("/draft/")) {
-    await page.goto(draftUrl(), { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(3000);
+    throw new Error(`not in a draft room (on ${page.url()}); navigate to the draft first`);
   }
 }
 
@@ -122,7 +122,7 @@ export async function isOnClock(page: Page): Promise<boolean> {
 // Draft a player. The pick button (.draft-button) is only live when we're on
 // the clock; otherwise it carries a .disable class and the click is a no-op.
 export async function makePick(page: Page, playerName: string): Promise<void> {
-  await ensureDraftRoom(page);
+  await requireDraftRoom(page);
   const row = await findPlayerRow(page, playerName);
   const btn = row.locator(".draft-button:not(.disable)");
   await btn.click({ timeout: 8000 });
@@ -137,7 +137,7 @@ export async function makePick(page: Page, playerName: string): Promise<void> {
 // Set the Sleeper draft queue (the autopick fallback) to a ranked list, in
 // order. Each player's .queue-action adds them to the queue.
 export async function setQueue(page: Page, playerNames: string[]): Promise<void> {
-  await ensureDraftRoom(page);
+  await requireDraftRoom(page);
   for (const name of playerNames) {
     const row = await findPlayerRow(page, name);
     await row.locator(".queue-action").click({ timeout: 5000 });

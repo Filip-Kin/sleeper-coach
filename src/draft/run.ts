@@ -6,6 +6,7 @@
 //
 //   bun run src/draft/run.ts [draftId]
 
+import { unlinkSync } from "node:fs";
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { runAgent } from "../agent/runner.ts";
@@ -13,7 +14,9 @@ import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor } from "../analysis/vor.ts";
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
+const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
 const draftId = process.argv[2] ?? config.draftId;
+const roomUrl = `https://sleeper.com/draft/nfl/${draftId}`;
 
 async function api(path: string, body?: unknown): Promise<Record<string, unknown>> {
   const res = await fetch(`${API}${path}`, {
@@ -28,13 +31,33 @@ const draft = await sleeper.draft(draftId);
 const total = draft.settings.teams * draft.settings.rounds;
 console.log(`[draft-run] draft ${draftId}: ${draft.settings.teams}x${draft.settings.rounds}=${total} picks, ${draft.settings.pick_timer}s clock`);
 
-await api("/goto", { url: `https://sleeper.com/draft/nfl/${draftId}` });
+// Tell the daemon to keep its hands off the shared browser while we draft.
+await Bun.write(DRAFT_LOCK, String(draftId));
+
+// Keep the shared browser pinned to THIS draft room; re-assert if it drifts
+// (e.g. something else navigated it away).
+async function ensureRoom(): Promise<void> {
+  const u = String((await api("/eval", { expr: "location.href" })).result ?? "");
+  if (!u.includes(String(draftId))) {
+    await api("/goto", { url: roomUrl });
+    await Bun.sleep(2500);
+  }
+}
+
+await api("/goto", { url: roomUrl });
 await Bun.sleep(3000);
 
-// Safety net FIRST: queue the current best-available board so any missed clock
-// autopicks OUR board, not Sleeper's raw ADP. Refreshed every few rounds below.
+// Value the board by THIS draft's scoring, not a hardcoded format. The draft's
+// scoring_type (ppr | half_ppr | std) sets the reception value; everything else
+// carries over from the league's real scoring.
 const league = await sleeper.league(config.leagueId);
-const projections = await loadSeasonProjections(config.season, league.scoring_settings);
+const scoringType = draft.metadata?.scoring_type ?? "ppr";
+const scoring = { ...league.scoring_settings };
+if (scoringType === "half_ppr") scoring.rec = 0.5;
+else if (scoringType === "std") scoring.rec = 0;
+const scoringLabel = scoringType === "half_ppr" ? "half-PPR" : scoringType === "std" ? "standard" : "full-PPR";
+console.log(`[draft-run] scoring: ${scoringLabel} (rec ${scoring.rec})`);
+const projections = await loadSeasonProjections(config.season, scoring);
 async function syncQueue(): Promise<void> {
   const drafted = new Set((await sleeper.draftPicks(draftId)).map((p) => p.player_id));
   const names = rankByVor(projections, league).filter((r) => !drafted.has(r.playerId)).slice(0, 20).map((r) => r.name);
@@ -46,6 +69,7 @@ await syncQueue();
 const myPicks: string[] = [];
 
 for (;;) {
+  await ensureRoom();
   const picks = await sleeper.draftPicks(draftId);
   if (picks.length >= total) {
     console.log(`[draft-run] draft complete (${picks.length} picks)`);
@@ -73,8 +97,8 @@ for (;;) {
   const t0 = Date.now();
   const res = await runAgent({
     prompt:
-      `You are the coach, on the clock at pick ${pickNo} (round ${round}) of an 8-team full-PPR snake draft. ` +
-      `Starters: QB, 2 RB, 2 WR, TE, 2 FLEX, K, DEF, plus 6 bench. ${have}` +
+      `You are the coach, on the clock at pick ${pickNo} (round ${round}) of a ${draft.settings.teams}-team ${scoringLabel} snake draft. ` +
+      `Starters: QB, 2 RB, 2 WR, TE, 2 FLEX, K, DEF, plus bench. ${have}` +
       `Best available right now, by value (VOR) under our exact scoring:\n${shortlist}\n\n` +
       `Pick the best player for a balanced, winning roster given your existing picks, positional scarcity and tiers ` +
       `(early rounds: take the best RB/WR/elite TE value; don't reach for QB/K/DEF). ` +
@@ -97,4 +121,9 @@ for (;;) {
   await Bun.sleep(1500);
 }
 
+try {
+  unlinkSync(DRAFT_LOCK);
+} catch {
+  /* lock already gone */
+}
 console.log(`[draft-run] my roster: ${myPicks.join(", ")}`);

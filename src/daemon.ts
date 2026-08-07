@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { config } from "./config.ts";
 import { sleeper } from "./sleeper/client.ts";
@@ -15,6 +15,10 @@ import { sendAlert } from "./alert.ts";
 
 const DB_PATH = process.env.COACH_DB ?? "/data/sleeper-coach/coach.db";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 90_000);
+// While the draft orchestrator owns the shared browser, the daemon must not
+// navigate it (auth checks / trade handling), or it hijacks the draft.
+const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
+const draftActive = () => existsSync(DRAFT_LOCK);
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
@@ -90,6 +94,7 @@ async function pollOnce(): Promise<void> {
     const isPending = tx.status === "pending";
     const involvesUs = (tx.roster_ids ?? []).includes(config.rosterId);
     if (isTrade && isPending && involvesUs && !alreadyHandled(tx.transaction_id)) {
+      if (draftActive()) continue; // don't drive the browser mid-draft
       await handlePendingTrade(tx);
     }
   }
