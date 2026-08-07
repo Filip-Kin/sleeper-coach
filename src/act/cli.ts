@@ -31,8 +31,9 @@ async function main(): Promise<void> {
       break;
     }
     case "login-open": {
-      console.log("Opening Sleeper login. Sign in via noVNC (coach-vnc.filipkin.com). Waiting up to 15 min…");
-      const ok = await openForLogin();
+      const minutes = Number(args[0]) || 90;
+      console.log(`Opening Sleeper login. Sign in via noVNC. Holding open for ${minutes} min…`);
+      const ok = await openForLogin(minutes * 60_000);
       console.log(ok ? "LOGIN_SUCCESS" : "LOGIN_TIMEOUT");
       process.exit(ok ? 0 : 4);
       break;
