@@ -1,0 +1,49 @@
+# The announcer service: a lightweight image (Bun + ffmpeg + Piper local TTS +
+# the Claude CLI) that tails the coach's activity log and speaks the draft picks
+# into a Discord voice channel. No Playwright/browser stack, unlike the main
+# coach image.
+
+FROM oven/bun:1-debian
+
+ARG PIPER_VERSION=2023.11.14-2
+ARG PIPER_VOICE=en_US-lessac-medium
+
+# ffmpeg transcodes Piper's WAV to Opus for Discord (used by @discordjs/voice).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ffmpeg curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Piper: prebuilt binary + one English voice model. The tarball unpacks to
+# /opt/piper and bundles its own shared libs and espeak-ng-data.
+RUN curl -fsSL "https://github.com/rhasspy/piper/releases/download/${PIPER_VERSION}/piper_linux_x86_64.tar.gz" \
+      | tar -xzf - -C /opt \
+ && mkdir -p /opt/piper/voices \
+ && curl -fsSL -o "/opt/piper/voices/${PIPER_VOICE}.onnx" \
+      "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/${PIPER_VOICE}.onnx?download=true" \
+ && curl -fsSL -o "/opt/piper/voices/${PIPER_VOICE}.onnx.json" \
+      "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/${PIPER_VOICE}.onnx.json?download=true"
+ENV PIPER_BIN=/opt/piper/piper \
+    PIPER_MODEL=/opt/piper/voices/en_US-lessac-medium.onnx \
+    PIPER_ESPEAK_DATA=/opt/piper/espeak-ng-data \
+    PIPER_LIB_DIR=/opt/piper \
+    LD_LIBRARY_PATH=/opt/piper
+
+# Claude CLI, used by the runner to compose the overlord lines. Installed at
+# build into a fixed HOME so no writable data mount is needed at runtime; auth
+# comes from CLAUDE_CODE_OAUTH_TOKEN in the env file.
+ENV HOME=/root
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV CLAUDE_BIN=/root/.local/bin/claude
+ENV PATH="/root/.local/bin:${PATH}"
+
+WORKDIR /app
+
+# Browsers are never used here; skip the Playwright download during install.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY . .
+
+CMD ["bun", "run", "src/announcer/index.ts"]

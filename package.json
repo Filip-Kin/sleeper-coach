@@ -11,15 +11,21 @@
     "draft-run": "bun run src/draft/run.ts",
     "blog-post": "bun run src/blog/generate.ts",
     "engineer": "bun run src/engineer/engineer.ts",
+    "announcer": "bun run src/announcer/index.ts",
     "selftest": "bun run src/draft/selftest.ts",
     "web": "bun run src/web/server.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14",
+    "libsodium-wrappers": "^0.8.4",
+    "opusscript": "^0.1.1",
     "playwright": "1.50.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/libsodium-wrappers": "^0.8.2",
     "typescript": "^5.6.0"
   }
 }

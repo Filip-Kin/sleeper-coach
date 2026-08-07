@@ -15,3 +15,24 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+  # Discord voice bot that speaks the coach's draft picks. Shares the data volume
+  # READ-ONLY (it only tails activity.jsonl) and joins the same default compose
+  # network. restart: on-failure means a clean exit when the Discord env is
+  # unset (see src/announcer/index.ts) stays down instead of crash-looping.
+  announcer:
+    build:
+      context: .
+      dockerfile: Dockerfile.announcer
+    container_name: sleeper-announcer
+    depends_on:
+      - sleeper-coach
+    volumes:
+      - /data/sleeper-coach:/data/sleeper-coach:ro
+    env_file: /data/sleeper-coach/env
+    restart: on-failure
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

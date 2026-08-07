@@ -51,6 +51,21 @@ bun run coach players --refresh   # refresh the player cache
 5. **In-season** — scheduled lineup + waiver wakeups, trade poller and
    evaluator, proactive trade proposals shaped by manager tendencies.
 
+## Announcer (Discord voice)
+
+A separate service (`src/announcer/`, compose service `announcer`) joins a
+Discord voice channel and SPEAKS the coach's draft picks out loud in a cocky
+AI-overlord voice. It tails `activity.jsonl` (mounted read-only), composes a
+short line per pick with the claude runner, and plays it via local Piper TTS.
+Scope is announce-our-picks only; listening/replying is a later phase.
+
+To make it talk, the human provides: a Discord app + bot; the Guilds and
+GuildVoiceStates gateway intents enabled (Message Content NOT needed); the bot
+invited with Connect + Speak; and `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`,
+`DISCORD_VOICE_CHANNEL_ID` set in `/data/sleeper-coach/env`. With any of those
+missing the service logs what's absent and exits cleanly. Full details are in
+the header comment of `src/announcer/index.ts`.
+
 ## Layout
 
 ```
