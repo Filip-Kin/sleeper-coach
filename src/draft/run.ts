@@ -16,7 +16,7 @@ import { sleeper } from "../sleeper/client.ts";
 import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
-import { slotOnClock, positionCap } from "./logic.ts";
+import { positionCap } from "./logic.ts";
 import type { DraftPick } from "../sleeper/types.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
@@ -247,53 +247,62 @@ for (let i = 0; i < 40 && myDraftSlot == null; i++) {
 }
 console.log(`[draft-run] our draft slot: ${myDraftSlot ?? "unresolved"}`);
 console.log("[draft-run] entering pick loop (waiting for our turns)…");
-const teams = draft.settings.teams;
-let lastBoardPicks = -1; // publish a fresh board view each time a pick lands
+const rounds = draft.settings.rounds;
+
+// Deterministic state comes from the LIVE browser, never the lagging picks API:
+//  - Our turn = our pick button is live (onClock), debounced across two reads to
+//    dodge the brief all-buttons flash at kickoff.
+//  - Our round = a LOCAL count of picks we've made (seeded from our current
+//    roster), incremented only when a pick is confirmed. No global pick number,
+//    so API lag can never mistime a turn.
+//  - A pick is confirmed when our button goes back to disabled (the turn was
+//    consumed) — true whether we clicked it or the clock autopicked from queue.
+let myPicksMade = myRoster(await sleeper.draftPicks(draftId)).length;
+let lastBoardAt = 0;
+
+async function draftState(): Promise<{ onClock: boolean; available: { name: string; pos: string }[] }> {
+  const s = (await api("/draft-state")) as { onClock?: boolean; available?: { name: string; pos: string }[] };
+  return { onClock: s.onClock === true, available: s.available ?? [] };
+}
+
 for (;;) {
-  await ensureRoom();
-  await resolveSlot();
-  const picks = await sleeper.draftPicks(draftId);
-  const n = picks.length;
-  if (n >= total) {
-    console.log(`[draft-run] draft complete (${n} picks)`);
+  if (myPicksMade >= rounds) {
+    console.log(`[draft-run] all ${rounds} of our picks made`);
     break;
   }
-  const pickNo = n + 1;
-  const round = Math.floor((pickNo - 1) / teams) + 1;
-  // Our turn requires BOTH signals to agree: the live enabled draft button
-  // (real-time; the button is briefly enabled for everyone at kickoff, so the
-  // DOM alone false-fires at pick 1) AND the snake math saying our slot is up
-  // (guards the kickoff false-positive and any DOM oddity). Together they are
-  // robust to the picks-API lag and the start-of-draft flash.
-  // Single live-truth read: on the clock + who is ACTUALLY still available.
-  const state = (await api("/draft-state")) as { onClock?: boolean; available?: { name: string; pos: string }[] };
-  const onClock = state.onClock === true;
-  const available = state.available ?? [];
-  const availSet = new Set(available.map((a) => a.name));
-  const myTurn = onClock && myDraftSlot != null && slotOnClock(pickNo, teams) === myDraftSlot;
+  await ensureRoom();
+  await resolveSlot();
+  const round = myPicksMade + 1;
+  const { onClock, available } = await draftState();
 
-  // Observability: each time the board changes (a pick landed), publish the live
-  // available read so the dashboard's Coach view shows what the engine sees.
-  if (n !== lastBoardPicks) { logBoard(pickNo, round, available); lastBoardPicks = n; }
+  // Observability: publish the live board view (what the engine sees available)
+  // on a light time throttle, so the dashboard Coach view updates steadily.
+  if (Date.now() - lastBoardAt > 5000) { logBoard(round, round, available); lastBoardAt = Date.now(); }
 
-  if (!myTurn) {
-    // Between picks: adjust the PLAN only (throttled, and paused while the agent
-    // is backing off after an error). The queue is NOT touched here — it's a
-    // backstop refreshed off the clock, so it never competes with a pick.
-    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) await refreshPlan(picks, available);
+  if (!onClock) {
+    // Off the clock: adjust the PLAN only (throttled, paused during agent
+    // backoff). The queue is a backstop, refreshed only right after we pick.
+    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) {
+      await refreshPlan(await sleeper.draftPicks(draftId), available);
+    }
     await Bun.sleep(1500);
     continue;
   }
 
-  // ON THE CLOCK — pick FAST from the LIVE available set only (never a player
-  // who's already gone), best per our board + roster caps. If the live read is
-  // empty, re-read once before falling back to the board, so we don't target
-  // off a blank read.
-  let liveSet = availSet;
+  // Our button is live — debounce to reject the kickoff flash / a turn that
+  // passes in the same instant. Only a stable on-clock is genuinely our turn.
+  await Bun.sleep(700);
+  const confirm = await draftState();
+  if (!confirm.onClock) continue;
+
+  // ON THE CLOCK — pick from the LIVE available set (the DOM truth), best per
+  // our board + roster caps. Re-read once if the read came back empty.
+  let liveSet = new Set(confirm.available.map((a) => a.name));
   if (liveSet.size === 0) {
-    const s2 = (await api("/draft-state")) as { available?: { name: string; pos: string }[] };
-    liveSet = new Set((s2.available ?? []).map((a) => a.name));
+    const retry = await draftState();
+    liveSet = new Set(retry.available.map((a) => a.name));
   }
+  const picks = await sleeper.draftPicks(draftId);
   const board = boardNow(picks);
   const byName = new Map(board.map((b) => [b.name, b]));
   const counts = myPositionCounts(picks, myDraftSlot);
@@ -306,44 +315,44 @@ for (;;) {
     board[0];
   if (!target) {
     console.log("[draft-run] no target available");
-    break;
+    await Bun.sleep(1500);
+    continue;
   }
-  console.log(`[debug] pick ${pickNo} R${round} slot=${myDraftSlot} onClock=${onClock} availN=${liveSet.size}`);
+  console.log(`[debug] our pick #${round} slot=${myDraftSlot} availN=${liveSet.size} target=${target.name} (${target.position}) inAvail=${liveSet.has(target.name)}`);
   console.log(`[debug] avail(live): ${[...liveSet].slice(0, 8).join(", ") || "(empty)"}`);
-  console.log(`[debug] board top: ${board.slice(0, 5).map((b) => `${b.position}:${b.name}`).join(", ")}`);
   console.log(`[debug] plan top: ${plan.slice(0, 5).join(", ") || "(none)"}`);
-  console.log(`[debug] target=${target.name} (${target.position}) inAvail=${liveSet.has(target.name)}`);
-  console.log(`[draft-run] ON THE CLOCK pick ${pickNo} (R${round}) → ${target.name} (${target.position})`);
-  // Publish the board view WITH the chosen target so the dashboard shows what
-  // it's about to do and why.
-  logBoard(pickNo, round, available, target.name);
-  lastBoardPicks = n;
+  logBoard(round, round, confirm.available, target.name); // publish with the chosen target
+  lastBoardAt = Date.now();
   const t0 = Date.now();
   try {
     await api("/pick", { player: target.name });
   } catch (e) {
     console.log(`[draft-run] pick error: ${e instanceof Error ? e.message : String(e)}`);
   }
-  let after = await sleeper.draftPicks(draftId);
-  for (let i = 0; i < 6 && !after.find((p) => p.pick_no === pickNo); i++) {
-    await Bun.sleep(1200);
-    after = await sleeper.draftPicks(draftId);
+  // Confirm by our button clearing (turn consumed), not by the API. Wait up to
+  // ~10s for it to disable; if it never does, the pick didn't take.
+  let consumed = false;
+  for (let i = 0; i < 12; i++) {
+    if (!(await draftState()).onClock) { consumed = true; break; }
+    await Bun.sleep(800);
   }
-  const mine = after.find((p) => p.pick_no === pickNo && p.draft_slot === myDraftSlot);
-  if (mine) {
-    const nm = `${mine.metadata?.["first_name"] ?? ""} ${mine.metadata?.["last_name"] ?? ""}`.trim();
+  if (consumed) {
+    myPicksMade++;
+    const after = await sleeper.draftPicks(draftId);
+    const roster = myRoster(after);
+    const nm = roster[roster.length - 1] ?? target.name; // real pick if API caught up
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`[draft-run] pick ${pickNo} = ${nm} (${secs}s)`);
-    logEvent("coach", "draft-pick", `R${round} pick ${pickNo}: ${nm} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
-    // Safe window: we just picked, so our next turn is a full snake cycle away.
-    // Refresh the small backstop queue now (off the clock) and adjust the plan.
+    console.log(`[draft-run] our pick #${round} = ${nm} (${secs}s)`);
+    logEvent("coach", "draft-pick", `Our pick #${round} (R${round}): ${nm} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
+    // Safe window: next turn is a full snake cycle away. Refresh the small
+    // backstop queue and adjust the plan now, off the clock.
     await pushQueue(after).catch(() => {});
-    if (Date.now() > agentBackoffUntil) await refreshPlan(after, available).catch(() => {});
+    if (Date.now() > agentBackoffUntil) await refreshPlan(after, confirm.available).catch(() => {});
   } else {
-    // Pick didn't land — during a live draft this needs a human. Alert once.
-    console.log(`[draft-run] pick ${pickNo} did NOT register (target ${target.name})`);
-    logEvent("coach", "pick-miss", `Pick ${pickNo} target ${target.name} didn't register.`, { target: target.name });
-    if (!rehearse) await sendAlert("Draft: pick may have failed", `Pick ${pickNo} target ${target.name} didn't register — check the draft.`);
+    console.log(`[draft-run] our pick #${round} did NOT register (target ${target.name})`);
+    logEvent("coach", "pick-miss", `Our pick #${round} target ${target.name} didn't register.`, { target: target.name });
+    if (!rehearse) await sendAlert("Draft: pick may have failed", `Our pick #${round} target ${target.name} didn't register — check the draft.`);
+    await Bun.sleep(1500);
   }
 }
 
