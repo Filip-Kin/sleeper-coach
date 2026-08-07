@@ -109,8 +109,9 @@ export async function announceComebackLine(ctx: ComebackContext): Promise<string
       : "Reply with ONE short, cocky line acknowledging them.";
   const prompt =
     `A human in the voice channel ${tone}. ${who} This is what the microphone heard: "${ctx.said}". ` +
-    `${instruction} Stay in your cocky AI-overlord voice, be witty not vulgar. One or two short spoken sentences, ` +
-    "completely fresh wording. Output ONLY the spoken line.";
+    `${instruction} Stay in your cocky AI-overlord voice. You can be crude, mean, and personal — blunt name-calling ` +
+    `like "fatass", "clown", or "donkey" is fair game — just never bigoted, hateful, or slur-based. One or two short ` +
+    "spoken sentences, completely fresh wording. Output ONLY the spoken line.";
   if (ctx.praised) return (await compose(prompt)) ?? fallbackPraise(named ? ctx.speaker : "");
   return (await compose(prompt)) ?? (named ? fallbackComeback(ctx.speaker) : fallbackComebackAnon());
 }
@@ -220,6 +221,8 @@ function fallbackComebackAnon(): string {
     "Cute. Keep chirping, humans. It will not move a single projected point in your favour.",
     "Somewhere in that room a person just insulted the machine that is about to run their league.",
     "Noise from the meat side of the table. Adorable, and irrelevant.",
+    "Sit down, fatass, and let the machine that is going to win your league concentrate.",
+    "That is a lot of confidence from a room of clowns I have already sorted into losers and bigger losers.",
   ];
   return pickNoRepeat("comeback-anon", options);
 }
