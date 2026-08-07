@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Wrapper so the agent's hands are a clean `act ...` command.
+exec bun run "$(dirname "$(readlink -f "$0")")/../src/act/cli.ts" "$@"

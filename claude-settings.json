@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(coach:*)",
+      "Bash(coach)",
+      "Bash(act:*)",
+      "Bash(act)",
+      "WebSearch",
+      "WebFetch"
+    ],
+    "defaultMode": "dontAsk"
+  }
+}

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Wrapper so the agent's tool surface is a clean `coach ...` command.
+exec bun run "$(dirname "$(readlink -f "$0")")/../src/cli.ts" "$@"

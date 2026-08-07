@@ -1,0 +1,17 @@
+services:
+  sleeper-coach:
+    build: .
+    container_name: sleeper-coach
+    # Ports bound to loopback only; exposed publicly via nginx + Authelia.
+    ports:
+      - "127.0.0.1:8770:8770" # dashboard (Phase D)
+      - "127.0.0.1:6081:6080" # noVNC (takeover view)
+    volumes:
+      - /data/sleeper-coach:/data/sleeper-coach
+    env_file: /data/sleeper-coach/env
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
