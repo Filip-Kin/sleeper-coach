@@ -9,6 +9,7 @@
     "act": "bun run src/act/cli.ts",
     "daemon": "bun run src/daemon.ts",
     "draft-run": "bun run src/draft/run.ts",
+    "blog-post": "bun run src/blog/generate.ts",
     "engineer": "bun run src/engineer/engineer.ts",
     "selftest": "bun run src/draft/selftest.ts",
     "web": "bun run src/web/server.ts",

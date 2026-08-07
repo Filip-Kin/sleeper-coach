@@ -6,6 +6,7 @@ import { loadPlayers } from "../data/players.ts";
 import { describeScoring } from "../analysis/scoring.ts";
 import { runAgent, type AgentEvent } from "../agent/runner.ts";
 import { recentEvents } from "../log.ts";
+import { allPosts } from "../blog/store.ts";
 import { statSync, openSync, readSync, closeSync } from "node:fs";
 
 const ACTIVITY_LOG = process.env.ACTIVITY_LOG ?? "/data/sleeper-coach/activity.jsonl";
@@ -150,6 +151,12 @@ Bun.serve({
   idleTimeout: 0,
   async fetch(req) {
     const url = new URL(req.url);
+    // Public (no-auth at nginx) blog surface: the reader-facing retrospectives.
+    if (url.pathname === "/api/blog") return Response.json({ posts: allPosts() });
+    if (url.pathname === "/blog" || url.pathname === "/blog/") {
+      const file = Bun.file(`${PUBLIC_DIR}blog.html`);
+      if (await file.exists()) return new Response(file, { headers: { "Content-Type": "text/html" } });
+    }
     if (url.pathname === "/api/stream") return sseActivityStream();
     if (url.pathname === "/api/activity") return Response.json({ events: recentEvents(150) });
     if (url.pathname === "/api/state") return stateJson().catch((e) => Response.json({ error: String(e) }, { status: 500 }));

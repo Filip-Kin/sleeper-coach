@@ -382,3 +382,13 @@ try {
 const finalRoster = myRoster(await sleeper.draftPicks(draftId));
 logEvent("coach", "draft-complete", `Draft complete. Roster: ${finalRoster.join(", ")}`, { roster: finalRoster });
 console.log(`[draft-run] my roster: ${finalRoster.join(", ")}`);
+
+// Publish the public post-draft recap (best-effort; never fail the draft on it).
+if (!rehearse) {
+  try {
+    const p = Bun.spawn(["bun", "run", "src/blog/generate.ts", "draft", String(draftId)], { cwd: "/app", env: process.env, stdout: "inherit", stderr: "inherit" });
+    await p.exited;
+  } catch (e) {
+    console.log(`[draft-run] blog recap failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
