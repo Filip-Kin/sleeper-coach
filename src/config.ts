@@ -12,7 +12,7 @@ export const config = {
   // The active league and its draft.
   leagueId: "1389357604773322752",
   draftId: "1389357604773322753",
-  rosterId: 3, // Filip's roster in this league ("The Gays").
+  rosterId: 3, // Filip's roster in this league ("--dangerously-skip-perms").
 
   // Last season's league, kept linked by Sleeper. Used to learn manager
   // tendencies and inform keeper analysis.

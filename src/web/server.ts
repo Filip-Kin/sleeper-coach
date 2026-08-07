@@ -49,7 +49,7 @@ async function stateJson(): Promise<Response> {
   return Response.json({
     league: { name: league.name, teams: league.total_rosters, scoring: describeScoring(trueScoring(league.scoring_settings)), status: league.status },
     draft: { type: draft.type, status: draft.status, rounds: draft.settings.rounds, clock: draft.settings.pick_timer, startTime: draft.start_time },
-    team: { name: users.find((u) => u.user_id === me?.owner_id)?.metadata?.team_name ?? "The Gays", rosterId: config.rosterId },
+    team: { name: users.find((u) => u.user_id === me?.owner_id)?.metadata?.team_name ?? "--dangerously-skip-perms", rosterId: config.rosterId },
     roster: myPlayers,
     board: ranked.map((r) => ({ name: r.name, pos: `${r.position}${r.posRank}`, team: r.team, pts: r.points, vor: r.vor, adp: r.adp >= 999 ? null : r.adp, tier: r.tier, injury: r.injuryStatus })),
     novncUrl: NOVNC_URL,

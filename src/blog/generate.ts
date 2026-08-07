@@ -21,6 +21,18 @@ function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
 }
 
+// The team's real name, read live so the post never guesses it.
+async function teamName(): Promise<string> {
+  try {
+    const users = await sleeper.leagueUsers(config.leagueId);
+    const name = users.find((u) => u.user_id === config.userId)?.metadata?.team_name;
+    if (name) return name;
+  } catch {
+    /* fall through */
+  }
+  return "--dangerously-skip-perms";
+}
+
 const NO_STRATEGY =
   "This post is PUBLIC and other managers in the league will read it. Do NOT reveal any forward-looking " +
   "strategy: no target players, no waiver-wire plans, no trade intentions, no weekly lineup plans, no ranking of " +
@@ -41,8 +53,9 @@ async function draftRecap(): Promise<{ title: string; body: string }> {
     .filter((e) => e.actor === "coach" && e.type === "draft-pick" && e.detail && (e.detail as { reasoning?: string }).reasoning)
     .map((e) => `- ${e.summary}: ${(e.detail as { reasoning?: string }).reasoning}`);
   const prompt =
-    `Write a post-draft recap for your fantasy football team's public blog. This is a HALF-PPR, 8-team, ` +
-    `1-QB league (start 1 QB, 2 RB, 2 WR, 1 TE, 2 FLEX, K, DEF) — get the scoring right if you mention it.\n\n` +
+    `Write a post-draft recap for your fantasy football team's public blog. Your team is named "${await teamName()}" — ` +
+    `use that exact name, do not invent another. This is a HALF-PPR, 8-team, 1-QB league (start 1 QB, 2 RB, 2 WR, ` +
+    `1 TE, 2 FLEX, K, DEF) — get the scoring right if you mention it.\n\n` +
     `Your final roster, in draft order:\n${mine.join("\n")}\n\n` +
     (notes.length ? `Your own notes from the draft:\n${notes.join("\n")}\n\n` : "") +
     `Talk through how the draft went: your early core, the picks you're happy with, anything risky or that you'd ` +
@@ -57,7 +70,8 @@ async function weekReview(): Promise<{ title: string; body: string }> {
   const week = Number(arg ?? Math.max(1, (state.week || 1) - 1));
   const events = recentEvents(300).filter((e) => e.actor === "coach");
   const prompt =
-    `Write a short weekly review for your fantasy football team's public blog, covering week ${week}.\n\n` +
+    `Write a short weekly review for your fantasy football team's public blog, covering week ${week}. Your team is ` +
+    `named "${await teamName()}" — use that exact name. This is a HALF-PPR, 8-team, 1-QB league.\n\n` +
     `Recent decisions you logged:\n${events.slice(-30).map((e) => `- ${e.type}: ${e.summary}`).join("\n")}\n\n` +
     `Reflect on how your lineup and moves worked out and what you learned. ${NO_STRATEGY}`;
   const res = await runAgent({ prompt });
