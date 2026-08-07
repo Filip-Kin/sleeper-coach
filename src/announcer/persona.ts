@@ -14,7 +14,11 @@ const OVERLORD_SYSTEM =
   "plain spoken words only. No stage directions, no emojis, no markdown, no quotation marks, no lists. " +
   "Announce the pick first, then optionally one brief jab at the humans.";
 
-const AGENT_TIMEOUT_MS = Number(process.env.ANNOUNCER_AGENT_TIMEOUT_MS ?? 45_000);
+// The spoken line must land fast — a draft announcement can't lag the room. Use
+// a fast model at low effort with no tools, and hard-cap thinking at 5s; if it
+// isn't ready by then we speak the canned overlord fallback instead.
+const ANNOUNCER_MODEL = process.env.ANNOUNCER_MODEL ?? "claude-haiku-4-5-20251001";
+const AGENT_TIMEOUT_MS = Number(process.env.ANNOUNCER_AGENT_TIMEOUT_MS ?? 5_000);
 
 // #region public shapes
 export interface PickInfo {
@@ -45,7 +49,7 @@ export async function announceCompleteLine(roster: string[]): Promise<string> {
 async function compose(prompt: string): Promise<string | null> {
   try {
     const res = await withTimeout(
-      runAgent({ prompt, partial: false, extraSystemPrompt: OVERLORD_SYSTEM }),
+      runAgent({ prompt, partial: false, extraSystemPrompt: OVERLORD_SYSTEM, model: ANNOUNCER_MODEL, effort: "low", tools: [] }),
       AGENT_TIMEOUT_MS,
     );
     if (!res) {

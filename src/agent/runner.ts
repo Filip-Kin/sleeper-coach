@@ -29,6 +29,9 @@ export interface RunOptions {
   onEvent?: (ev: AgentEvent) => void;
   extraSystemPrompt?: string;
   partial?: boolean; // stream partial deltas (default true); false = whole messages only
+  model?: string; // override the model (e.g. a fast model for short quips)
+  effort?: string; // override reasoning effort: low|medium|high|xhigh
+  tools?: string[]; // override the tool allowlist; [] = no tools (fastest, text-only)
 }
 
 export interface RunResult {
@@ -46,23 +49,19 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   const sessionId = opts.sessionId ?? crypto.randomUUID();
   const canResume = existsSync(join(SESSION_STORE, `${sessionId}.jsonl`));
 
-  const args = [
-    "--print",
-    "--output-format", "stream-json",
-    "--verbose",
-    "--model", MODEL,
-    "--effort", EFFORT,
-    "--settings", SETTINGS,
-    "--append-system-prompt", systemPrompt,
-    "--tools", "Bash", "WebSearch", "WebFetch",
-    canResume ? "--resume" : "--session-id",
-    sessionId,
-    opts.prompt,
-  ];
+  const model = opts.model ?? MODEL;
+  const effort = opts.effort ?? EFFORT;
+  const tools = opts.tools ?? ["Bash", "WebSearch", "WebFetch"];
+  const args = ["--print", "--output-format", "stream-json", "--verbose"];
   // Partial-message deltas make the interactive console feel live; for one-shot
   // callers that only need whole messages (the draft engine), skip them so the
   // stream is clean, complete assistant turns.
-  if (opts.partial !== false) args.splice(3, 0, "--include-partial-messages");
+  if (opts.partial !== false) args.push("--include-partial-messages");
+  args.push("--model", model, "--effort", effort, "--settings", SETTINGS, "--append-system-prompt", systemPrompt);
+  // Tools add tool-use deliberation latency; callers wanting a fast text-only
+  // reply (the announcer) pass tools: [] to omit them entirely.
+  if (tools.length) args.push("--tools", ...tools);
+  args.push(canResume ? "--resume" : "--session-id", sessionId, opts.prompt);
 
   const child = Bun.spawn([CLAUDE_BIN, ...args], {
     cwd: REPO_ROOT,
