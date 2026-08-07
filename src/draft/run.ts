@@ -161,7 +161,7 @@ function logBoard(pickNo: number, round: number, available: { name: string; pos:
     "coach",
     "board",
     `Board @pick ${pickNo} (R${round}): ${available.length} available${target ? `, leaning ${target}` : ""}`,
-    { pickNo, round, available: available.slice(0, 20), target },
+    { pickNo, round, available: available.slice(0, 20), target, reasoning: lastReasoning },
   );
 }
 
@@ -209,9 +209,12 @@ async function refreshPlan(picks: DraftPick[], available: { name: string; pos: s
       `Recent picks (react to runs and what rivals are stacking):\n${recent}\n\n` +
       `Best available right now, by value under our scoring:\n${shortlist}\n\n` +
       `Build the strongest STARTING lineup. Prioritise RB and WR heavily early (you start 2 RB, 2 WR, and 2 FLEX). ` +
-      `You need only ONE tight end: do NOT reach for a TE, and never plan a second TE until the very last rounds; ` +
-      `a TE is worth an early pick only if it is clearly the best value AND you have none. Take at most one QB and not ` +
-      `before mid-draft. Draft K and DEF only in the final 2-3 rounds. Anticipate RB/WR runs and respect tiers over raw rank. ` +
+      `Because RB is scarcer and fills your FLEX, build real RB depth — aim for about five RBs by the end — and don't ` +
+      `stack more than about five WRs unless a WR is clearly the best value. You need only ONE tight end: do NOT reach ` +
+      `for a TE, and never plan a second TE until the very last rounds; a TE is worth an early pick only if it is clearly ` +
+      `the best value AND you have none. Take exactly ONE QB in this 1-QB league and only from the mid rounds; do NOT ` +
+      `draft a backup QB (leave that to the very last round, if at all). Draft K and DEF only in the final 2-3 rounds. ` +
+      `Anticipate RB/WR runs and respect tiers over raw rank. ` +
       `First write two or three sentences of reasoning explaining your thinking about the board, runs, and roster needs. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
   });
   if (res.error || !res.text.trim()) {

@@ -24,6 +24,8 @@ check("slot 2 pick numbers", JSON.stringify(mine.slice(0, 4)) === JSON.stringify
 check("no TE in rounds 1-4", positionCap("TE", 2) === 0 && positionCap("TE", 4) === 0);
 check("one TE from round 5", positionCap("TE", 5) === 1);
 check("no QB in rounds 1-4", positionCap("QB", 3) === 0);
+check("one QB mid-draft, no backup until the last round",
+  positionCap("QB", 6) === 1 && positionCap("QB", 11) === 1 && positionCap("QB", 15) === 2);
 check("K only from round 14", positionCap("K", 13) === 0 && positionCap("K", 14) === 1);
 check("DEF only from round 13", positionCap("DEF", 12) === 0 && positionCap("DEF", 13) === 1);
 

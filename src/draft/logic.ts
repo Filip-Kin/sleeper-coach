@@ -10,11 +10,14 @@ export function slotOnClock(pickNo: number, teams: number): number {
 
 // Roster-construction guardrail for our 8-team, 1QB/2RB/2WR/1TE/2FLEX/K/DEF
 // league. Encodes Filip's sense: NO tight end or QB in the early rounds at all
-// (RB/WR only), one TE, one QB (a backup only late), K/DEF only at the very end,
-// RB/WR depth. `cap` is the max we'll roster at a position by the given round.
+// (RB/WR only), one TE, one QB, K/DEF only at the very end, RB/WR depth. `cap`
+// is the max we'll roster at a position by the given round.
+// QB: exactly one in a 1-QB league — no backup until the very last round (a
+// second QB earlier is a wasted pick vs. RB/WR flex depth; self-critique of a
+// mock where it burned round 11 on a backup).
 export function positionCap(pos: string, round: number): number {
   switch (pos) {
-    case "QB": return round < 5 ? 0 : round < 9 ? 1 : 2;
+    case "QB": return round < 6 ? 0 : round >= 15 ? 2 : 1;
     case "TE": return round < 5 ? 0 : round < 13 ? 1 : 2;
     case "K": return round >= 14 ? 1 : 0;
     case "DEF": return round >= 13 ? 1 : 0;

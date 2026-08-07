@@ -226,7 +226,8 @@ function renderCoachView(detail) {
   const head = `<div style="padding:8px 10px;color:var(--muted);font-size:12px">`
     + `Pick ${detail.pickNo ?? "–"} · Round ${detail.round ?? "–"}`
     + (detail.target ? ` · target <span class="cv-target">${escapeHtml(detail.target)}</span>` : "")
-    + ` · ${avail.length} seen available</div>`;
+    + ` · ${avail.length} seen available</div>`
+    + (detail.reasoning ? `<div class="reason" style="padding:0 10px 8px">“${escapeHtml(detail.reasoning)}”</div>` : "");
   const rows = avail.map((a,i)=>`<tr><td class="num">${i+1}</td><td>${escapeHtml(a.name||String(a))}</td><td>${escapeHtml(a.pos||"")}</td></tr>`).join("");
   $("#tab-coachview").innerHTML = head + (rows
     ? `<table><thead><tr><th>#</th><th>Player (as read from the draft room)</th><th>Pos</th></tr></thead><tbody>${rows}</tbody></table>`
