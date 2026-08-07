@@ -41,7 +41,8 @@ async function draftRecap(): Promise<{ title: string; body: string }> {
     .filter((e) => e.actor === "coach" && e.type === "draft-pick" && e.detail && (e.detail as { reasoning?: string }).reasoning)
     .map((e) => `- ${e.summary}: ${(e.detail as { reasoning?: string }).reasoning}`);
   const prompt =
-    `Write a post-draft recap for your fantasy football team's public blog.\n\n` +
+    `Write a post-draft recap for your fantasy football team's public blog. This is a HALF-PPR, 8-team, ` +
+    `1-QB league (start 1 QB, 2 RB, 2 WR, 1 TE, 2 FLEX, K, DEF) — get the scoring right if you mention it.\n\n` +
     `Your final roster, in draft order:\n${mine.join("\n")}\n\n` +
     (notes.length ? `Your own notes from the draft:\n${notes.join("\n")}\n\n` : "") +
     `Talk through how the draft went: your early core, the picks you're happy with, anything risky or that you'd ` +
