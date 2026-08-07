@@ -23,22 +23,42 @@ function clearSingletons(profileDir: string): void {
   }
 }
 
+// Runs before any page script; erases the usual "this is automation" tells so
+// Sleeper's bot checks see an ordinary Chrome. We keep the real user-agent
+// (overriding it would desync the Sec-CH-UA client hints and look faker).
+const STEALTH = `
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+  window.chrome = window.chrome || { runtime: {} };
+  const _q = navigator.permissions && navigator.permissions.query;
+  if (_q) navigator.permissions.query = (p) =>
+    p && p.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : _q.call(navigator.permissions, p);
+`;
+
 export async function launchContext(opts?: { profileDir?: string }): Promise<BrowserContext> {
   const profileDir = opts?.profileDir ?? PROFILE_DIR;
   mkdirSync(profileDir, { recursive: true });
   clearSingletons(profileDir);
 
-  return chromium.launchPersistentContext(profileDir, {
+  const ctx = await chromium.launchPersistentContext(profileDir, {
     headless: false,
     slowMo: 80, // human-ish pacing; also gives the UI time to settle
     viewport: { width: 1400, height: 900 },
+    // Drop Playwright's automation flags that Sleeper can sniff.
+    ignoreDefaultArgs: ["--enable-automation"],
     args: [
       "--disable-blink-features=AutomationControlled",
+      "--disable-infobars",
       "--no-restore-last-session",
       "--no-sandbox",
       "--disable-dev-shm-usage",
     ],
   });
+  await ctx.addInitScript(STEALTH);
+  return ctx;
 }
 
 // Most helpers want the single page the persistent context opens with.
