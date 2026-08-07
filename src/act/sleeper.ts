@@ -193,6 +193,28 @@ export async function makePick(page: Page, playerName: string): Promise<void> {
   await screenshot(page, `picked-${slug(playerName)}`);
 }
 
+// React with an emoji to a pick on the draft board — the troll move when a rival
+// snipes a player the coach wanted. Each drafted cell (.cell.drafted, text like
+// "2.5J. Chase") has a hover-revealed .draft-cell-emoji that opens a picker of
+// named options (.draft-emoji[data-emoji-name=...]: heart, poop, crying, shock,
+// happy, angry, smart, like, dislike, thinking). Best-effort and non-fatal.
+export async function reactToPick(page: Page, playerName: string, emoji: string): Promise<boolean> {
+  await requireDraftRoom(page);
+  const last = playerName.trim().split(/\s+/).slice(-1)[0] ?? playerName;
+  const cell = page.locator(".cell.drafted").filter({ hasText: last }).first();
+  if ((await cell.count()) === 0) return false;
+  await cell.scrollIntoViewIfNeeded().catch(() => {});
+  await cell.hover().catch(() => {});
+  await page.waitForTimeout(150);
+  await cell.locator(".draft-cell-emoji").click({ timeout: 4000, force: true }).catch(() => {});
+  await page.waitForTimeout(200);
+  const opt = page.locator(`.draft-emoji-selector [data-emoji-name="${emoji}"]`).first();
+  if ((await opt.count()) === 0) return false;
+  await opt.click({ timeout: 3000, force: true }).catch(() => {});
+  await page.waitForTimeout(150);
+  return true;
+}
+
 // Set the Sleeper draft queue (the autopick fallback) to a ranked list, in
 // order. Each player's .queue-action adds them to the queue.
 export async function setQueue(page: Page, playerNames: string[]): Promise<void> {

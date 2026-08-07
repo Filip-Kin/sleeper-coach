@@ -8,7 +8,7 @@
 import { launchContext, firstPage } from "./browser.ts";
 import {
   leagueUrl, isLoggedIn, authState, isOnClock, liveAvailable, domFacts, screenshot,
-  makePick, setQueue, setLineup, respondTrade, sendTrade, importSession,
+  makePick, setQueue, reactToPick, setLineup, respondTrade, sendTrade, importSession,
 } from "./sleeper.ts";
 
 const PORT = Number(process.env.BROWSER_API_PORT ?? 9223);
@@ -106,6 +106,8 @@ Bun.serve({
           await run(() => makePick(page, str(b.player))); return Response.json({ ok: true });
         case "/queue":
           await run(() => setQueue(page, (b.players as string[]) ?? [])); return Response.json({ ok: true });
+        case "/react":
+          return Response.json({ ok: await run(() => reactToPick(page, str(b.player), str(b.emoji, "crying"))) });
         case "/lineup":
           await run(() => setLineup(page, (b.ids as string[]) ?? [])); return Response.json({ ok: true });
         case "/trade-respond":

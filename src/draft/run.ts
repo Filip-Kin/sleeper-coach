@@ -153,6 +153,32 @@ async function pushQueue(picks: DraftPick[]): Promise<void> {
   if (q.length) await api("/queue", { players: q }).catch(() => {});
 }
 
+// #region emoji troll — react on Sleeper when a rival snipes a player we wanted
+const TROLL = process.env.TROLL !== "0"; // on by default; TROLL=0 disables
+const reactedPicks = new Set<number>();
+function pickName(p: DraftPick): string {
+  return `${p.metadata?.["first_name"] ?? ""} ${p.metadata?.["last_name"] ?? ""}`.trim();
+}
+// If a rival just took someone in our current shortlist, react — "crying" if
+// they grabbed one of our very top targets, "shock" if further down the plan.
+// One reaction per call so it never bursts, and each pick is trolled only once.
+async function maybeTroll(picks: DraftPick[]): Promise<void> {
+  if (!TROLL || myDraftSlot == null || plan.length === 0) return;
+  const top3 = new Set(plan.slice(0, 3));
+  const top8 = new Set(plan.slice(0, 8));
+  for (const p of picks) {
+    if (reactedPicks.has(p.pick_no) || p.draft_slot === myDraftSlot) continue;
+    const nm = pickName(p);
+    if (!nm || !top8.has(nm)) continue;
+    reactedPicks.add(p.pick_no);
+    const emoji = top3.has(nm) ? "crying" : "shock";
+    const ok = (await api("/react", { player: nm, emoji }).catch(() => ({ ok: false }))) as { ok?: boolean };
+    logEvent("coach", "troll", `Reacted ${emoji} to team ${p.draft_slot} taking ${nm} (one I wanted).`, { player: nm, emoji, landed: ok.ok === true });
+    return; // one per pass
+  }
+}
+// #endregion
+
 // Observability: publish what the coach currently sees as available (the live
 // DOM read) plus the pick it's leaning toward, so the dashboard's Coach view
 // shows exactly the board state the engine is deciding from.
@@ -297,8 +323,10 @@ for (;;) {
   if (Date.now() - lastBoardAt > 5000) { logBoard(round, round, available); lastBoardAt = Date.now(); }
 
   if (!onClock) {
-    // Off the clock: adjust the PLAN only (throttled, paused during agent
-    // backoff). The queue is a backstop, refreshed only right after we pick.
+    // Off the clock: troll a rival who took one of our targets, then adjust the
+    // PLAN (throttled, paused during agent backoff). The queue is a backstop,
+    // refreshed only right after we pick.
+    await maybeTroll(await sleeper.draftPicks(draftId)).catch(() => {});
     if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) {
       await refreshPlan(await sleeper.draftPicks(draftId), available);
     }
