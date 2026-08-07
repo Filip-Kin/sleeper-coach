@@ -7,7 +7,7 @@
 
 import { launchContext, firstPage } from "./browser.ts";
 import {
-  leagueUrl, isLoggedIn, isOnClock, liveAvailable, domFacts, screenshot,
+  leagueUrl, isLoggedIn, authState, isOnClock, liveAvailable, domFacts, screenshot,
   makePick, setQueue, setLineup, respondTrade, sendTrade, importSession,
 } from "./sleeper.ts";
 
@@ -60,6 +60,9 @@ Bun.serve({
       switch (url.pathname) {
         case "/login-check":
           return Response.json({ loggedIn: await run(() => isLoggedIn(page)) });
+        case "/auth":
+          // Non-navigating auth state (daemon's periodic watch). See authState.
+          return Response.json({ state: await run(() => authState(page)) });
         case "/on-clock":
           return Response.json({ onClock: await run(() => isOnClock(page)) });
         case "/draft-state":

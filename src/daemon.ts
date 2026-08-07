@@ -65,26 +65,43 @@ async function handlePendingTrade(tx: TransactionLike): Promise<void> {
 // The Sleeper session (a ~1-year JWT in the browser profile) should last the
 // season, but a server-side logout would silently break the coach's hands. So
 // we periodically confirm login and push an HA alert on any change, per Filip.
+const BROWSER_API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const AUTH_CHECK_MS = Number(process.env.AUTH_CHECK_MS ?? 30 * 60 * 1000);
+// Genuine session loss must be confirmed by several CONSECUTIVE definitive reads
+// before we ping Filip — the old check false-fired constantly, so the bar is
+// deliberately high. An inconclusive ("unknown") read never counts either way.
+const AUTH_FAIL_THRESHOLD = Number(process.env.AUTH_FAIL_THRESHOLD ?? 3);
 let lastAuthCheck = 0;
 let lastAuthOk = true;
+let authOutStreak = 0;
 
 async function checkAuth(): Promise<void> {
-  const proc = Bun.spawn(["bun", "run", "act", "login-check"], {
-    cwd: "/app",
-    env: process.env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const ok = (await proc.exited) === 0;
-  if (!ok && lastAuthOk) {
-    // This genuinely needs Filip: re-export/import a session. Ping the phone.
-    await sendAlert("Sleeper login lost", "The coach's Sleeper session is no longer valid. Re-import a session so it can act on your team.");
-  } else if (ok && !lastAuthOk) {
-    logEvent("system", "auth-restored", "Sleeper session valid again.");
-  }
-  lastAuthOk = ok;
   lastAuthCheck = Date.now();
+  let state = "unknown";
+  try {
+    const res = await fetch(`${BROWSER_API}/auth`, { signal: AbortSignal.timeout(20_000) });
+    state = String(((await res.json()) as { state?: string }).state ?? "unknown");
+  } catch {
+    state = "unknown"; // browser-server unreachable — inconclusive, never alert
+  }
+  if (state === "ok") {
+    if (!lastAuthOk) logEvent("system", "auth-restored", "Sleeper session valid again.");
+    lastAuthOk = true;
+    authOutStreak = 0;
+    return;
+  }
+  if (state === "logged_out" || state === "expired") {
+    authOutStreak++;
+    // Ping only after repeated confirmation, and only once per outage. This
+    // genuinely needs Filip: re-export/import a session.
+    if (authOutStreak >= AUTH_FAIL_THRESHOLD && lastAuthOk) {
+      lastAuthOk = false;
+      logEvent("system", "auth-lost", `Sleeper session ${state} (confirmed ${authOutStreak}x).`);
+      await sendAlert("Sleeper login lost", `The coach's Sleeper session is ${state}. Re-import a session so it can act on your team.`);
+    }
+    return;
+  }
+  // "unknown": inconclusive — leave streak and lastAuthOk untouched, no alert.
 }
 // #endregion
 

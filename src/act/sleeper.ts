@@ -47,6 +47,39 @@ export async function isLoggedIn(page: Page): Promise<boolean> {
 // (login is done out-of-band: a real Brave logs in and the session is imported
 // via importSession, or transplanted with `act import-session`.)
 
+// Lightweight, NON-navigating auth check for the daemon's periodic watch. Reads
+// the Sleeper JWT straight from the current page's localStorage and checks its
+// expiry, without navigating. The old check did a page.goto every 30 min and
+// intermittently read the SPA mid-load — seeing the logged-out marketing nav —
+// which false-fired "login lost" alerts. Here the token is either present and
+// unexpired or it isn't. "unknown" means the page wasn't readable this instant
+// (busy/off-site); the caller treats that as inconclusive and never alerts.
+export async function authState(page: Page): Promise<"ok" | "logged_out" | "expired" | "unknown"> {
+  let token: string | null;
+  try {
+    token = await page.evaluate(() => {
+      try {
+        if (!location.hostname.endsWith("sleeper.com")) return "__OFFSITE__";
+        return window.localStorage.getItem("token");
+      } catch {
+        return null;
+      }
+    });
+  } catch {
+    return "unknown"; // page busy / navigating — inconclusive
+  }
+  if (token === "__OFFSITE__") return "unknown";
+  if (!token) return "logged_out";
+  try {
+    const payload = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64").toString("utf8"));
+    const exp = typeof payload.exp === "number" ? payload.exp : 0;
+    if (exp && exp * 1000 < Date.now()) return "expired";
+    return "ok";
+  } catch {
+    return "ok"; // token present but opaque — still logged in
+  }
+}
+
 // DOM discovery for Phase C: dump the facts needed to build reliable selectors.
 export async function domFacts(page: Page): Promise<unknown> {
   return page.evaluate(() => {
