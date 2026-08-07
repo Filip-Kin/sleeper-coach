@@ -82,11 +82,10 @@
       <div class="tabs">
         <button data-tab="board" class="on">Board</button>
         <button data-tab="roster">My roster</button>
-        <button data-tab="vnc">Takeover</button>
+        <button id="takeoverBtn" title="Open the browser takeover in a new tab">Takeover ↗</button>
       </div>
       <div class="tabwrap" id="tab-board"></div>
       <div class="tabwrap" id="tab-roster" style="display:none"></div>
-      <div class="tabwrap" id="tab-vnc" style="display:none; padding:0"></div>
     </div>
   </div>
 </main>
@@ -94,6 +93,7 @@
 const $ = (s) => document.querySelector(s);
 const stream = $("#stream");
 let sessionId = localStorage.getItem("coach-session") || null;
+let novncUrl = null;
 
 function addMsg(cls, text) {
   const d = document.createElement("div");
@@ -161,11 +161,14 @@ $("#chatForm").addEventListener("submit", (e) => { e.preventDefault();
   const v = $("#chatInput").value.trim(); if (!v) return; $("#chatInput").value = ""; send(v); });
 $("#newBtn").addEventListener("click", () => { sessionId = null; localStorage.removeItem("coach-session"); stream.innerHTML=""; });
 
-// tabs
-document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => {
-  document.querySelectorAll(".tabs button").forEach(x=>x.classList.remove("on")); b.classList.add("on");
-  for (const t of ["board","roster","vnc"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
+// tabs (Takeover is not a tab — it opens the noVNC view in a new tab)
+document.querySelectorAll(".tabs button[data-tab]").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".tabs button[data-tab]").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  for (const t of ["board","roster"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
 }));
+$("#takeoverBtn").addEventListener("click", () => {
+  window.open(novncUrl || "https://coach-vnc.filipkin.com/vnc.html?autoconnect=1&resize=scale", "_blank");
+});
 
 async function loadState() {
   try {
@@ -185,8 +188,8 @@ async function loadState() {
     $("#tab-roster").innerHTML = s.roster.length ? "<table><tbody>"
       + s.roster.map(p=>`<tr><td>${p.name}${p.injury?` <span class='inj'>${p.injury}</span>`:""}</td><td>${p.pos}</td><td>${p.team}</td></tr>`).join("")
       + "</tbody></table>" : "<p style='color:var(--muted);padding:14px'>Roster empty (pre-draft).</p>";
-    // vnc
-    if (!$("#tab-vnc").dataset.loaded) { $("#tab-vnc").innerHTML = `<iframe src="${s.novncUrl}"></iframe>`; $("#tab-vnc").dataset.loaded="1"; }
+    // takeover opens this URL (with the VNC password baked in) in a new tab
+    novncUrl = s.novncUrl;
   } catch (e) { $("#leagueSub").textContent = "state error: " + e; }
 }
 loadState(); setInterval(loadState, 30000);
