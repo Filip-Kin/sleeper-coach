@@ -16,6 +16,7 @@ import { sleeper } from "../sleeper/client.ts";
 import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
+import { slotOnClock, positionCap } from "./logic.ts";
 import type { DraftPick } from "../sleeper/types.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
@@ -77,13 +78,6 @@ function boardNow(picks: DraftPick[]): RankedPlayer[] {
   return rankByVor(projections, league).filter((r) => !drafted.has(r.playerId));
 }
 
-// Whose slot is on the clock at pickNo, in a snake draft.
-function slotOnClock(pickNo: number, teams: number): number {
-  const idx = (pickNo - 1) % teams;
-  const round = Math.ceil(pickNo / teams);
-  return round % 2 === 1 ? idx + 1 : teams - idx;
-}
-
 // How many of each position we've already drafted (our slot only).
 function myPositionCounts(picks: DraftPick[], slot: number | null): Record<string, number> {
   const c: Record<string, number> = {};
@@ -94,20 +88,6 @@ function myPositionCounts(picks: DraftPick[], slot: number | null): Record<strin
     if (pos) c[pos] = (c[pos] ?? 0) + 1;
   }
   return c;
-}
-
-// Roster-construction guardrail (8-team, 1QB/2RB/2WR/1TE/2FLEX/K/DEF + bench).
-// Encodes Filip's sense: one TE, don't reach; RB/WR depth; no early K/DEF/2nd QB.
-function positionCap(pos: string, round: number): number {
-  switch (pos) {
-    case "QB": return round >= 9 ? 2 : 1;
-    case "TE": return round >= 13 ? 2 : 1;
-    case "K": return round >= 14 ? 1 : 0;
-    case "DEF": return round >= 13 ? 1 : 0;
-    case "RB": return 7;
-    case "WR": return 7;
-    default: return 6;
-  }
 }
 
 let plan: string[] = []; // ordered target names, best first
@@ -205,12 +185,11 @@ for (;;) {
   }
   const pickNo = n + 1;
   const round = Math.floor((pickNo - 1) / teams) + 1;
-  const domReady = (await api("/on-clock")).onClock === true;
-  // It is our turn only when the snake math says our slot is up AND the board
-  // is live. Falls back to the DOM if we couldn't resolve our slot.
-  // Only our turn when we know our slot AND the snake math says it's up AND the
-  // board is live. No DOM-only fallback — that mis-fired on other teams' picks.
-  const myTurn = myDraftSlot != null && slotOnClock(pickNo, teams) === myDraftSlot && domReady;
+  // Turn detection is PURELY deterministic: our turn iff our slot is on the
+  // clock per the snake math (our slot resolved from draft_order = draft is
+  // live). No DOM check — that both mis-fired on rivals' turns and made us sit
+  // idle on our own. makePick handles the actual clickability.
+  const myTurn = myDraftSlot != null && slotOnClock(pickNo, teams) === myDraftSlot;
 
   if (!myTurn) {
     // Between picks: adjust the plan (agent) + refresh the queue backstop.

@@ -10,6 +10,7 @@
     "daemon": "bun run src/daemon.ts",
     "draft-run": "bun run src/draft/run.ts",
     "engineer": "bun run src/engineer/engineer.ts",
+    "selftest": "bun run src/draft/selftest.ts",
     "web": "bun run src/web/server.ts",
     "typecheck": "tsc --noEmit"
   },
