@@ -35,6 +35,12 @@ async function main(): Promise<void> {
       console.log(ok ? "LOGGED_IN" : "LOGGED_OUT");
       process.exit(ok ? 0 : 3);
     }
+    case "console": {
+      const q = args[0] === "clear" ? "/console?clear=1&n=100" : "/console?n=100";
+      const arr = ((await call(q)).logs as string[]) ?? [];
+      console.log(arr.length ? arr.join("\n") : "(no console messages)");
+      break;
+    }
     case "on-clock": {
       const on = (await call("/on-clock")).onClock === true;
       console.log(on ? "ON_CLOCK" : "NOT_ON_CLOCK");

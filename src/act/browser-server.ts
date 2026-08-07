@@ -15,11 +15,26 @@ const PORT = Number(process.env.BROWSER_API_PORT ?? 9223);
 
 const ctx = await launchContext();
 const page = await firstPage(ctx);
+
+// Ring buffer of the page's console, errors, and failed/4xx-5xx requests, so we
+// can see what the site is complaining about when something hangs.
+const logs: string[] = [];
+const pushLog = (s: string) => {
+  logs.push(`${new Date().toISOString()} ${s}`.slice(0, 500));
+  if (logs.length > 300) logs.shift();
+};
+
 // Playwright auto-DISMISSES native dialogs by default, which silently cancels
-// confirmations like "Start the draft?". Auto-accept them instead.
-const acceptDialogs = (p: import("playwright").Page) => p.on("dialog", (d) => d.accept().catch(() => {}));
-acceptDialogs(page);
-ctx.on("page", acceptDialogs);
+// confirmations like "Start the draft?". Auto-accept them, and wire logging.
+const wire = (p: import("playwright").Page) => {
+  p.on("dialog", (d) => d.accept().catch(() => {}));
+  p.on("console", (m) => pushLog(`[console.${m.type()}] ${m.text()}`));
+  p.on("pageerror", (e) => pushLog(`[pageerror] ${e.message}`));
+  p.on("requestfailed", (r) => pushLog(`[requestfailed] ${r.url()} :: ${r.failure()?.errorText ?? ""}`));
+  p.on("response", (r) => { if (r.status() >= 400) pushLog(`[http ${r.status()}] ${r.url()}`); });
+};
+wire(page);
+ctx.on("page", wire);
 await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" }).catch(() => {});
 console.log("[browser-server] launched; league open");
 
@@ -47,6 +62,12 @@ Bun.serve({
           return Response.json({ loggedIn: await run(() => isLoggedIn(page)) });
         case "/on-clock":
           return Response.json({ onClock: await run(() => isOnClock(page)) });
+        case "/console": {
+          const n = Number(url.searchParams.get("n") ?? 80);
+          const out = logs.slice(-n);
+          if (url.searchParams.get("clear")) logs.length = 0;
+          return Response.json({ logs: out });
+        }
         case "/goto":
           await run(async () => { await page.goto(str(b.url), { waitUntil: "domcontentloaded" }); await page.waitForTimeout(2500); });
           return Response.json({ url: page.url() });
