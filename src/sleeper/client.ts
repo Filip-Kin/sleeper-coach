@@ -8,7 +8,12 @@ import type {
   PlayersMap,
   NflState,
   SleeperUser,
+  ProjectionRecord,
 } from "./types.ts";
+
+// Projections/stats live at the API root, not under /v1. Undocumented but
+// stable and widely used; same read-only nature.
+const SLEEPER_ROOT = "https://api.sleeper.app";
 
 // #region core request
 // Sleeper asks callers to stay well under 1000 requests/minute. Everything here
@@ -31,6 +36,17 @@ async function get<T>(path: string, attempt = 0): Promise<T> {
     // Back off on rate limiting: 0.5s, 1s, 2s, 4s.
     await Bun.sleep(500 * 2 ** attempt);
     return get<T>(path, attempt + 1);
+  }
+  if (!res.ok) throw new SleeperError(res.status, url);
+  return (await res.json()) as T;
+}
+
+async function getRoot<T>(path: string, attempt = 0): Promise<T> {
+  const url = `${SLEEPER_ROOT}${path}`;
+  const res = await fetch(url);
+  if (res.status === 429 && attempt < 4) {
+    await Bun.sleep(500 * 2 ** attempt);
+    return getRoot<T>(path, attempt + 1);
   }
   if (!res.ok) throw new SleeperError(res.status, url);
   return (await res.json()) as T;
@@ -63,6 +79,14 @@ export const sleeper = {
   playersDump: () => get<PlayersMap>(`/players/nfl`),
 
   nflState: () => get<NflState>(`/state/nfl`),
+
+  // Season-long projections (includes ADP and a full projected stat line).
+  seasonProjections: (season: string) =>
+    getRoot<ProjectionRecord[]>(`/projections/nfl/${season}?season_type=regular`),
+
+  // Per-week projections for in-season lineup calls.
+  weeklyProjections: (season: string, week: number) =>
+    getRoot<ProjectionRecord[]>(`/projections/nfl/${season}/${week}?season_type=regular`),
 };
 // #endregion
 

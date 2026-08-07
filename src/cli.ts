@@ -14,6 +14,8 @@ import { sleeper } from "./sleeper/client.ts";
 import { loadPlayers, cacheStatus } from "./data/players.ts";
 import { buildBoard } from "./analysis/board.ts";
 import { describeScoring } from "./analysis/scoring.ts";
+import { loadSeasonProjections, projectionsCacheStatus } from "./analysis/projections.ts";
+import { rankByVor } from "./analysis/vor.ts";
 import type { LeagueUser, Position } from "./sleeper/types.ts";
 
 const [command, ...args] = process.argv.slice(2);
@@ -73,12 +75,28 @@ async function cmdBoard(): Promise<void> {
   const position = posArg && validPos.has(posArg) ? (posArg as Position) : undefined;
   const limit = Number(position ? args[1] : args[0]) || 30;
 
-  const players = await loadPlayers();
-  const board = buildBoard(players, { position, limit });
-  console.log(`\nValue board${position ? ` — ${position}` : ""} (top ${board.length}, by Sleeper rank — placeholder):`);
-  board.forEach((e, i) => {
+  const league = await sleeper.league(config.leagueId);
+  const projections = await loadSeasonProjections(config.season, league.scoring_settings);
+
+  if (projections.length === 0) {
+    // Fall back to the search_rank ordering if projections are unavailable.
+    const players = await loadPlayers();
+    const board = buildBoard(players, { position, limit });
+    console.log(`\nValue board${position ? ` — ${position}` : ""} (fallback, Sleeper rank — no projections):`);
+    board.forEach((e, i) => console.log(`  ${String(i + 1).padStart(3)}. ${e.name.padEnd(24)} ${e.position.padEnd(3)} ${e.team}`));
+    return;
+  }
+
+  const ranked = rankByVor(projections, league);
+  const rows = (position ? ranked.filter((r) => r.position === position) : ranked).slice(0, limit);
+  console.log(`\nValue board${position ? ` — ${position}` : ""} (top ${rows.length}, by VOR under your scoring):`);
+  console.log(`  ${"#".padStart(3)}  ${"player".padEnd(24)} ${"pos".padEnd(4)} ${"tm".padEnd(4)} ${"pts".padStart(6)} ${"vor".padStart(6)} ${"adp".padStart(6)} tier`);
+  rows.forEach((e, i) => {
     const inj = e.injuryStatus ? ` [${e.injuryStatus}]` : "";
-    console.log(`  ${String(i + 1).padStart(3)}. ${e.name.padEnd(24)} ${e.position.padEnd(3)} ${e.team.padEnd(4)}${inj}`);
+    const adp = e.adp >= 999 ? "-" : e.adp.toFixed(1);
+    console.log(
+      `  ${String(i + 1).padStart(3)}. ${e.name.padEnd(24)} ${(`${e.position}${e.posRank}`).padEnd(4)} ${e.team.padEnd(4)} ${e.points.toFixed(1).padStart(6)} ${e.vor.toFixed(1).padStart(6)} ${adp.padStart(6)}  T${e.tier}${inj}`,
+    );
   });
 }
 
@@ -105,6 +123,13 @@ async function cmdPlayers(): Promise<void> {
   const meta = await cacheStatus();
   console.log(`\nPlayer cache: ${Object.keys(players).length} players`);
   if (meta) console.log(`  fetched ${new Date(meta.fetchedAt).toISOString()}`);
+
+  if (refresh) {
+    const league = await sleeper.league(config.leagueId);
+    await loadSeasonProjections(config.season, league.scoring_settings, { forceRefresh: true });
+  }
+  const projMeta = await projectionsCacheStatus(config.season);
+  if (projMeta) console.log(`Projections cache (${config.season}): ${projMeta.count} players, fetched ${new Date(projMeta.fetchedAt).toISOString()}`);
 }
 
 const commands: Record<string, () => Promise<void>> = {

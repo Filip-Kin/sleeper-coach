@@ -119,3 +119,22 @@ export interface NflState {
   week: number;
   display_week: number;
 }
+
+// A projection record from the (undocumented) projections endpoint. `stats`
+// carries both the projected stat line (rec, rush_yd, pass_td, ...) and ADP
+// values (adp_ppr, adp_std, ...) and precomputed points (pts_ppr, ...).
+export interface ProjectionRecord {
+  player_id: string;
+  week: number | null;
+  season: string;
+  stats: Record<string, number>;
+  player: {
+    first_name: string;
+    last_name: string;
+    position: Position | null;
+    fantasy_positions: Position[] | null;
+    team: string | null;
+    injury_status: string | null;
+  } | null;
+  team: string | null;
+}
