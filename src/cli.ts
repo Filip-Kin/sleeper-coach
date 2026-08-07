@@ -169,7 +169,12 @@ async function cmdPlayers(): Promise<void> {
   if (projMeta) console.log(`Projections cache (${config.season}): ${projMeta.count} players, fetched ${new Date(projMeta.fetchedAt).toISOString()}`);
 }
 
+async function cmdPing(): Promise<void> {
+  console.log("pong");
+}
+
 const commands: Record<string, () => Promise<void>> = {
+  ping: cmdPing,
   league: cmdLeague,
   managers: cmdManagers,
   draft: cmdDraft,
@@ -182,7 +187,7 @@ const commands: Record<string, () => Promise<void>> = {
 
 const run = command ? commands[command] : undefined;
 if (!run) {
-  console.log("commands: league | managers | draft | board [POS] [N] | roster [ID] | players [--refresh]");
+  console.log("commands: ping | league | managers | draft | board [POS] [N] | roster [ID] | players [--refresh]");
   process.exit(command ? 1 : 0);
 }
 await run();
