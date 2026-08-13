@@ -1,0 +1,32 @@
+# Coolify deployment variant (build + run on the NAS via Coolify).
+# The original docker-compose.yml is kept for plain-docker rollback.
+# Differences: no fixed container_name (Coolify manages names). State + config
+# already live at /data/sleeper-coach (outside ncdata) so the bind is unchanged.
+# Secrets come from Coolify-managed env instead of env_file: /data/sleeper-coach/env.
+services:
+  sleeper-coach:
+    build: .
+    ports:
+      - "127.0.0.1:8770:8770" # dashboard (Phase D)
+      - "127.0.0.1:6081:6080" # noVNC (takeover view)
+    volumes:
+      - /data/sleeper-coach:/data/sleeper-coach
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  announcer:
+    build:
+      context: .
+      dockerfile: Dockerfile.announcer
+    volumes:
+      - /data/sleeper-coach:/data/sleeper-coach:ro
+    restart: on-failure
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
