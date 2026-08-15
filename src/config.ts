@@ -23,6 +23,17 @@ export const config = {
 // scoring settings. The coach reads scoring live from the league and values
 // players off it directly, so there is no override here.
 
+// VONA (Value Over Next Available) tuning. The draft engine picks the biggest
+// value drop-off to our next snake pick rather than raw value; these govern how
+// confident and how opponent-aware that prediction is. Defaults are deliberately
+// humble — a wide ADP spread means we don't over-trust the survival estimate.
+export const vonaConfig = {
+  enabled: (process.env.VONA ?? "1") !== "0", // VONA=0 → pure VOR (old behaviour)
+  adpSpread: Number(process.env.VONA_ADP_SPREAD ?? "8"), // logistic scale on ADP; higher = humbler
+  oppNudge: Number(process.env.VONA_OPP_NUDGE ?? "0.15"), // max survival shave from a leaned opponent (0 disables)
+  planEps: Number(process.env.VONA_PLAN_EPS ?? "2.5"), // VONA gap within which the agent's read may override the top pick
+} as const;
+
 // The read-only public Sleeper API. No auth token: it cannot write anything.
 export const SLEEPER_API = "https://api.sleeper.app/v1";
 

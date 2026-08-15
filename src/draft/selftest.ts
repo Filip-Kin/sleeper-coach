@@ -2,7 +2,9 @@
 // Deterministic proof of the draft turn-detection and roster-construction rules.
 // No browser, no network — pure logic.  bun run src/draft/selftest.ts
 
-import { slotOnClock, positionCap } from "./logic.ts";
+import { slotOnClock, positionCap, ownPickNo, nextOwnPickNo } from "./logic.ts";
+import { survivalProb, expectedBestLaterVor, rankByVona } from "../analysis/vona.ts";
+import type { RankedPlayer } from "../analysis/vor.ts";
 
 let fail = 0;
 function check(name: string, cond: boolean, detail = ""): void {
@@ -34,6 +36,46 @@ for (const r of [1, 2, 3, 4]) {
   const allowed = ["QB", "RB", "WR", "TE", "K", "DEF"].filter((pos) => positionCap(pos, r) > 0).sort();
   check(`round ${r} allows only RB,WR`, JSON.stringify(allowed) === JSON.stringify(["RB", "WR"]), allowed.join(","));
 }
+
+// #region VONA
+// Snake pick numbers for our slot (slot 4 in an 8-team draft): R1=4, R2=13, R3=20, R4=29
+check("ownPickNo snake, slot 4", [1, 2, 3, 4].map((r) => ownPickNo(r, 4, teams)).join(",") === "4,13,20,29");
+check("ownPickNo snake, slot 1", [1, 2, 3].map((r) => ownPickNo(r, 1, teams)).join(",") === "1,16,17");
+check("nextOwnPickNo after our R1 (slot 4)", nextOwnPickNo(ownPickNo(1, 4, teams), 4, teams, 15) === 13);
+check("nextOwnPickNo null in final round", nextOwnPickNo(ownPickNo(15, 4, teams), 4, teams, 15) === null);
+
+// Survival: an ADP far after our next pick is near-certain; far before, near-zero; unknown = 1.
+check("survival high when ADP well past next pick", survivalProb(60, 20, 8) > 0.95);
+check("survival low when ADP well before next pick", survivalProb(5, 25, 8) < 0.1, survivalProb(5, 25, 8).toFixed(3));
+check("survival ~0.5 at the pick", Math.abs(survivalProb(20, 20, 8) - 0.5) < 1e-9);
+check("survival = 1 for unknown ADP (999)", survivalProb(999, 20, 8) === 1);
+check("wider spread is humbler (closer to 0.5)", survivalProb(5, 20, 20) > survivalProb(5, 20, 4));
+
+// Expected best-available-later: with a certain survivor it equals that survivor's VOR;
+// with the top guy certainly gone it drops to the next survivor.
+check("expBestLater = top when top certain to survive",
+  expectedBestLaterVor([{ vor: 40, pSurvive: 1 }, { vor: 30, pSurvive: 1 }]) === 40);
+check("expBestLater drops when top certainly gone",
+  expectedBestLaterVor([{ vor: 40, pSurvive: 0 }, { vor: 30, pSurvive: 1 }]) === 30);
+
+// VONA end-to-end: two positions, equal top raw value, but RB is a cliff (steep
+// drop + all likely gone) while WR is deep + likely to fall back. VONA must
+// prefer the RB even though raw VOR is tied.
+const mk = (name: string, position: string, vor: number, adp: number): RankedPlayer =>
+  ({ playerId: name, name, position, team: "X", points: vor, ptsPpr: vor, adp, injuryStatus: null, stats: {}, vor, tier: 1, posRank: 1 } as RankedPlayer);
+const nextPick = 20;
+const scarceRB = mk("Cliff RB", "RB", 50, 8);   // elite, will be long gone by pick 20
+const deepWR1 = mk("Deep WR1", "WR", 50, 8);     // same value, but...
+const deepWR2 = mk("Deep WR2", "WR", 48, 60);    // a near-equal WR falls back to us
+const ranked = rankByVona([scarceRB, deepWR1, deepWR2], { nextPickNo: nextPick, adpSpread: 8 });
+check("VONA drafts the scarce RB over the equal-value deep WR", ranked[0]!.name === "Cliff RB", ranked.map((r) => `${r.name}:${r.vona}`).join(" "));
+check("deep WR VONA is small (it falls back)", ranked.find((r) => r.name === "Deep WR1")!.vona < ranked[0]!.vona);
+
+// Opponent nudge only ever lowers survival (never raises it), and is bounded.
+const base = rankByVona([mk("TE1", "TE", 30, 25)], { nextPickNo: 20, adpSpread: 8 })[0]!;
+const nudged = rankByVona([mk("TE1", "TE", 30, 25)], { nextPickNo: 20, adpSpread: 8, gapDemand: { TE: 1 }, oppNudge: 0.15 })[0]!;
+check("opponent nudge lowers TE survival", nudged.pSurvive < base.pSurvive);
+// #endregion
 
 console.log(fail === 0 ? "\nALL PASS ✓" : `\n${fail} FAILED ✗`);
 process.exit(fail === 0 ? 0 : 1);

@@ -14,12 +14,14 @@
 //   bun run src/draft/run.ts [draftId] [--rehearse] [--seat=N]
 
 import { unlinkSync } from "node:fs";
-import { config } from "../config.ts";
+import { config, vonaConfig } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
-import { positionCap } from "./logic.ts";
+import { rankByVona, type VonaPlayer } from "../analysis/vona.ts";
+import { positionCap, slotOnClock, ownPickNo, nextOwnPickNo } from "./logic.ts";
+import { gapDemandFor } from "./opponents.ts";
 import { logEvent, logThink } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 
@@ -80,6 +82,52 @@ const projections = await loadSeasonProjections(config.season, scoring);
 // been drafted (availability is judged live from the DOM), so compute it once.
 const fullBoard: RankedPlayer[] = rankByVor(projections, league);
 const byName = new Map(fullBoard.map((b) => [b.name, b]));
+
+// #region VONA — value over next available
+// Resolve draft slot -> Sleeper username, once, so the opponent survival prior
+// can tell WHICH known manager picks in the gap before our next turn. Best
+// effort: if a lookup fails we simply skip that seat's nudge.
+const slotUsername = new Map<number, string>();
+if (vonaConfig.enabled && vonaConfig.oppNudge > 0) {
+  for (const [userId, slot] of Object.entries(draft.draft_order ?? {})) {
+    if (typeof slot !== "number") continue;
+    try {
+      const u = await sleeper.user(userId);
+      if (u?.username) slotUsername.set(slot, u.username);
+    } catch { /* unknown seat -> no nudge */ }
+  }
+}
+
+// Usernames of KNOWN managers picking between our current pick and our next one.
+function gapUsernames(currentPick: number, nextPick: number): string[] {
+  const out: string[] = [];
+  for (let p = currentPick + 1; p < nextPick; p++) {
+    const u = slotUsername.get(slotOnClock(p, teams));
+    if (u) out.push(u);
+  }
+  return out;
+}
+
+// Rank the currently-available players by VONA for the round we're about to
+// pick. Falls back to plain VOR order when VONA is disabled, our slot is
+// unknown, or it's the final round (no "next pick" to predict against). Always
+// returns VonaPlayer so callers can render one shape.
+function rankAvailable(availableNames: Set<string>, round: number): VonaPlayer[] {
+  const avail = [...availableNames]
+    .map((n) => byName.get(n))
+    .filter((b): b is RankedPlayer => !!b);
+  const slot = myDraftSlot;
+  const next = slot != null && round < rounds ? nextOwnPickNo(ownPickNo(round, slot, teams), slot, teams, rounds) : null;
+  if (!vonaConfig.enabled || slot == null || next == null) {
+    return avail
+      .slice()
+      .sort((a, b) => b.vor - a.vor)
+      .map((p) => ({ ...p, vona: p.vor, pSurvive: 1 }));
+  }
+  const gapDemand = vonaConfig.oppNudge > 0 ? gapDemandFor(gapUsernames(ownPickNo(round, slot, teams), next)) : undefined;
+  return rankByVona(avail, { nextPickNo: next, adpSpread: vonaConfig.adpSpread, gapDemand, oppNudge: vonaConfig.oppNudge });
+}
+// #endregion
 
 // #region live state (all DOM)
 interface State { onClock: boolean; available: { name: string; pos: string }[]; drafted: number }
@@ -215,14 +263,22 @@ function logBoard(globalPick: number, round: number, available: { name: string; 
 async function refreshPlan(available: { name: string; pos: string }[], recent: { round: number; slot: number; name: string; pos: string }[]): Promise<void> {
   await resolveSlot();
   const roster = myDrafted.map((d) => `${d.name} (${d.position})`);
-  const availSet = new Set(available.map((a) => a.name));
-  const board = fullBoard.filter((b) => availSet.size === 0 || availSet.has(b.name)).slice(0, 22);
-  const availNames = new Set(board.map((b) => b.name));
+  const availSet0 = new Set(available.map((a) => a.name));
   const round = myDrafted.length + 1;
+  // Rank by VONA (value over next available), so the agent reasons off the same
+  // scarcity signal the deterministic picker uses: who won't be here next turn.
+  const availSet = availSet0.size ? availSet0 : new Set(fullBoard.map((b) => b.name));
+  const board = rankAvailable(availSet, round).slice(0, 22);
+  const availNames = new Set(board.map((b) => b.name));
   const have = roster.length ? `Your roster so far: ${roster.join(", ")}.` : "Your roster is empty.";
   const shortlist = board
-    .map((r, i) => `${i + 1}. ${r.name} — ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier}${r.injuryStatus ? ` [${r.injuryStatus}]` : ""}`)
+    .map((r, i) => `${i + 1}. ${r.name} — ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} VONA ${r.vona.toFixed(0)} surv ${Math.round(r.pSurvive * 100)}% ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier}${r.injuryStatus ? ` [${r.injuryStatus}]` : ""}`)
     .join("\n");
+  // Players who probably won't make it back to us — flag the run risk explicitly.
+  const goneSoon = board.filter((r) => r.pSurvive < 0.35).slice(0, 8);
+  const goneStr = goneSoon.length
+    ? `Likely GONE before your next pick (draft these now or lose them): ${goneSoon.map((r) => `${r.name} (${r.position}, ${Math.round(r.pSurvive * 100)}%)`).join("; ")}.`
+    : "";
   const recentStr = recent
     .slice(-10)
     .map((p) => `R${p.round} team ${p.slot}${p.slot === myDraftSlot ? " [YOU]" : ""}: ${p.name} (${p.pos})`)
@@ -244,7 +300,9 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
     prompt:
       `You are the coach in a ${teams}-team ${scoringLabel} snake draft, about to make your round ${round} pick. ${have}\n` +
       `Recent picks (react to runs and what rivals are stacking):\n${recentStr}\n\n` +
-      `Best available right now, by value under our scoring:\n${shortlist}\n\n` +
+      `Best available now, ranked by VONA (value over next available: value now minus what you can still get at that position when the pick snakes back to you). ` +
+      `VOR is raw value, "surv" is the chance the player is still there at your next pick, VONA is the value you forfeit by waiting. Prefer higher VONA — it already accounts for who falls back to you:\n${shortlist}\n\n` +
+      (goneStr ? `${goneStr}\n\n` : "") +
       `Build the strongest STARTING lineup. Prioritise RB and WR heavily early (you start 2 RB, 2 WR, and 2 FLEX). ` +
       `Because RB is scarcer and fills your FLEX, build real RB depth — aim for about five RBs by the end — and don't ` +
       `stack more than about five WRs unless a WR is clearly the best value. You need only ONE tight end: do NOT reach ` +
@@ -354,11 +412,20 @@ for (;;) {
     forcedMandatory = !!target;
   }
   if (!target) {
-    target =
-      plan.map((nm) => byName.get(nm)).find((b): b is RankedPlayer => !!b && availOk(b) && needOk(b.position)) ??
-      fullBoard.find((b) => availOk(b) && needOk(b.position)) ??
-      fullBoard.find((b) => availOk(b)) ??
-      fullBoard[0];
+    // Deterministic core: the biggest value drop-off to our next snake pick
+    // (VONA), among positions we still need. The agent's plan only overrides
+    // when it picks a near-tie on VONA — i.e. it has a football read (news,
+    // injury) that separates two comparably-valued players.
+    const ranked = rankAvailable(liveSet, round);
+    const eligible = ranked.filter((b) => availOk(b) && needOk(b.position));
+    const vonaTop = eligible[0];
+    const planPick = plan.map((nm) => byName.get(nm)).find((b): b is RankedPlayer => !!b && availOk(b) && needOk(b.position));
+    if (vonaTop) {
+      const planVona = planPick ? eligible.find((v) => v.name === planPick.name)?.vona ?? -Infinity : -Infinity;
+      target = planPick && vonaTop.vona - planVona <= vonaConfig.planEps ? planPick : vonaTop;
+    } else {
+      target = planPick ?? fullBoard.find((b) => availOk(b)) ?? fullBoard[0];
+    }
   }
   if (!target) { console.log("[draft-run] no target available"); await Bun.sleep(1500); continue; }
 

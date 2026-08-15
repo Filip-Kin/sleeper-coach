@@ -8,6 +8,22 @@ export function slotOnClock(pickNo: number, teams: number): number {
   return round % 2 === 1 ? idx + 1 : teams - idx;
 }
 
+// The overall (1-based) pick number that a given slot owns in a given round of
+// a snake draft. Odd rounds run low→high slot, even rounds high→low.
+export function ownPickNo(round: number, slot: number, teams: number): number {
+  const base = (round - 1) * teams;
+  return round % 2 === 1 ? base + slot : base + (teams - slot + 1);
+}
+
+// The next overall pick number after `currentPick` that belongs to `slot`, or
+// null if the draft ends first. Used to size the snake gap for VONA survival.
+export function nextOwnPickNo(currentPick: number, slot: number, teams: number, rounds: number): number | null {
+  for (let p = currentPick + 1; p <= teams * rounds; p++) {
+    if (slotOnClock(p, teams) === slot) return p;
+  }
+  return null;
+}
+
 // Roster-construction guardrail for our 8-team, 1QB/2RB/2WR/1TE/2FLEX/K/DEF
 // league. Encodes Filip's sense: NO tight end or QB in the early rounds at all
 // (RB/WR only), one TE, one QB, K/DEF only at the very end, RB/WR depth. `cap`
