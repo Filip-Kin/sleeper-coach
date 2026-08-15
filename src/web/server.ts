@@ -1,4 +1,4 @@
-import { config, trueScoring } from "../config.ts";
+import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor } from "../analysis/vor.ts";
@@ -35,7 +35,7 @@ async function stateJson(): Promise<Response> {
     sleeper.rosters(config.leagueId),
     loadPlayers(),
   ]);
-  const projections = await loadSeasonProjections(config.season, trueScoring(league.scoring_settings));
+  const projections = await loadSeasonProjections(config.season, league.scoring_settings);
   const ranked = rankByVor(projections, league).slice(0, 60);
 
   const me = rosters.find((r) => r.roster_id === config.rosterId);
@@ -47,7 +47,7 @@ async function stateJson(): Promise<Response> {
   const draft = await sleeper.draft(config.draftId);
 
   return Response.json({
-    league: { name: league.name, teams: league.total_rosters, scoring: describeScoring(trueScoring(league.scoring_settings)), status: league.status },
+    league: { name: league.name, teams: league.total_rosters, scoring: describeScoring(league.scoring_settings), status: league.status },
     draft: { type: draft.type, status: draft.status, rounds: draft.settings.rounds, clock: draft.settings.pick_timer, startTime: draft.start_time },
     team: { name: users.find((u) => u.user_id === me?.owner_id)?.metadata?.team_name ?? "--dangerously-skip-perms", rosterId: config.rosterId },
     roster: myPlayers,

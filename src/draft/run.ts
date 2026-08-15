@@ -14,7 +14,7 @@
 //   bun run src/draft/run.ts [draftId] [--rehearse] [--seat=N]
 
 import { unlinkSync } from "node:fs";
-import { config, trueScoring } from "../config.ts";
+import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
@@ -68,11 +68,12 @@ if (rehearse) {
   await Bun.sleep(2500);
 }
 
-// Value the board by THIS league's scoring (half-PPR, Filip-confirmed).
+// Value the board by THIS league's live scoring settings (full PPR).
 const league = await sleeper.league(config.leagueId);
-const scoring = trueScoring(league.scoring_settings);
-const scoringLabel = "half-PPR";
-console.log(`[draft-run] scoring: ${scoringLabel} (rec ${scoring.rec})`);
+const scoring = league.scoring_settings;
+const rec = scoring.rec ?? 0;
+const scoringLabel = rec >= 1 ? "full-PPR" : rec > 0 ? `${rec}-PPR` : "standard";
+console.log(`[draft-run] scoring: ${scoringLabel} (rec ${rec})`);
 const projections = await loadSeasonProjections(config.season, scoring);
 
 // The static value board — VOR under our scoring. It does NOT depend on who's

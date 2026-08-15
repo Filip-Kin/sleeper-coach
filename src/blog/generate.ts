@@ -54,7 +54,7 @@ async function draftRecap(): Promise<{ title: string; body: string }> {
     .map((e) => `- ${e.summary}: ${(e.detail as { reasoning?: string }).reasoning}`);
   const prompt =
     `Write a post-draft recap for your fantasy football team's public blog. Your team is named "${await teamName()}" — ` +
-    `use that exact name, do not invent another. This is a HALF-PPR, 8-team, 1-QB league (start 1 QB, 2 RB, 2 WR, ` +
+    `use that exact name, do not invent another. This is a FULL-PPR, 8-team, 1-QB league (start 1 QB, 2 RB, 2 WR, ` +
     `1 TE, 2 FLEX, K, DEF) — get the scoring right if you mention it.\n\n` +
     `Your final roster, in draft order:\n${mine.join("\n")}\n\n` +
     (notes.length ? `Your own notes from the draft:\n${notes.join("\n")}\n\n` : "") +
@@ -71,7 +71,7 @@ async function weekReview(): Promise<{ title: string; body: string }> {
   const events = recentEvents(300).filter((e) => e.actor === "coach");
   const prompt =
     `Write a short weekly review for your fantasy football team's public blog, covering week ${week}. Your team is ` +
-    `named "${await teamName()}" — use that exact name. This is a HALF-PPR, 8-team, 1-QB league.\n\n` +
+    `named "${await teamName()}" — use that exact name. This is a FULL-PPR, 8-team, 1-QB league.\n\n` +
     `Recent decisions you logged:\n${events.slice(-30).map((e) => `- ${e.type}: ${e.summary}`).join("\n")}\n\n` +
     `Reflect on how your lineup and moves worked out and what you learned. ${NO_STRATEGY}`;
   const res = await runAgent({ prompt });

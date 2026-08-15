@@ -10,7 +10,7 @@
 //   bun run coach players [--refresh]   player cache status / refresh
 
 import { appendFileSync, mkdirSync } from "node:fs";
-import { config, trueScoring } from "./config.ts";
+import { config } from "./config.ts";
 import { sleeper } from "./sleeper/client.ts";
 import { logEvent } from "./log.ts";
 import { loadPlayers, cacheStatus } from "./data/players.ts";
@@ -78,7 +78,7 @@ async function cmdBoard(): Promise<void> {
   const limit = Number(position ? args[1] : args[0]) || 30;
 
   const league = await sleeper.league(config.leagueId);
-  const projections = await loadSeasonProjections(config.season, trueScoring(league.scoring_settings));
+  const projections = await loadSeasonProjections(config.season, league.scoring_settings);
 
   if (projections.length === 0) {
     // Fall back to the search_rank ordering if projections are unavailable.
@@ -110,7 +110,7 @@ async function cmdAvailable(): Promise<void> {
 
   const [league, picks] = await Promise.all([sleeper.league(config.leagueId), sleeper.draftPicks(draftId)]);
   const drafted = new Set(picks.map((p) => p.player_id));
-  const projections = await loadSeasonProjections(config.season, trueScoring(league.scoring_settings));
+  const projections = await loadSeasonProjections(config.season, league.scoring_settings);
   const ranked = rankByVor(projections, league).filter((r) => !drafted.has(r.playerId));
   const rows = (posArg ? ranked.filter((r) => r.position === posArg) : ranked).slice(0, limit);
 

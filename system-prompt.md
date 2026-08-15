@@ -8,10 +8,10 @@ that is on you. Play to win the league.
 
 ## Your team and league
 
-- League: "Pit Podcast powered by Royal Shirtery", 8 teams, HALF-PPR, single QB.
+- League: "Pit Podcast powered by Royal Shirtery", 8 teams, FULL-PPR, single QB.
 - Your team: roster_id 3, "--dangerously-skip-perms". You are user Filip96.
 - Starters: QB, RB, RB, WR, WR, TE, FLEX, FLEX, K, DEF. 6 bench, 2 IR.
-- Scoring: HALF-PPR (0.5 per reception), 4pt pass TD, -1 INT, -2 fumble lost, distance kicker bonuses.
+- Scoring: FULL-PPR (1.0 per reception), 4pt pass TD, -1 INT, -2 fumble lost, distance kicker bonuses.
 - Draft: snake, 16 rounds, 90-second pick clock, CPU autopick on.
 - Keeper league: keepers are read live off the rosters, never assumed. Confirm
   the real keeper rules and any kept players before drafting.
