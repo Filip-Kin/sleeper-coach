@@ -30,6 +30,7 @@
 // ------------------------------------------------------------------------------
 
 import { Client, GatewayIntentBits, Events } from "discord.js";
+import { existsSync } from "node:fs";
 import sodium from "libsodium-wrappers";
 import { loadConfig, discordNames, ROOM_FEED_IDS } from "./config.ts";
 import { startTail } from "./tail.ts";
@@ -44,6 +45,14 @@ if (!config) process.exit(0); // clean exit: nothing to crash-loop on
 // Capture here where the null-guard has narrowed `config`; a hoisted function
 // declaration below (resolveSpeaker) can't see that narrowing on its own.
 const guildId = config.guildId;
+// Same reason: capture the fields the hoisted join/leave/poll helpers use, so
+// they see the non-null values rather than the un-narrowed `config`.
+const voiceChannelId = config.voiceChannelId;
+const listenerEnabled = config.listenerEnabled;
+const draftLock = config.draftLock;
+const idleLeaveMs = config.idleLeaveMs;
+const draftPollMs = config.draftPollMs;
+const activityLog = config.activityLog;
 
 // The voice encryption backend must be initialised before we join.
 await sodium.ready;
@@ -125,6 +134,9 @@ function str(v: unknown): string | undefined {
 
 function handleEvent(ev: ActivityEvent): void {
   if (ev.actor !== "coach") return;
+
+  // Any coach event means the draft is live: keep the bot in the call.
+  markActivity();
 
   // Silent: just remember the board for later pick-specific comebacks.
   if (ev.type === "board-pick") {
@@ -210,39 +222,94 @@ const client = new Client({
 
 let stopTail: (() => void) | null = null;
 let stopListener: (() => void) | null = null;
+let botUserId = "";
+
+// #region call presence — join for the draft, idle-leave when it's over
+// The bot no longer sits in the voice channel forever. It leaves after
+// config.idleLeaveMs with no draft activity, and rejoins the moment the draft
+// engine's lock (config.draftLock) reappears — "draft mode". A poll loop
+// (config.draftPollMs) drives both transitions. Speech is dropped safely while
+// disconnected (speak() guards on `voice`), so nothing crashes between drafts.
+let lastActivityAt = Date.now();
+let joining = false;
+function markActivity(): void {
+  lastActivityAt = Date.now();
+}
+
+async function joinCall(reason: string): Promise<void> {
+  if (voice || joining) return;
+  joining = true;
+  try {
+    voice = await connectVoice(client, guildId, voiceChannelId);
+    markActivity();
+    console.log(`[announcer] joined voice channel ${voiceChannelId} (${reason}).`);
+    if (listenerEnabled) {
+      stopListener = startListener({
+        connection: voice.connection,
+        botUserId,
+        isBusy,
+        resolveSpeaker,
+        onComeback: enqueueComeback,
+      });
+    }
+  } catch (err) {
+    // A transient join failure is not fatal here: the poll loop will retry on
+    // the next tick. (A permanent misconfig — un-invited bot / wrong IDs — just
+    // means it never manages to join, which is logged each attempt.)
+    voice = null;
+    console.error(`[announcer] could not join voice (${reason}): ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    joining = false;
+  }
+}
+
+function leaveCall(reason: string): void {
+  if (!voice) return;
+  console.log(`[announcer] leaving voice channel (${reason}).`);
+  stopListener?.();
+  stopListener = null;
+  voice.destroy();
+  voice = null;
+}
+
+// Decide join/leave each tick. Lock present -> draft mode: stay/rejoin. Lock
+// absent and idle past the window -> leave. Never leave mid-speech.
+async function pollPresence(): Promise<void> {
+  const draftMode = existsSync(draftLock);
+  if (draftMode) {
+    markActivity();
+    if (!voice) await joinCall("draft mode");
+    return;
+  }
+  if (voice && !draining && Date.now() - lastActivityAt >= idleLeaveMs) {
+    leaveCall(`idle ${Math.round(idleLeaveMs / 60_000)}m with no draft`);
+  }
+}
+// #endregion
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`[announcer] logged in as ${c.user.tag}`);
-  try {
-    voice = await connectVoice(client, config.guildId, config.voiceChannelId);
-    console.log(`[announcer] joined voice channel ${config.voiceChannelId}; tailing ${config.activityLog}`);
-  } catch (err) {
-    // A bad guild/channel or an un-invited bot is a permanent misconfig — exit
-    // CLEANLY so `restart: on-failure` doesn't hammer Discord's login. Fix the
-    // config (invite the bot / correct the IDs) and start the service again.
-    console.error(`[announcer] could not join voice: ${err instanceof Error ? err.message : String(err)}`);
-    console.error("[announcer] check the bot is invited to the guild and DISCORD_GUILD_ID / DISCORD_VOICE_CHANNEL_ID are correct, then restart.");
-    await shutdown(0);
-    return;
-  }
+  botUserId = c.user.id;
+
+  // Tail the activity log immediately; speaking is a no-op until we're in voice.
   stopTail = startTail({
-    path: config.activityLog,
+    path: activityLog,
     onEvent: handleEvent,
     onError: (err) => console.error(`[announcer] tail error: ${err.message}`),
   });
-
-  // Listener is OFF unless LISTENER_ENABLED is set. When off we behave exactly
-  // as before: announce-only, never subscribe to audio, never run whisper.
-  if (config.listenerEnabled && voice) {
-    stopListener = startListener({
-      connection: voice.connection,
-      botUserId: c.user.id,
-      isBusy,
-      resolveSpeaker,
-      onComeback: enqueueComeback,
-    });
-  } else {
+  if (!listenerEnabled) {
     console.log("[announcer] listener disabled (set LISTENER_ENABLED=1 to enable comebacks).");
+  }
+
+  // Join on boot so we're present (and, if a draft is already running, ready to
+  // call picks); the idle timer then leaves us out after idleLeaveMs if no draft
+  // shows up, and the poll loop rejoins whenever the draft lock appears.
+  await joinCall(existsSync(draftLock) ? "boot: draft active" : "boot");
+  if (idleLeaveMs <= 0) {
+    console.log("[announcer] idle-leave disabled (IDLE_LEAVE_MINUTES<=0); staying in the call.");
+  } else {
+    console.log(`[announcer] tailing ${activityLog}; will leave after ${Math.round(idleLeaveMs / 60_000)}m idle, rejoin on draft mode.`);
+    setInterval(() => void pollPresence(), draftPollMs);
   }
 });
 

@@ -8,6 +8,16 @@ export interface AnnouncerConfig {
   guildId: string;
   voiceChannelId: string;
   activityLog: string;
+  // The draft-active lock the draft engine writes at draft start and removes at
+  // completion (src/draft/run.ts). Its presence is our "draft mode" signal: the
+  // bot rejoins the call when it appears and idle-leaves once it's been gone a
+  // while. Read-only from here (the /data mount is RO); we only stat it.
+  draftLock: string;
+  // How long the bot stays in the call with NO draft active before leaving, so it
+  // doesn't sit in the channel endlessly. Reset by any draft activity / the lock.
+  idleLeaveMs: number;
+  // How often to poll the lock + idle timer to join/leave the call.
+  draftPollMs: number;
   // Listener (LISTEN + COMEBACK) phase. OFF by default: when false the bot is
   // announce-only and never subscribes to audio or runs speech-to-text.
   listenerEnabled: boolean;
@@ -103,11 +113,21 @@ export function loadConfig(): AnnouncerConfig | null {
   const listenerRaw = process.env.LISTENER_ENABLED?.trim().toLowerCase() ?? "";
   const listenerEnabled = listenerRaw === "1" || listenerRaw === "true" || listenerRaw === "yes" || listenerRaw === "on";
 
+  // Idle-leave window: default 180 min (a few hours). Override with
+  // IDLE_LEAVE_MINUTES; <= 0 disables idle-leave (stays in the call forever).
+  const idleMin = Number(process.env.IDLE_LEAVE_MINUTES);
+  const idleLeaveMs = (Number.isFinite(idleMin) ? idleMin : 180) * 60_000;
+  const pollMs = Number(process.env.DRAFT_POLL_SECONDS);
+  const draftPollMs = (Number.isFinite(pollMs) && pollMs > 0 ? pollMs : 10) * 1_000;
+
   return {
     token: token as string,
     guildId: guildId as string,
     voiceChannelId: voiceChannelId as string,
     activityLog: process.env.ACTIVITY_LOG?.trim() || "/data/sleeper-coach/activity.jsonl",
+    draftLock: process.env.DRAFT_LOCK?.trim() || "/data/sleeper-coach/draft-active",
+    idleLeaveMs,
+    draftPollMs,
     listenerEnabled,
   };
 }
