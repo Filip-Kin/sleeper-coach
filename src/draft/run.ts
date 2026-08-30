@@ -541,8 +541,13 @@ for (;;) {
   }
   // Confirm the pick landed by OUR cell count on the board growing (DOM truth;
   // works for both visible picks and out-of-window DEF/K, and for back-to-back).
+  // Window is deliberately generous. At 16 tries (~13s) test mock #2 timed out
+  // on a pick that had in fact landed, logged a miss, fired a pick-failed alert
+  // and re-clicked; the board was just slow to reflect it. ~24s still leaves
+  // most of a 90s clock, and a double-pick was never possible anyway — a landed
+  // pick takes our button off the clock, so the retry path exits first.
   let landed = false;
-  for (let i = 0; i < 16; i++) {
+  for (let i = 0; i < 30; i++) {
     if ((await myBoardCount()) > myDrafted.length) { landed = true; break; }
     await Bun.sleep(800);
   }
