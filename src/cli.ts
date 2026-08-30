@@ -18,6 +18,8 @@ import { buildBoard } from "./analysis/board.ts";
 import { describeScoring } from "./analysis/scoring.ts";
 import { loadSeasonProjections, projectionsCacheStatus } from "./analysis/projections.ts";
 import { rankByVor } from "./analysis/vor.ts";
+import { byeWeek } from "./data/byes.ts";
+import { loadNews, newsFor, applyNews } from "./data/news.ts";
 import type { LeagueUser, Position } from "./sleeper/types.ts";
 
 const [command, ...args] = process.argv.slice(2);
@@ -89,15 +91,24 @@ async function cmdBoard(): Promise<void> {
     return;
   }
 
-  const ranked = rankByVor(projections, league);
+  // Same news adjustment the draft engine applies, so this board is what the
+  // engine will actually see rather than a rosier raw-projection view.
+  const { updatedAt: newsAt, byKey: news } = await loadNews();
+  const { adjusted, changed } = applyNews(projections, news);
+  console.log(`\nnews dossier: ${news.size} entries (updated ${newsAt ?? "unknown"}), ${changed.length} players devalued`);
+
+  const ranked = rankByVor(adjusted, league, projections);
   const rows = (position ? ranked.filter((r) => r.position === position) : ranked).slice(0, limit);
   console.log(`\nValue board${position ? ` — ${position}` : ""} (top ${rows.length}, by VOR under your scoring):`);
-  console.log(`  ${"#".padStart(3)}  ${"player".padEnd(24)} ${"pos".padEnd(4)} ${"tm".padEnd(4)} ${"pts".padStart(6)} ${"vor".padStart(6)} ${"adp".padStart(6)} tier`);
+  console.log(`  ${"#".padStart(3)}  ${"player".padEnd(24)} ${"pos".padEnd(4)} ${"tm".padEnd(4)} ${"pts".padStart(6)} ${"vor".padStart(6)} ${"adp".padStart(6)} tier bye  news`);
   rows.forEach((e, i) => {
     const inj = e.injuryStatus ? ` [${e.injuryStatus}]` : "";
     const adp = e.adp >= 999 ? "-" : e.adp.toFixed(1);
+    const n = newsFor(news, e.name);
+    const bye = byeWeek(e.team);
+    const tag = n ? ` ${n.status.toUpperCase()}` : "";
     console.log(
-      `  ${String(i + 1).padStart(3)}. ${e.name.padEnd(24)} ${(`${e.position}${e.posRank}`).padEnd(4)} ${e.team.padEnd(4)} ${e.points.toFixed(1).padStart(6)} ${e.vor.toFixed(1).padStart(6)} ${adp.padStart(6)}  T${e.tier}${inj}`,
+      `  ${String(i + 1).padStart(3)}. ${e.name.padEnd(24)} ${(`${e.position}${e.posRank}`).padEnd(4)} ${e.team.padEnd(4)} ${e.points.toFixed(1).padStart(6)} ${e.vor.toFixed(1).padStart(6)} ${adp.padStart(6)}  T${e.tier}  ${String(bye ?? "?").padStart(2)}${tag}${inj}`,
     );
   });
 }

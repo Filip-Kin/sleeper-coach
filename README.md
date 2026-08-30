@@ -66,6 +66,44 @@ invited with Connect + Speak; and `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`,
 missing the service logs what's absent and exits cleanly. Full details are in
 the header comment of `src/announcer/index.ts`.
 
+## The news layer
+
+Projections and ADP cannot see a pending suspension, a PUP list or a
+depth-chart change, and Sleeper's own `injury_status` is close to useless in
+preseason: on 30 August 2026 it tagged 33 of the top 150 by ADP "Questionable",
+including Patrick Mahomes and a placekicker. The draft agent had no way to tell
+camp maintenance from a torn ACL.
+
+`src/data/news.ts` reads a hand-curated dossier from
+`/data/sleeper-coach/news.json` on the persistent state volume, so news can be
+updated minutes before a draft with no rebuild and no redeploy. Each entry has a
+`status` and a `note`:
+
+| status | meaning | effect on value |
+| --- | --- | --- |
+| `out` | done for the season | points x0.05 |
+| `risk` | real chance of missing games (pending suspension, multi-week injury) | points x0.85, or an explicit `multiplier` |
+| `watch` | playing, but carrying a knock worth knowing | none |
+| `soft` | Sleeper flags him, the reporting says he is fine | none, and the shortlist says so explicitly |
+
+The two effects are deliberately separate. The `note` is advisory text on the
+agent's shortlist and can only break a near-tie inside the existing
+`VONA_PLAN_EPS` window. Points are only scaled where reporting states a concrete
+absence, because a player who is out for the season is worth nothing and leaving
+him atop the board is a bug rather than a strategy choice.
+
+One trap worth knowing: the news multiplier is applied to individual players,
+but VOR measures each player against the *replacement level* at his position
+(RB23's points in this league). Devaluing a handful of fringe RBs therefore
+drags that baseline down and silently inflates the VOR of every healthy RB. So
+`rankByVor` takes a `baselineFrom` list and computes replacement from the
+UNADJUSTED projections. Without it, docking four injured backs lifted Gibbs from
+135 to 157 VOR and tilted the whole board toward RB for no football reason.
+
+Bye weeks (`src/data/byes.ts`) are shown per player on the shortlist, and the
+agent is told its own roster's bye concentration so it stops stacking starters
+onto one dead week.
+
 ## Layout
 
 ```
@@ -74,6 +112,8 @@ src/
   sleeper/client.ts    read-only API client (no write path exists)
   sleeper/types.ts     typed API shapes
   data/players.ts      cached player + injury dump (daily TTL)
+  data/byes.ts         2026 bye week per team (static, ESPN-derived)
+  data/news.ts         the qualitative news layer (see below)
   analysis/scoring.ts  fantasy points from a league's scoring settings
   analysis/board.ts    value board
   cli.ts               read-only inspection commands

@@ -8,3 +8,6 @@ node_modules/
 # Working notes and the agent's persistent brain stay local, not in git.
 brain/
 scratch/
+
+# Cached API dumps land next to the loader; never commit them.
+src/data/*.json

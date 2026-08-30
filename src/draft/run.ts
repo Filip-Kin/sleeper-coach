@@ -22,6 +22,8 @@ import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
 import { rankByVona, type VonaPlayer } from "../analysis/vona.ts";
 import { positionCap, slotOnClock, ownPickNo, nextOwnPickNo } from "./logic.ts";
 import { gapDemandFor } from "./opponents.ts";
+import { byeWeek, byeCounts } from "../data/byes.ts";
+import { loadNews, newsFor, applyNews, type NewsEntry } from "../data/news.ts";
 import { logEvent, logThink } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 
@@ -76,11 +78,23 @@ const scoring = league.scoring_settings;
 const rec = scoring.rec ?? 0;
 const scoringLabel = rec >= 1 ? "full-PPR" : rec > 0 ? `${rec}-PPR` : "standard";
 console.log(`[draft-run] scoring: ${scoringLabel} (rec ${rec})`);
-const projections = await loadSeasonProjections(config.season, scoring);
+const rawProjections = await loadSeasonProjections(config.season, scoring);
+
+// The news layer. Projections and ADP feeds cannot see a pending suspension or
+// a PUP list, so scale points by the dossier BEFORE value is computed — that way
+// VOR, positional tiers and VONA survival all agree on what a player is worth.
+// Only facts with a stated absence move a player; everything else is advisory
+// text the agent reads on the shortlist (see src/data/news.ts).
+const { updatedAt: newsAt, byKey: news } = await loadNews();
+const { adjusted: projections, changed: newsChanged } = applyNews(rawProjections, news);
+console.log(`[draft-run] news: ${news.size} entries (updated ${newsAt ?? "unknown"}), ${newsChanged.length} players devalued`);
+for (const c of newsChanged) console.log(`[draft-run]   ${c.status.toUpperCase()} ${c.name}: ${c.from.toFixed(0)} -> ${c.to.toFixed(0)}pts`);
+if (news.size === 0) console.log("[draft-run] WARNING: no news dossier loaded — drafting on numbers alone");
+logEvent("coach", "news-loaded", `News dossier: ${news.size} entries, ${newsChanged.length} players devalued.`, { updatedAt: newsAt, changed: newsChanged });
 
 // The static value board — VOR under our scoring. It does NOT depend on who's
 // been drafted (availability is judged live from the DOM), so compute it once.
-const fullBoard: RankedPlayer[] = rankByVor(projections, league);
+const fullBoard: RankedPlayer[] = rankByVor(projections, league, rawProjections);
 const byName = new Map(fullBoard.map((b) => [b.name, b]));
 
 // #region VONA — value over next available
@@ -268,12 +282,43 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
   // Rank by VONA (value over next available), so the agent reasons off the same
   // scarcity signal the deterministic picker uses: who won't be here next turn.
   const availSet = availSet0.size ? availSet0 : new Set(fullBoard.map((b) => b.name));
-  const board = rankAvailable(availSet, round).slice(0, 22);
+  // Filter to what this round can actually take, using the SAME caps the picker
+  // enforces. Without this the shortlist fills with kickers and defences: they
+  // always survive to our next pick, so their VONA sits at ~0, which outranks a
+  // receiver who falls back and scores negative. The picker discarded them
+  // anyway, so the agent was spending its round-1 plan ranking placekickers.
+  const planCounts = localCounts();
+  const board = rankAvailable(availSet, round)
+    .filter((b) => (planCounts[b.position] ?? 0) < positionCap(b.position, round))
+    .slice(0, 22);
   const availNames = new Set(board.map((b) => b.name));
   const have = roster.length ? `Your roster so far: ${roster.join(", ")}.` : "Your roster is empty.";
+  // Sleeper's injury_status is close to noise in preseason, so when the dossier
+  // says the tag is soft we show the reporting INSTEAD of the bare tag — the
+  // agent was previously fading healthy studs off a blanket "Questionable".
+  const tagOf = (r: (typeof board)[number]): string => {
+    const n: NewsEntry | undefined = newsFor(news, r.name);
+    if (!n) return r.injuryStatus ? ` [${r.injuryStatus}]` : "";
+    // "soft" exists to cancel a scary tag. With no tag to cancel it is just context.
+    if (n.status === "soft") {
+      return r.injuryStatus ? ` [${r.injuryStatus} — NOISE: ${n.note}]` : ` [${n.note}]`;
+    }
+    return `${r.injuryStatus ? ` [${r.injuryStatus}]` : ""} [${n.status.toUpperCase()}: ${n.note}]`;
+  };
   const shortlist = board
-    .map((r, i) => `${i + 1}. ${r.name} — ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} VONA ${r.vona.toFixed(0)} surv ${Math.round(r.pSurvive * 100)}% ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier}${r.injuryStatus ? ` [${r.injuryStatus}]` : ""}`)
+    .map((r, i) => {
+      const bye = byeWeek(r.team);
+      return `${i + 1}. ${r.name} — ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} VONA ${r.vona.toFixed(0)} surv ${Math.round(r.pSurvive * 100)}% ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier} bye${bye ?? "?"}${tagOf(r)}`;
+    })
     .join("\n");
+  // Bye-week concentration on the roster we've built so far. Stacking starters
+  // on one bye costs a week of the season, and nothing in the value model sees it.
+  const myByes = byeCounts(myDrafted.map((d) => byName.get(d.name)?.team));
+  const byeStr = [...myByes.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([wk, n]) => `week ${wk}: ${n}`)
+    .join(", ");
+  const heavyByes = [...myByes.entries()].filter(([, n]) => n >= 3).map(([wk]) => wk);
   // Players who probably won't make it back to us — flag the run risk explicitly.
   const goneSoon = board.filter((r) => r.pSurvive < 0.35).slice(0, 8);
   const goneStr = goneSoon.length
@@ -303,6 +348,14 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
       `Best available now, ranked by VONA (value over next available: value now minus what you can still get at that position when the pick snakes back to you). ` +
       `VOR is raw value, "surv" is the chance the player is still there at your next pick, VONA is the value you forfeit by waiting. Prefer higher VONA — it already accounts for who falls back to you:\n${shortlist}\n\n` +
       (goneStr ? `${goneStr}\n\n` : "") +
+      `Reading the tags: "bye N" is that player's bye week. A bracket marked NOISE means Sleeper flags him but the ` +
+      `reporting says he is fine — do NOT downgrade him for it. RISK or OUT means a real chance of missing games, and ` +
+      `his points above are ALREADY reduced for it, so do not penalise him twice. WATCH is a knock worth knowing but ` +
+      `no value change. A note marked UPSIDE is an opportunity the projections have not caught up with yet.\n\n` +
+      (byeStr ? `Your roster's bye weeks so far — ${byeStr}.\n` : "") +
+      (heavyByes.length
+        ? `You already have three or more players on the week ${heavyByes.join(" and ")} bye. Break the tie AWAY from that bye unless the player is clearly the best pick.\n\n`
+        : "\n") +
       `Build the strongest STARTING lineup. Prioritise RB and WR heavily early (you start 2 RB, 2 WR, and 2 FLEX). ` +
       `Because RB is scarcer and fills your FLEX, build real RB depth — aim for about five RBs by the end — and don't ` +
       `stack more than about five WRs unless a WR is clearly the best value. You need only ONE tight end: do NOT reach ` +
@@ -348,12 +401,28 @@ if (rehearse) {
   await Bun.sleep(4000);
 }
 
-// Resolve our slot before picking anything (draft_order populates on start).
-for (let i = 0; i < 40 && myDraftSlot == null; i++) {
-  await resolveSlot();
-  if (myDraftSlot == null) await Bun.sleep(1500);
+// Resolve our slot before picking anything. draft_order is null until the
+// commissioner randomises the order, which in this league happens about fifteen
+// minutes before kickoff — so wait it out (up to 30 min) rather than the old
+// 60s. Proceeding without a slot is not harmless: myBoardCount() filters board
+// cells by our slot, so every pick we made would look like it never landed and
+// fire a pick-failed alert each round.
+{
+  const slotDeadline = Date.now() + 30 * 60_000;
+  let waited = 0;
+  while (myDraftSlot == null && Date.now() < slotDeadline) {
+    await resolveSlot();
+    if (myDraftSlot != null) break;
+    if (waited % 20 === 0) console.log("[draft-run] waiting for draft_order to be set (order not randomised yet)…");
+    waited++;
+    await Bun.sleep(3000);
+  }
 }
 console.log(`[draft-run] our draft slot: ${myDraftSlot ?? "unresolved"}`);
+if (myDraftSlot == null) {
+  console.log("[draft-run] WARNING: slot unresolved — pick confirmation and VONA next-pick math are both degraded");
+  if (!rehearse) await sendAlert("Draft: slot unresolved", "draft_order never appeared. The coach will still pick, but pick confirmation is unreliable — watch the room.");
+}
 
 // Seed our local roster from any picks already on the board at our slot (e.g.
 // keepers), so round counting starts from reality.

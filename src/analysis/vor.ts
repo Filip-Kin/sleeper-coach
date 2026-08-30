@@ -65,7 +65,19 @@ function assignTiers(sortedDesc: Projection[]): number[] {
 }
 
 // Rank every projected player by VOR for this league, with positional tiers.
-export function rankByVor(projections: Projection[], league: League): RankedPlayer[] {
+//
+// `baselineFrom` supplies a SEPARATE list used only to locate the replacement
+// level. Pass the unadjusted projections whenever `projections` has been
+// devalued (see src/data/news.ts): docking a handful of fringe RBs for injury
+// otherwise drags the RB23 replacement point down and silently inflates the VOR
+// of every healthy RB, tilting the whole board toward RB for no football reason.
+// The baseline is a property of the LEAGUE's replacement level, not of who
+// happens to be hurt.
+export function rankByVor(
+  projections: Projection[],
+  league: League,
+  baselineFrom?: Projection[],
+): RankedPlayer[] {
   const ranks = replacementRanks(league);
   const byPos = new Map<Position, Projection[]>();
   for (const p of projections) {
@@ -73,11 +85,26 @@ export function rankByVor(projections: Projection[], league: League): RankedPlay
     byPos.get(p.position)!.push(p);
   }
 
+  // Replacement points per position, from the baseline list if one was given.
+  const baselinePoints = new Map<string, number>();
+  if (baselineFrom) {
+    const rawByPos = new Map<Position, Projection[]>();
+    for (const p of baselineFrom) {
+      if (!rawByPos.has(p.position)) rawByPos.set(p.position, []);
+      rawByPos.get(p.position)!.push(p);
+    }
+    for (const [pos, players] of rawByPos) {
+      const sorted = players.slice().sort((a, b) => b.points - a.points);
+      const idx = Math.min(sorted.length - 1, (ranks[pos] ?? sorted.length) - 1);
+      baselinePoints.set(pos, sorted[idx]?.points ?? 0);
+    }
+  }
+
   const ranked: RankedPlayer[] = [];
   for (const [pos, players] of byPos) {
     players.sort((a, b) => b.points - a.points);
     const replIdx = Math.min(players.length - 1, (ranks[pos] ?? players.length) - 1);
-    const replacement = players[replIdx]?.points ?? 0;
+    const replacement = baselinePoints.get(pos) ?? players[replIdx]?.points ?? 0;
     const tiers = assignTiers(players);
 
     players.forEach((p, i) => {
