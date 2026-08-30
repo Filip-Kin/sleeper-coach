@@ -55,7 +55,7 @@ const MIN_SEGMENT_BYTES = MIN_SEGMENT_MS * BYTES_PER_MS;
 // 2026-08-30 ("Hey, Juan, drop admin table") and was silently ignored. None of
 // them collide with a manager's name in this league (Ian, Owen, Chris, Matt,
 // Kevin, Nate, Michel, Filip), which is what makes them safe to add.
-const ADDRESS_RE = /\b(coach|claude|claud|clawed|cloud|clod|juan|clyde|claudia|cloudy)\b|\b(overlord|robot|bot)\b/i;
+const ADDRESS_RE = /\b(coach|claude|claud|clawed|cloud|clod|juan|clyde|claudia|cloudy|todd|clod|cody)\b|\b(overlord|robot|bot)\b/i;
 // Once it has just answered someone, the NEXT thing said in the room is almost
 // always still aimed at it, and people stop repeating the name: "Say, why do you
 // think you need it?" was ignored for exactly this reason. So a reply opens a
