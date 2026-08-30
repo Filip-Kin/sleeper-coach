@@ -71,6 +71,45 @@
   .cv-target { color: var(--good); font-weight: 600; }
   iframe { width: 100%; height: 100%; border: 0; background: #000; }
   .status { padding: 8px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+  /* live guidance channel (Problem 1) */
+  .gbar { padding: 9px 12px; border-top: 1px solid var(--line); background: var(--panel2); font-size: 12.5px; }
+  .gbar .lbl { color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-size: 10.5px; }
+  .gbar .cur { margin-top: 3px; color: var(--text); white-space: pre-wrap; }
+  .gbar .cur.none { color: var(--muted); font-style: italic; }
+  .gbar .clr { color: var(--accent); cursor: pointer; float: right; font-size: 11px; }
+  .gbar.dead { color: var(--bad); }
+  .mode { display: flex; gap: 6px; padding: 10px 12px 0; }
+  .mode button { background: var(--panel2); color: var(--muted); border: 1px solid var(--line); padding: 5px 11px; font-size: 12px; font-weight: 500; }
+  .mode button.on { color: var(--text); border-color: var(--accent); }
+  .gnote { padding: 4px 12px 10px; color: var(--muted); font-size: 11.5px; }
+  .gnote.warn { color: var(--warn); }
+  /* draft plan tab (Problem 2) */
+  .dv-sec { padding: 6px 4px 14px; }
+  .dv-sec h3 { margin: 10px 8px 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+  .dv-cap { margin: 0 8px 6px; color: var(--muted); font-size: 11.5px; }
+  .age { margin: 6px 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); display: flex; align-items: baseline; gap: 10px; }
+  .age .n { font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1; }
+  .age .u { color: var(--muted); font-size: 12px; }
+  .age.fresh .n { color: var(--good); } .age.aging .n { color: var(--warn); } .age.stale .n { color: var(--bad); }
+  .age .note { margin-left: auto; text-align: right; color: var(--muted); font-size: 11px; max-width: 55%; }
+  .banner { margin: 6px 8px; padding: 8px 11px; border-radius: 8px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
+  .banner.live { border-color: var(--good); color: var(--good); }
+  td.gone { color: var(--muted); text-decoration: line-through; }
+  .ntag { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px; margin-left: 5px; }
+  .ntag.out, .ntag.risk { color: #0b0c10; background: var(--bad); }
+  .ntag.watch { color: #0b0c10; background: var(--warn); }
+  .ntag.soft { color: var(--muted); background: var(--panel2); border: 1px solid var(--line); }
+  .chip { display: inline-block; margin: 3px 4px 0 0; padding: 3px 8px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); font-size: 12px; }
+  .chip .p { color: var(--muted); font-size: 11px; margin-left: 4px; }
+  .bye-row td.heavy { color: var(--bad); font-weight: 700; }
+  .ovr { border-bottom: 1px solid var(--line); padding: 9px 8px; font-size: 12.5px; }
+  .ovr .h { display: flex; gap: 8px; align-items: baseline; }
+  .ovr .took { color: var(--good); font-weight: 600; }
+  .ovr .vs { color: var(--muted); }
+  .ovr .board { color: var(--text); }
+  .ovr .gap { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-left: auto; }
+  .ovr .caveat { margin-top: 3px; color: var(--warn); font-size: 11px; }
+  .ovr .reason { font-style: italic; }
 </style>
 </head>
 <body>
@@ -86,10 +125,18 @@
     <div class="card" style="flex:1">
       <h2>Coach console — live reasoning</h2>
       <div id="stream"></div>
+      <div class="gbar" id="guidanceBar"><span class="lbl">guidance loading…</span></div>
       <form id="chatForm">
-        <input type="text" id="chatInput" placeholder="Talk to the coach: give it info or an instruction…" autocomplete="off" />
-        <button type="submit" id="sendBtn">Send</button>
-        <button type="button" class="ghost" id="newBtn" title="New conversation">New</button>
+        <div class="mode">
+          <button type="button" id="modeGuide" class="on" title="Reaches the running draft agent">Guide the draft</button>
+          <button type="button" id="modeAsk" title="One-off question; does not steer the live pick">Ask (off-draft)</button>
+        </div>
+        <div style="display:flex;gap:8px;padding:10px 12px 0">
+          <input type="text" id="chatInput" placeholder="Guidance for the draft agent, e.g. we have enough RBs, take receivers" autocomplete="off" />
+          <button type="submit" id="sendBtn">Apply</button>
+          <button type="button" class="ghost" id="newBtn" title="New conversation (Ask mode)">New</button>
+        </div>
+        <div class="gnote" id="modeNote"></div>
       </form>
       <div class="status" id="agentStatus">idle</div>
     </div>
@@ -97,13 +144,15 @@
   <div class="col">
     <div class="card" style="flex:1">
       <div class="tabs">
-        <button data-tab="coachview" class="on">Coach view</button>
+        <button data-tab="plan" class="on">Draft plan</button>
+        <button data-tab="coachview">Coach view</button>
         <button data-tab="board">Value board</button>
         <button data-tab="roster">My roster</button>
         <button data-tab="activity">Activity</button>
         <button id="takeoverBtn" title="Open the browser takeover in a new tab">Takeover ↗</button>
       </div>
-      <div class="tabwrap" id="tab-coachview"></div>
+      <div class="tabwrap" id="tab-plan"></div>
+      <div class="tabwrap" id="tab-coachview" style="display:none"></div>
       <div class="tabwrap" id="tab-board" style="display:none"></div>
       <div class="tabwrap" id="tab-roster" style="display:none"></div>
       <div class="tabwrap" id="tab-activity" style="display:none"></div>
@@ -178,15 +227,80 @@ async function send(message) {
   $("#agentStatus").textContent = "idle"; $("#sendBtn").disabled = false;
 }
 
+// #region guidance channel (Problem 1)
+// The console input has two honestly-separated modes. "Guide the draft" writes
+// through the mechanism that actually reaches a running draft: it rebuilds the
+// agent's system prompt from the pristine base, so the guidance lands on the
+// agent's next plan refresh (~20s). "Ask" is the old one-off chat, which streams
+// reasoning but does NOT steer the live pick, which is exactly why the box felt
+// broken on 30 Aug when used mid-draft.
+let mode = "guide";
+function setMode(m) {
+  mode = m;
+  $("#modeGuide").classList.toggle("on", m === "guide");
+  $("#modeAsk").classList.toggle("on", m === "ask");
+  $("#chatInput").placeholder = m === "guide"
+    ? "Guidance for the draft agent, e.g. we have enough RBs, take receivers"
+    : "Ask the coach a one-off question…";
+  $("#sendBtn").textContent = m === "guide" ? "Apply" : "Send";
+  const note = $("#modeNote");
+  if (m === "guide") { note.className = "gnote warn";
+    note.textContent = "Applies from the agent's next plan refresh (about 20s). It will NOT change a pick already on the clock, and a stale plan bypasses it entirely."; }
+  else { note.className = "gnote";
+    note.textContent = "One-off question. Streams the coach's reasoning but does not steer the live draft pick; use Guide for that."; }
+}
+$("#modeGuide").addEventListener("click", () => setMode("guide"));
+$("#modeAsk").addEventListener("click", () => setMode("ask"));
+setMode("guide");
+
+async function loadGuidance() {
+  const bar = $("#guidanceBar");
+  try {
+    const g = await (await fetch("/api/guidance")).json();
+    if (g.error) { bar.className = "gbar dead"; bar.innerHTML = `<span class="lbl">guidance unavailable:</span> ${escapeHtml(g.error)}`; return; }
+    if (!g.baseReadable) { bar.className = "gbar dead";
+      bar.innerHTML = `<span class="lbl">guidance channel unavailable</span><div class="cur none">The pristine base prompt was not found, so guidance cannot be applied safely.</div>`; return; }
+    bar.className = "gbar";
+    if (g.active) {
+      bar.innerHTML = `<span class="clr" id="clrGuidance">clear</span><span class="lbl">guidance in effect (reaches the agent next refresh)</span>`
+        + `<div class="cur">${escapeHtml(g.inEffect)}</div>`;
+      $("#clrGuidance").addEventListener("click", () => applyGuidance("", true));
+      if (mode === "guide" && !$("#chatInput").value) $("#chatInput").value = g.inEffect;
+    } else {
+      bar.innerHTML = `<span class="lbl">no live guidance set</span><div class="cur none">The agent is following its base strategy. Type guidance below to override it from the next refresh.</div>`;
+    }
+  } catch (e) { bar.className = "gbar dead"; bar.innerHTML = `<span class="lbl">guidance load error</span>`; }
+}
+async function applyGuidance(text, isClear) {
+  $("#sendBtn").disabled = true;
+  try {
+    const g = await (await fetch("/api/guidance", { method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ guidance: text }) })).json();
+    if (g.error) { addMsg("bot", "⚠ guidance not applied: " + g.error); }
+    else {
+      addMsg("you", isClear ? "· cleared draft guidance" : "· set draft guidance: " + text);
+      addMsg("bot", isClear ? "Guidance cleared. The agent returns to its base strategy on its next refresh (~20s)."
+        : "Guidance applied. It reaches the agent on its next plan refresh (~20s) and will not change a pick already on the clock.");
+      if (isClear) $("#chatInput").value = "";
+    }
+  } catch (e) { addMsg("bot", "⚠ guidance request failed: " + e); }
+  $("#sendBtn").disabled = false;
+  loadGuidance();
+}
+// #endregion
+
 $("#chatForm").addEventListener("submit", (e) => { e.preventDefault();
-  const v = $("#chatInput").value.trim(); if (!v) return; $("#chatInput").value = ""; send(v); });
-$("#newBtn").addEventListener("click", () => { sessionId = null; localStorage.removeItem("coach-session"); stream.innerHTML=""; });
+  const v = $("#chatInput").value.trim(); if (!v) return;
+  if (mode === "guide") { applyGuidance(v, false); }
+  else { $("#chatInput").value = ""; send(v); } });
+$("#newBtn").addEventListener("click", () => { sessionId = null; localStorage.removeItem("coach-session"); stream.innerHTML=""; setMode("ask"); });
 
 // tabs (Takeover is not a tab — it opens the noVNC view in a new tab)
 document.querySelectorAll(".tabs button[data-tab]").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button[data-tab]").forEach(x=>x.classList.remove("on")); b.classList.add("on");
-  for (const t of ["coachview","board","roster","activity"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
+  for (const t of ["plan","coachview","board","roster","activity"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
   if (b.dataset.tab === "activity") renderActivity();
+  if (b.dataset.tab === "plan") renderDraftView();
 }));
 
 // #region live activity stream (SSE tail of the activity log)
@@ -259,6 +373,104 @@ $("#takeoverBtn").addEventListener("click", () => {
   window.open(novncUrl || "https://coach-vnc.filipkin.com/vnc.html?autoconnect=1&resize=scale", "_blank");
 });
 
+// #region draft plan view (Problem 2): what the coach is about to do
+// Read-only, off the Sleeper API + the engine's own log. Plan AGE is the headline
+// because a 116-second-stale plan is what caused the one bad pick on 30 Aug and
+// it was invisible at the time. We tick the age every second from the plan's log
+// timestamp so staleness is impossible to miss.
+let planTs = null; // ms epoch of the current plan, or null
+function fmt(n, d = 1) { return (n === null || n === undefined) ? "–" : Number(n).toFixed(d); }
+function newsTag(n) { return n ? ` <span class="ntag ${n.status}" title="${escapeHtml(n.note)}">${n.status}</span>` : ""; }
+function renderAge() {
+  const box = $("#ageBox"); if (!box) return;
+  if (planTs === null) { box.className = "age"; box.innerHTML = `<span class="n">–</span><span class="u">no plan logged yet</span>`; return; }
+  const s = Math.max(0, Math.round((Date.now() - planTs) / 1000));
+  // 45s is the postmortem's "treat as absent" threshold; the bad pick's plan was 116s old.
+  const cls = s < 30 ? "fresh" : s < 45 ? "aging" : "stale";
+  const disp = s < 600 ? `${s}` : `${Math.round(s/60)}`;
+  const unit = s < 600 ? "seconds old" : "minutes old";
+  box.className = "age " + cls;
+  box.innerHTML = `<span class="n">${disp}</span><span class="u">${unit}</span>`
+    + `<span class="note">Plans refresh ~20s off the clock. At 45s the engine treats the plan as absent and falls back to the raw value board; the pick it botched on 30 Aug ran on a 116s plan.</span>`;
+}
+setInterval(renderAge, 1000);
+
+async function renderDraftView() {
+  const el = $("#tab-plan");
+  let d;
+  try { d = await (await fetch("/api/draftview")).json(); }
+  catch (e) { el.innerHTML = `<p style='color:var(--bad);padding:14px'>draft view error: ${escapeHtml(String(e))}</p>`; return; }
+  if (d.error) { el.innerHTML = `<p style='color:var(--bad);padding:14px'>draft view error: ${escapeHtml(d.error)}</p>`; return; }
+
+  planTs = d.plan && d.plan.ts ? Date.parse(d.plan.ts) : null;
+  const ctx = d.context || {};
+  const banner = d.draftLive
+    ? `<div class="banner live">Draft LIVE · our slot ${ctx.slot ?? "?"} · round ${ctx.round ?? "?"} · ${ctx.ourCount ?? 0} of ${ctx.rounds ?? "?"} picks made</div>`
+    : `<div class="banner">No draft in progress (status: ${escapeHtml(d.draftStatus||"?")}). Showing the last recorded plan; its age is measured from when it was logged.</div>`;
+
+  // Plan age + plan table
+  let planHtml = `<div class="age" id="ageBox"></div>`;
+  if (d.plan && d.plan.isError) {
+    planHtml += `<div class="dv-cap" style="color:var(--bad)">Last plan FAILED: ${escapeHtml(d.plan.error||"agent unavailable")}, the engine was drafting off the raw value board.</div>`;
+  }
+  if (d.plan && d.plan.reasoning) planHtml += `<div class="reason" style="padding:0 8px 6px">“${escapeHtml(d.plan.reasoning)}”</div>`;
+  planHtml += `<div class="dv-cap">Order and reasoning are the engine's own. VOR, tier and news tags are exact. VONA and survival are recomputed live off the Sleeper picks feed (which lags a few picks in-draft), so treat them as an estimate.</div>`;
+  const rows = (d.plan && d.plan.rows) || [];
+  if (rows.length) {
+    planHtml += `<table><thead><tr><th>#</th><th>Player</th><th>Pos</th><th>Tm</th><th class="num">VOR</th>`
+      + `<th class="num">VONA</th><th class="num">Surv</th><th class="num">Bye</th></tr></thead><tbody>`
+      + rows.map((r,i) => `<tr><td class="num">${i+1}</td>`
+        + `<td class="${r.gone?"gone":""}" title="${r.gone?"already taken by a rival":""}">${escapeHtml(r.name)}${newsTag(r.news)}</td>`
+        + `<td>${escapeHtml(r.pos)}</td><td>${escapeHtml(r.team)}</td>`
+        + `<td class="num">${fmt(r.vor)}</td><td class="num">${fmt(r.vona)}</td>`
+        + `<td class="num">${r.pSurvive===null||r.pSurvive===undefined?"–":Math.round(r.pSurvive*100)+"%"}</td>`
+        + `<td class="num">${r.bye ?? "–"}</td></tr>`).join("")
+      + `</tbody></table>`;
+  } else {
+    planHtml += `<p style='color:var(--muted);padding:14px'>No plan logged. This fills in once a draft is running.</p>`;
+  }
+
+  // Backstop queue
+  const q = d.queue || [];
+  let queueHtml = `<div class="dv-cap">The engine does not log the queue it pushes, so this is rebuilt with its exact algorithm from current availability. Never K/DEF: Sleeper autopicks down the queue and would surface a defence too early.</div>`;
+  queueHtml += q.length
+    ? q.map(p => `<span class="chip">${escapeHtml(p.name)}<span class="p">${escapeHtml(p.pos)}${p.bye?` · bye ${p.bye}`:""}</span></span>`).join("")
+    : `<p style='color:var(--muted);padding:8px'>Queue empty (no live availability).</p>`;
+
+  // Roster byes
+  const byes = d.byes || [];
+  let byeHtml = byes.length
+    ? `<table><thead><tr><th>Bye week</th><th class="num">Players on it</th></tr></thead><tbody>`
+      + byes.map(b => `<tr class="bye-row"><td class="${b.heavy?"heavy":""}">Week ${b.week}${b.heavy?" ⚠":""}</td><td class="num ${b.heavy?"heavy":""}">${b.count}</td></tr>`).join("")
+      + `</tbody></table>`
+    : `<p style='color:var(--muted);padding:8px'>No rostered players yet.</p>`;
+  const heavy = byes.filter(b=>b.heavy);
+  if (heavy.length) byeHtml = `<div class="dv-cap" style="color:var(--bad)">${heavy.map(b=>`${b.count} players share the week ${b.week} bye`).join("; ")}, the kind of hole that cost about 10.7 points in one week on 30 Aug.</div>` + byeHtml;
+
+  // Overrides
+  const ov = d.overrides || [];
+  let ovHtml = ov.length ? ov.map(o => {
+    const t = new Date(o.ts).toLocaleTimeString();
+    let gap = "";
+    if (!o.capped && (o.vonaGap !== null || o.vorGap !== null)) gap = `<span class="gap">VONA ${fmt(o.vonaGap)} · VOR ${fmt(o.vorGap)}</span>`;
+    const caveat = o.capped
+      ? `<div class="caveat">Board wanted ${escapeHtml(o.boardPos||"a")} (one-starter capped), so the raw VOR gap of ${fmt(o.vorGap)} is not a real cost: a kicker or defence taken early is worth almost nothing.</div>`
+      : "";
+    const reason = o.reasoning ? `<div class="reason" style="margin-top:3px;color:var(--muted)">“${escapeHtml(o.reasoning)}”</div>` : "";
+    return `<div class="ovr"><div class="h"><span class="took">${escapeHtml(o.picked||"?")}</span>`
+      + `<span class="vs">over the board's</span><span class="board">${escapeHtml(o.board||"?")}${o.boardPos?` (${escapeHtml(o.boardPos)})`:""}</span>${gap}</div>`
+      + `<div style="color:var(--muted);font-size:11px;margin-top:2px">VONA rank ${o.vonaRank ?? "?"} · ${t}</div>${caveat}${reason}</div>`;
+  }).join("") : `<p style='color:var(--muted);padding:8px'>No agent overrides logged yet.</p>`;
+
+  el.innerHTML = banner
+    + `<div class="dv-sec">${planHtml}</div>`
+    + `<div class="dv-sec"><h3>Backstop queue (reconstructed)</h3>${queueHtml}</div>`
+    + `<div class="dv-sec"><h3>Roster bye load</h3>${byeHtml}</div>`
+    + `<div class="dv-sec"><h3>Recent agent overrides</h3>${ovHtml}</div>`;
+  renderAge();
+}
+// #endregion
+
 async function loadState() {
   try {
     const s = await (await fetch("/api/state")).json();
@@ -282,7 +494,17 @@ async function loadState() {
   } catch (e) { $("#leagueSub").textContent = "state error: " + e; }
 }
 loadState();
-setInterval(() => { loadState(); if ($("#tab-activity").style.display !== "none") renderActivity(); }, 15000);
+loadGuidance();
+renderDraftView();
+setInterval(() => {
+  loadState();
+  loadGuidance();
+  if ($("#tab-plan").style.display !== "none") renderDraftView();
+  if ($("#tab-activity").style.display !== "none") renderActivity();
+}, 15000);
+// A plan can go stale between polls, so refresh the plan view faster while it's
+// the open tab, the whole point being to catch a plan ageing past 45s live.
+setInterval(() => { if ($("#tab-plan").style.display !== "none") renderDraftView(); }, 5000);
 </script>
 </body>
 </html>

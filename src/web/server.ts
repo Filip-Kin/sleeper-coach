@@ -7,6 +7,8 @@ import { describeScoring } from "../analysis/scoring.ts";
 import { runAgent, type AgentEvent } from "../agent/runner.ts";
 import { recentEvents } from "../log.ts";
 import { allPosts } from "../blog/store.ts";
+import { readGuidanceState, setGuidance } from "./guidance.ts";
+import { draftView } from "./draftview.ts";
 import { statSync, openSync, readSync, closeSync } from "node:fs";
 
 const ACTIVITY_LOG = process.env.ACTIVITY_LOG ?? "/data/sleeper-coach/activity.jsonl";
@@ -160,6 +162,20 @@ Bun.serve({
     if (url.pathname === "/api/stream") return sseActivityStream();
     if (url.pathname === "/api/activity") return Response.json({ events: recentEvents(150) });
     if (url.pathname === "/api/state") return stateJson().catch((e) => Response.json({ error: String(e) }, { status: 500 }));
+    // Problem 2: everything the engine is about to do, read-only (plan + age,
+    // backstop queue, roster byes, recent overrides).
+    if (url.pathname === "/api/draftview") return draftView().then((v) => Response.json(v)).catch((e) => Response.json({ error: String(e) }, { status: 500 }));
+    // Problem 1: live guidance to the draft agent. GET the guidance in effect;
+    // POST { guidance } to rebuild system-prompt.md from the pristine base so the
+    // agent picks it up on its next plan refresh (about 20s). This is the channel
+    // that actually reaches a running draft; the /api/chat box below does not.
+    if (url.pathname === "/api/guidance" && req.method === "GET")
+      return readGuidanceState().then((g) => Response.json(g)).catch((e) => Response.json({ error: String(e) }, { status: 500 }));
+    if (url.pathname === "/api/guidance" && req.method === "POST")
+      return req.json()
+        .then((b) => setGuidance(String((b as { guidance?: unknown }).guidance ?? "")))
+        .then((g) => Response.json(g))
+        .catch((e) => Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 }));
     if (url.pathname === "/api/chat" && req.method === "POST") return sseChat(req);
     // Static: index at root, else serve files from public/.
     const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
