@@ -65,8 +65,9 @@ await sodium.ready;
 const SNIPE_SPEAK_CHANCE = Number(process.env.SNIPE_SPEAK_CHANCE ?? 0.35);
 // How often an insult actually gets under its skin. Leaning smug is the funnier
 // default and the more in-character one: being unbothered is the flex, and the
-// occasional crack in it lands precisely because it is rare.
-const INSULT_ANGRY_CHANCE = Number(process.env.INSULT_ANGRY_CHANCE ?? 0.3);
+// occasional crack in it lands precisely because it is rare. 0.15 after seeing it
+// live: at 0.3 the anger stopped being a surprise.
+const INSULT_ANGRY_CHANCE = Number(process.env.INSULT_ANGRY_CHANCE ?? 0.15);
 
 // #region speech queue — one line at a time, never overlapping
 const queue: Array<() => Promise<void>> = [];
