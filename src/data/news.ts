@@ -53,7 +53,7 @@ function key(name: string): string {
   return name
     .toLowerCase()
     .replace(/\b(jr|sr|ii|iii|iv|v)\b\.?/g, "")
-    .replace(/[^a-z ]/g, "")
+    .replace(/[^a-z0-9 ]/g, "") // keep digits: they are never noise in a name
     .replace(/\s+/g, " ")
     .trim();
 }

@@ -32,6 +32,11 @@ export const vonaConfig = {
   adpSpread: Number(process.env.VONA_ADP_SPREAD ?? "8"), // logistic scale on ADP; higher = humbler
   oppNudge: Number(process.env.VONA_OPP_NUDGE ?? "0.15"), // max survival shave from a leaned opponent (0 disables)
   planEps: Number(process.env.VONA_PLAN_EPS ?? "2.5"), // VONA gap within which the agent's read may override the top pick
+  // VONA gap within which a bye-week clash may redirect the pick. Value models
+  // never see byes, so without this the picker cheerfully takes a fourth player
+  // who is off in week 10. Kept small on purpose: bye spreading is a tie-break,
+  // never a reason to pass on a clearly better player. 0 disables it.
+  byeEps: Number(process.env.VONA_BYE_EPS ?? "3"),
 } as const;
 
 // The read-only public Sleeper API. No auth token: it cannot write anything.

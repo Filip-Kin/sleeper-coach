@@ -490,8 +490,36 @@ for (;;) {
     const vonaTop = eligible[0];
     const planPick = plan.map((nm) => byName.get(nm)).find((b): b is RankedPlayer => !!b && availOk(b) && needOk(b.position));
     if (vonaTop) {
+      // Bye spreading, as a TIE-BREAK only. Value never sees a bye week, so left
+      // alone the picker will happily take a fourth player who is off in week 10
+      // — which costs a real week of the season. Among candidates within a small
+      // VONA epsilon of the best, prefer the one whose bye we are least loaded
+      // on. Bounded by the epsilon, so it can never override a clear value pick.
+      const load = byeCounts(myDrafted.map((d) => byName.get(d.name)?.team));
+      const byeLoad = (b: RankedPlayer): number => {
+        const wk = byeWeek(b.team);
+        return wk == null ? 0 : load.get(wk) ?? 0;
+      };
+      // The agent's football read comes first, then bye spreading tie-breaks
+      // whatever that settled on — so a plan pick gets the same protection.
       const planVona = planPick ? eligible.find((v) => v.name === planPick.name)?.vona ?? -Infinity : -Infinity;
-      target = planPick && vonaTop.vona - planVona <= vonaConfig.planEps ? planPick : vonaTop;
+      const chosen = planPick && vonaTop.vona - planVona <= vonaConfig.planEps ? planPick : vonaTop;
+      // planPick comes off fullBoard (no vona field), so re-resolve it against
+      // the ranked set to compare like with like.
+      const base: VonaPlayer = eligible.find((v) => v.name === chosen.name) ?? { ...chosen, vona: vonaTop.vona, pSurvive: 1 };
+      const nearBase = eligible.filter((b) => base.vona - b.vona <= vonaConfig.byeEps);
+      target = nearBase.reduce((best, b) => {
+        const d = byeLoad(b) - byeLoad(best);
+        if (d < 0) return b;
+        if (d === 0 && b.vona > best.vona) return b;
+        return best;
+      }, base);
+      if (target.name !== base.name) {
+        console.log(`[draft-run] bye spread: ${base.name} (bye ${byeWeek(base.team) ?? "?"}, load ${byeLoad(base)}) -> ${target.name} (bye ${byeWeek(target.team) ?? "?"}, load ${byeLoad(target)})`);
+        logEvent("coach", "bye-spread", `Avoided a bye stack: ${target.name} over ${base.name}.`, {
+          from: base.name, to: target.name, fromBye: byeWeek(base.team), toBye: byeWeek(target.team),
+        });
+      }
     } else {
       target = planPick ?? fullBoard.find((b) => availOk(b)) ?? fullBoard[0];
     }

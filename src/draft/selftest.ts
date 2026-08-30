@@ -5,6 +5,9 @@
 import { slotOnClock, positionCap, ownPickNo, nextOwnPickNo } from "./logic.ts";
 import { survivalProb, expectedBestLaterVor, rankByVona } from "../analysis/vona.ts";
 import type { RankedPlayer } from "../analysis/vor.ts";
+import { rankByVor } from "../analysis/vor.ts";
+import { byeWeek, byeCounts, BYE_WEEKS } from "../data/byes.ts";
+import { applyNews, newsMultiplier, newsFor, type NewsEntry } from "../data/news.ts";
 
 let fail = 0;
 function check(name: string, cond: boolean, detail = ""): void {
@@ -61,6 +64,8 @@ check("expBestLater drops when top certainly gone",
 // VONA end-to-end: two positions, equal top raw value, but RB is a cliff (steep
 // drop + all likely gone) while WR is deep + likely to fall back. VONA must
 // prefer the RB even though raw VOR is tied.
+const mkP = (name: string, position: string, points: number) =>
+  ({ playerId: name, name, position, team: "X", points, ptsPpr: points, adp: 999, injuryStatus: null, stats: {} } as never);
 const mk = (name: string, position: string, vor: number, adp: number): RankedPlayer =>
   ({ playerId: name, name, position, team: "X", points: vor, ptsPpr: vor, adp, injuryStatus: null, stats: {}, vor, tier: 1, posRank: 1 } as RankedPlayer);
 const nextPick = 20;
@@ -75,6 +80,47 @@ check("deep WR VONA is small (it falls back)", ranked.find((r) => r.name === "De
 const base = rankByVona([mk("TE1", "TE", 30, 25)], { nextPickNo: 20, adpSpread: 8 })[0]!;
 const nudged = rankByVona([mk("TE1", "TE", 30, 25)], { nextPickNo: 20, adpSpread: 8, gapDemand: { TE: 1 }, oppNudge: 0.15 })[0]!;
 check("opponent nudge lowers TE survival", nudged.pSurvive < base.pSurvive);
+// #endregion
+
+
+// #region byes + news layer
+check("all 32 teams have a bye", Object.keys(BYE_WEEKS).length === 32, String(Object.keys(BYE_WEEKS).length));
+check("byes fall in weeks 5-14", Object.values(BYE_WEEKS).every((w) => w >= 5 && w <= 14));
+check("Sleeper spells Washington WAS, not WSH", byeWeek("WAS") === 7 && byeWeek("WSH") === null);
+check("unknown team has no bye", byeWeek("ZZZ") === null && byeWeek(null) === null);
+const bc = byeCounts(["CHI", "CHI", "DET", null, "ZZZ"]);
+check("byeCounts groups by week", bc.get(10) === 2 && bc.get(6) === 1, [...bc.entries()].map(([w, n]) => `${w}:${n}`).join(" "));
+
+const newsMap = new Map<string, NewsEntry>([
+  ["out man", { status: "out", note: "done" }],
+  ["risk man", { status: "risk", note: "maybe" }],
+  ["soft man", { status: "soft", note: "noise" }],
+  ["watch man", { status: "watch", note: "knock" }],
+  ["exact man", { status: "risk", note: "half", multiplier: 0.5 }],
+]);
+check("out is near-zeroed", newsMultiplier(newsMap.get("out man")) < 0.1);
+check("risk takes a haircut", newsMultiplier(newsMap.get("risk man")) === 0.85);
+check("soft and watch do NOT change value", newsMultiplier(newsMap.get("soft man")) === 1 && newsMultiplier(newsMap.get("watch man")) === 1);
+check("explicit multiplier wins", newsMultiplier(newsMap.get("exact man")) === 0.5);
+check("no entry means no change", newsMultiplier(undefined) === 1);
+// Loose name matching: punctuation, case and generational suffixes.
+const looseMap = new Map<string, NewsEntry>([["jamarr chase", { status: "soft", note: "n" }]]);
+check("name match ignores punctuation/case", !!newsFor(looseMap, "Ja'Marr Chase"));
+check("name match ignores Jr/III", !!newsFor(new Map([["brian thomas", { status: "soft", note: "n" } as NewsEntry]]), "Brian Thomas Jr."));
+
+// The baseline trap: devaluing fringe players must NOT move anyone else's VOR.
+const league = { settings: { num_teams: 8 }, roster_positions: ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "K", "DEF", "BN"] } as never;
+const rbs = Array.from({ length: 30 }, (_, i) => mkP(`RB${i + 1}`, "RB", 300 - i * 5));
+const rawRank = rankByVor(rbs, league);
+const starVorRaw = rawRank.find((r) => r.name === "RB1")!.vor;
+// Dock four backs sitting right around the replacement line (RB23 in this league).
+const hurt = new Map<string, NewsEntry>([21, 22, 23, 24].map((n) => [`rb${n}`, { status: "risk", note: "hurt" } as NewsEntry]));
+const { adjusted } = applyNews(rbs, hurt);
+const naive = rankByVor(adjusted, league).find((r) => r.name === "RB1")!.vor;
+const fixed = rankByVor(adjusted, league, rbs).find((r) => r.name === "RB1")!.vor;
+check("naive re-rank INFLATES the healthy star (the bug)", naive > starVorRaw, `${starVorRaw} -> ${naive}`);
+check("baselineFrom keeps the healthy star unchanged", fixed === starVorRaw, `${starVorRaw} -> ${fixed}`);
+check("the devalued player still drops", rankByVor(adjusted, league, rbs).find((r) => r.name === "RB21")!.vor < rawRank.find((r) => r.name === "RB21")!.vor);
 // #endregion
 
 console.log(fail === 0 ? "\nALL PASS ✓" : `\n${fail} FAILED ✗`);
