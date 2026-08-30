@@ -65,18 +65,24 @@ const streamer = avail("Streamer Kicker", "K", 138, true); // beats Bass by only
 const m3 = planOne(streamer, full, DEFAULT_WAIVERS);
 t("marginal on-waivers streamer = wait, not claim", m3.kind === "wait", `${m3.kind} (${m3.reason})`);
 
-// 4. The strongest rail on the full-roster drop path: an add whose only cheap
-//    drop would be the stash must instead pick a legal drop or skip — never the
-//    stash. Here a modest WR upgrade on a full roster: the worst LEGAL drop is a
-//    fringe player, never Breece Hall.
-const modest = avail("Modest WR", "WR", 145, false); // cleared, so free-add if legal
+// 4. On a full roster, a cleared player who does NOT improve the starting lineup
+//    is skipped, not churned in: dropping a bench body for a non-starter is not a
+//    clear upgrade and risks cutting someone who matters. And whatever happens,
+//    the injured stash is never the drop target.
+const modest = avail("Modest WR", "WR", 145, false); // cleared, but never cracks our lineup
 const m4 = planOne(modest, full, DEFAULT_WAIVERS);
+t("full-roster non-lineup-improving add is skipped, drops nobody", m4.kind === "skip" && m4.drop === null, `${m4.kind}/${m4.drop}`);
 t("full-roster add never proposes dropping the stash", m4.drop !== "Breece Hall", `${m4.kind}/${m4.drop}`);
-// The rails pick the worst LEGAL drop (Bo Nix, a useless backup QB at 85 ROS),
-// never a protected top-12 player and never the stash. The add is a costless
-// ROS upgrade of bench depth; that it does not crack the lineup (gain 0) is
-// correct, not a defect.
-t("full-roster add's drop is the worst legal fringe player", m4.drop === "Bo Nix", m4.reason);
+
+// 4b. THE cross-position trap (regression for the draft-night capped-position
+//     bug): a high-ROS backup QB is available, but he never starts over our
+//     starting QB, and dropping our only kicker (or anyone) to roster him does
+//     not improve the lineup. The engine must SKIP, never propose dropping the
+//     kicker for a third QB just because 250 > 130 on raw points.
+const backupQb = avail("Backup QB", "QB", 250, false); // huge raw ROS, but redundant
+const m4b = planOne(backupQb, full, DEFAULT_WAIVERS);
+t("never drops a needed player to roster a redundant high-ROS position", m4b.kind === "skip", `${m4b.kind}/${m4b.drop} (${m4b.reason})`);
+t("the redundant-QB skip never targets the kicker", m4b.drop !== "Tyler Bass", String(m4b.drop));
 
 // 5. A player who beats nobody by the margin is skipped, not forced.
 const junk = avail("Junk Guy", "RB", 50, false);

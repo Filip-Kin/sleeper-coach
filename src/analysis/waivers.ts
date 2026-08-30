@@ -1,4 +1,4 @@
-import { chooseDrop, DEFAULT_RAILS, type RailPlayer, type RailConfig } from "./rails.ts";
+import { canDrop, DEFAULT_RAILS, type RailPlayer, type RailConfig } from "./rails.ts";
 import { solveLineup, type LineupPlayer } from "./lineup.ts";
 
 // The waiver engine, priced in WAIVER PRIORITY, not dollars.
@@ -13,19 +13,27 @@ import { solveLineup, type LineupPlayer } from "./lineup.ts";
 // already CLEARED waivers is a free agent and costs nothing, so a costless add
 // is always preferred to a claim for the same player.
 //
-// Every drop this engine proposes goes through the rails in rails.ts. It never
-// picks a drop target itself: chooseDrop only ever returns a player canDrop
-// allows, so the strongest rail — never cut a player who is injured but
-// projected back before the week 16 playoffs, who looks worthless to a weekly
-// number and is exactly the one you must not drop — cannot be routed around,
-// including on the "roster is full, must drop someone" path.
+// canDrop in rails.ts is the AUTHORITY on what may be dropped: it protects our
+// top-N by ROS, the never-drop list, and above all the injured-but-returns
+// stash. This engine never overrides it — every drop it proposes is a
+// canDrop-allowed player. But it does NOT use the rails' raw-points upgrade
+// margin to choose or price a move, because raw points ACROSS positions is the
+// draft-night trap: a backup QB's 250 ROS "beats" our only kicker's 125, yet
+// dropping the kicker to roster a third QB is a disaster (it empties the K slot).
+// So the engine chooses the drop that maximises our STARTING-LINEUP delta among
+// canDrop-legal candidates, and gates every cut on that delta being positive.
 
 export interface WaiverConfig {
   rails: RailConfig;
-  // Rest-of-season margin (points) required before BURNING waiver priority on a
-  // claim. Deliberately much higher than the rails' costless-add margin: going
-  // to the back of the queue is only worth it for a real difference.
+  // Starting-lineup improvement (ROS points) required before BURNING waiver
+  // priority on a claim. Deliberately high: going to the back of the queue is
+  // only worth it for a real, multi-week difference to the lineup we field.
   claimMarginPts: number;
+  // Starting-lineup improvement required to justify a costless free-agent add
+  // that entails a DROP. Low, because a free add is effectively reversible (worst
+  // case a wasted roster spot), but not zero: we never cut a rostered player for
+  // no lineup gain. A costless add into an OPEN slot has no drop and skips this.
+  freeAddMarginPts: number;
   // A claim is only worth a priority burn if the incoming player would actually
   // START for us. A bench/handcuff upgrade never justifies going last; wait and
   // free-add him once he clears. Set false to allow claiming bench depth too.
@@ -34,7 +42,8 @@ export interface WaiverConfig {
 
 export const DEFAULT_WAIVERS: WaiverConfig = {
   rails: DEFAULT_RAILS,
-  claimMarginPts: 15, // ROS points; a genuine multi-week difference, not a streamer
+  claimMarginPts: 15, // lineup ROS; a genuine multi-week difference, not a streamer
+  freeAddMarginPts: 1, // any real lineup improvement justifies a costless swap
   claimMustStart: true,
 };
 
@@ -100,37 +109,53 @@ function lineupDelta(
   return { gain: Math.round((after.total - baseline) * 10) / 10, starts };
 }
 
-// Resolve the cheapest drop path for one add, in the plan's order. Returns the
-// drop target (or null for a costless slot add) and never violates the rails.
-function resolveDropPath(
-  incoming: AvailablePlayer,
-  state: RosterState,
-  cfg: WaiverConfig,
-): { path: DropPath; drop: string | null; reason: string } | null {
-  // 1. An empty bench slot: no drop at all.
+interface PathEval {
+  path: DropPath;
+  drop: string | null;
+  gain: number; // starting-lineup ROS delta of taking this path
+  starts: boolean; // does the add start after it
+  reason: string;
+}
+
+// Rank a path family for tie-breaking when deltas are equal: prefer to drop
+// NOBODY. An open bench slot or an IR-stash always beats a straight drop at the
+// same lineup delta, because it keeps the roster body it would otherwise cut.
+const PATH_RANK: Record<DropPath, number> = { "bench-slot": 0, "ir-stash": 1, drop: 2, none: 3 };
+
+// Enumerate every legal way to fit the incoming player, scored by starting-lineup
+// delta. A no-drop path (open bench, or IR-stashing an injured incumbent) drops
+// nobody. A drop path is considered ONLY for canDrop-allowed players, so the
+// protection rails (top-N, never-drop, the injured-returns stash) are never
+// bypassed. Returns paths best-delta first, no-drop winning ties.
+function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverConfig): PathEval[] {
+  const paths: { path: DropPath; drop: string | null; reason: string }[] = [];
+
   if (state.openBenchSlots > 0) {
-    return { path: "bench-slot", drop: null, reason: "into an open bench slot (no drop)" };
+    paths.push({ path: "bench-slot", drop: null, reason: "into an open bench slot (no drop)" });
   }
-  // 2. An IR slot with a genuinely injured incumbent to stash: opens a bench
-  //    slot without dropping anyone. The stash-worthy player is exactly the one
-  //    the rails protect, so this is where he belongs, not on the drop table.
+  // An IR slot with a genuinely injured incumbent to stash frees a bench slot
+  // without dropping anyone. The stash-worthy player is exactly the one the rails
+  // protect, so he belongs on IR, never on the drop table.
   const irStashable = state.roster.find(
     (p) => (p.returnsBeforePlayoffs || isReserveInjury(p.injuryStatus)) && !cfg.rails.neverDrop?.includes(p.name),
   );
   if (state.openIrSlots > 0 && irStashable) {
-    return {
-      path: "ir-stash",
-      drop: null,
-      reason: `stash ${irStashable.name} (injured) on IR to open a bench slot (no drop)`,
-    };
+    paths.push({ path: "ir-stash", drop: null, reason: `stash ${irStashable.name} (injured) on IR (no drop)` });
   }
-  // 3. A straight drop, chosen ONLY through the rails. chooseDrop returns the
-  //    worst LEGAL drop that the add clears by the upgrade margin, or null.
-  const chosen = chooseDrop(incoming, state.roster, cfg.rails);
-  if (chosen) {
-    return { path: "drop", drop: chosen.name, reason: chosen.reason };
+  // Every canDrop-ALLOWED player is a candidate drop. canDrop is the authority on
+  // what may leave the roster; we pick among the allowed ones by lineup delta.
+  for (const p of state.roster) {
+    if (canDrop(p.name, state.roster, cfg.rails).allowed) {
+      paths.push({ path: "drop", drop: p.name, reason: `drop ${p.name}` });
+    }
   }
-  return null; // no legal, worthwhile path
+
+  const evals = paths.map((p) => {
+    const { gain, starts } = lineupDelta(incoming, p.drop, state);
+    return { ...p, gain, starts };
+  });
+  evals.sort((a, b) => b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path]);
+  return evals;
 }
 
 // Reserve-eligible injury states: a player in one of these can legitimately go
@@ -143,57 +168,51 @@ function isReserveInjury(status?: string | null): boolean {
 
 // Plan a single available player into a decisive move.
 export function planOne(incoming: AvailablePlayer, state: RosterState, cfg: WaiverConfig = DEFAULT_WAIVERS): WaiverMove {
-  const base = {
-    add: incoming.name,
-    position: incoming.position,
-    onWaivers: incoming.onWaivers,
-  };
+  const base = { add: incoming.name, position: incoming.position, onWaivers: incoming.onWaivers };
+  const skip = (reason: string): WaiverMove =>
+    ({ ...base, kind: "skip", drop: null, dropPath: "none", gainPts: 0, startsForUs: false, priorityWorthy: false, reason });
 
-  const path = resolveDropPath(incoming, state, cfg);
-  if (!path) {
-    return {
-      ...base, kind: "skip", drop: null, dropPath: "none", gainPts: 0, startsForUs: false, priorityWorthy: false,
-      reason: "no rails-legal add: not a clear enough upgrade over any droppable player",
-    };
+  const best = evalPaths(incoming, state, cfg)[0];
+  if (!best) return skip("no legal path: nothing on the roster may be dropped and no slot is open");
+
+  const { gain, starts, path, drop } = best;
+  const move = (kind: MoveKind, priorityWorthy: boolean, reason: string): WaiverMove =>
+    ({ ...base, kind, drop, dropPath: path, gainPts: gain, startsForUs: starts, priorityWorthy, reason });
+
+  // A move that would LOWER our starting lineup is never made, whatever the raw
+  // point gap suggests. This is the guard against dropping a needed player (our
+  // only kicker, say) to roster a higher-scoring but redundant position.
+  const needsDrop = drop !== null;
+  if (needsDrop && gain <= 0) {
+    return skip(`no add improves the lineup without weakening it (best option ${describe(best)} nets ${gain} ROS)`);
   }
 
-  // The drop path already passed the rails' upgrade margin (chooseDrop enforces
-  // that a drop is justified). Pricing, though, is on the STARTING-LINEUP delta,
-  // not the gap to the dropped body: that is the number that answers "is he
-  // worth going last for".
-  const { gain, starts } = lineupDelta(incoming, path.drop, state);
-
-  // Pricing on rolling priority.
   if (!incoming.onWaivers) {
-    // Cleared: costless. Take any rails-legal add.
-    return {
-      ...base, kind: "free-add", drop: path.drop, dropPath: path.path, gainPts: gain, startsForUs: starts,
-      priorityWorthy: false,
-      reason: `free agent, costless add — ${path.reason}${starts ? "; starts for us (+" + gain + " ROS to the lineup)" : "; bench depth"}`,
-    };
+    // Cleared waivers: costless. Into an open slot, take any positive-ROS depth
+    // (drops nobody). If it entails a drop, require a real lineup improvement.
+    if (needsDrop && gain < cfg.freeAddMarginPts) {
+      return skip(`free agent, but the only add lifts the lineup just +${gain} ROS (needs a drop; under the ${cfg.freeAddMarginPts}pt bar)`);
+    }
+    const how = drop ? `drop ${drop}` : path === "ir-stash" ? best.reason : "open bench slot, no drop";
+    return move("free-add", false, `free agent, costless — ${how}${starts ? `; starts for us (+${gain} ROS)` : `; +${gain} ROS depth`}`);
   }
 
-  // On waivers: burning a queue position. The bar is high, and it is on the
-  // lineup improvement, not on who we drop.
+  // On waivers: burning a queue position. High bar, on the LINEUP improvement.
   const bigEnough = gain >= cfg.claimMarginPts;
   const startsOk = starts || !cfg.claimMustStart;
-  const priorityWorthy = bigEnough && startsOk;
-  if (priorityWorthy) {
-    return {
-      ...base, kind: "waiver-claim", drop: path.drop, dropPath: path.path, gainPts: gain, startsForUs: starts,
-      priorityWorthy: true,
-      reason: `worth a priority burn: +${gain} ROS to the starting lineup${starts ? " (he starts)" : ""} — ${path.reason}`,
-    };
+  if (bigEnough && startsOk) {
+    const how = drop ? `drop ${drop}` : "no drop";
+    return move("waiver-claim", true, `worth a priority burn: +${gain} ROS to the lineup${starts ? " (he starts)" : ""} — ${how}`);
   }
   // Not worth going last: wait for him to clear, then free-add for nothing.
   const why = !bigEnough
     ? `only +${gain} ROS to the lineup, under the ${cfg.claimMarginPts}pt claim bar`
     : "would not start for us";
-  return {
-    ...base, kind: "wait", drop: path.drop, dropPath: path.path, gainPts: gain, startsForUs: starts,
-    priorityWorthy: false,
-    reason: `do NOT claim (${why}); wait for him to clear waivers and free-add at no priority cost`,
-  };
+  return move("wait", false, `do NOT claim (${why}); wait for him to clear and free-add at no priority cost`);
+}
+
+function describe(p: PathEval): string {
+  return p.drop ? `drop ${p.drop}` : p.path;
 }
 
 // Plan the whole waiver board: evaluate every available player, drop the skips,
