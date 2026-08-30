@@ -121,6 +121,10 @@ export interface ListenerOptions {
   // start new captures nor act on finished ones while this is true, so comebacks
   // never overlap or react to the bot's own audio bleed.
   isBusy: () => boolean;
+  // True for a short window after WE announced a pick. Trash talk in that window
+  // is obviously about the pick, so it is the one time overheard heckling is
+  // worth answering without being addressed by name.
+  justPicked?: () => boolean;
   // Resolve a Discord user id to a display name (mapped real name if known).
   resolveSpeaker: (userId: string) => Promise<string>;
   // Enqueue a comeback on the shared speech queue (owned by index.ts).
@@ -129,6 +133,7 @@ export interface ListenerOptions {
 
 export function startListener(opts: ListenerOptions): () => void {
   const { connection, botUserId, isBusy, resolveSpeaker, onComeback } = opts;
+  const justPicked = opts.justPicked ?? ((): boolean => false);
   const receiver = connection.receiver;
 
   let stopped = false;
@@ -211,8 +216,12 @@ export function startListener(opts: ListenerOptions): () => void {
       // which is the difference between a bot you can talk to and one that
       // interjects.
       const bypassCooldown = ADDRESS_RE.test(combined);
-      console.log(`[announcer] heard ${userId}: "${text}"${react ? (inFollowUp && !ADDRESS_RE.test(combined) ? " (reacting: follow-up)" : " (reacting)") : ""}`);
-      if (!react) return;
+      // The pick-heckle window: unaddressed trash talk counts, but only right
+      // after we picked, when it can only be about us.
+      const heckle = !react && insulted && justPicked();
+      const why = ADDRESS_RE.test(combined) ? "named" : react ? "follow-up" : heckle ? "heckle after our pick" : "";
+      console.log(`[announcer] heard ${userId}: "${text}"${why ? ` (reacting: ${why})` : ""}`);
+      if (!react && !heckle) return;
       if (!bypassCooldown && now - lastComebackAt < COOLDOWN_MS) {
         console.log("[announcer] comeback on cooldown; skipping.");
         return;

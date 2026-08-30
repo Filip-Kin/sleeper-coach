@@ -174,6 +174,7 @@ function handleEvent(ev: ActivityEvent): void {
     const round = Number(/R(\d+)/.exec(ev.summary)?.[1] ?? "") || undefined;
     const position = /\(([A-Z]+)\)/.exec(ev.summary)?.[1];
     const reasoning = str(detail.reasoning);
+    lastOwnPickAt = Date.now();
     enqueue(async () => {
       const team = str(detail.team);
       const bye = Number(detail.bye) || undefined;
@@ -238,6 +239,10 @@ function handleEvent(ev: ActivityEvent): void {
 // Busy while speaking AND for a grace window after, so the room mic streaming
 // the bot's own voice back (delayed) can't make it react to itself.
 const POST_SPEAK_GRACE_MS = Number(process.env.LISTENER_POST_SPEAK_GRACE_MS ?? 1500);
+// How long after announcing our own pick that overheard trash talk is treated as
+// being about that pick.
+const PICK_HECKLE_MS = Number(process.env.PICK_HECKLE_MS ?? 30_000);
+let lastOwnPickAt = 0;
 let lastSpokeEndAt = 0;
 function isBusy(): boolean {
   return draining || Date.now() - lastSpokeEndAt < POST_SPEAK_GRACE_MS;
@@ -317,6 +322,7 @@ async function joinCall(reason: string): Promise<void> {
         isBusy,
         resolveSpeaker,
         onComeback: enqueueComeback,
+        justPicked: () => Date.now() - lastOwnPickAt < PICK_HECKLE_MS,
       });
     }
   } catch (err) {
