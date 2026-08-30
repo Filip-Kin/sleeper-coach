@@ -123,7 +123,7 @@
 <main>
   <div class="col">
     <div class="card" style="flex:1">
-      <h2>Coach console — live reasoning</h2>
+      <h2>Coach console: live reasoning</h2>
       <div id="stream"></div>
       <div class="gbar" id="guidanceBar"><span class="lbl">guidance loading…</span></div>
       <form id="chatForm">
@@ -295,7 +295,7 @@ $("#chatForm").addEventListener("submit", (e) => { e.preventDefault();
   else { $("#chatInput").value = ""; send(v); } });
 $("#newBtn").addEventListener("click", () => { sessionId = null; localStorage.removeItem("coach-session"); stream.innerHTML=""; setMode("ask"); });
 
-// tabs (Takeover is not a tab — it opens the noVNC view in a new tab)
+// tabs (Takeover is not a tab; it opens the noVNC view in a new tab)
 document.querySelectorAll(".tabs button[data-tab]").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button[data-tab]").forEach(x=>x.classList.remove("on")); b.classList.add("on");
   for (const t of ["plan","coachview","board","roster","activity"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
@@ -304,14 +304,14 @@ document.querySelectorAll(".tabs button[data-tab]").forEach(b => b.addEventListe
 }));
 
 // #region live activity stream (SSE tail of the activity log)
-// Everything the coach and engineer log lands here in real time — plans, picks,
-// board reads, errors — so the draft is watchable live, not just in hindsight.
+// Everything the coach and engineer log lands here in real time: plans, picks,
+// board reads, errors, so the draft is watchable live, not just in hindsight.
 const seenKeys = new Set();
 function evKey(ev){ return ev.ts + "|" + ev.type + "|" + (ev.summary || (ev.text||"").slice(0,50)); }
 function addActivity(ev) {
   const k = evKey(ev); if (seenKeys.has(k)) return; seenKeys.add(k);
   if (seenKeys.size > 600) seenKeys.clear();
-  // The model's live reasoning streams as "think" events — render as flowing
+  // The model's live reasoning streams as "think" events, render as flowing
   // console text, the way the interactive chat shows the coach's own output.
   if (ev.type === "think") {
     const d = document.createElement("div");
@@ -345,7 +345,7 @@ function renderCoachView(detail) {
   const rows = avail.map((a,i)=>`<tr><td class="num">${i+1}</td><td>${escapeHtml(a.name||String(a))}</td><td>${escapeHtml(a.pos||"")}</td></tr>`).join("");
   $("#tab-coachview").innerHTML = head + (rows
     ? `<table><thead><tr><th>#</th><th>Player (as read from the draft room)</th><th>Pos</th></tr></thead><tbody>${rows}</tbody></table>`
-    : `<p style='color:var(--muted);padding:14px'>No live board read yet. This fills in when a draft is running — it's exactly what the coach sees as still-available.</p>`);
+    : `<p style='color:var(--muted);padding:14px'>No live board read yet. This fills in when a draft is running; it's exactly what the coach sees as still-available.</p>`);
 }
 renderCoachView({});
 function connectStream() {
