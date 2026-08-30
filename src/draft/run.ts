@@ -173,6 +173,7 @@ async function boardPicks(): Promise<{ round: number; slot: number; name: string
 
 let plan: string[] = []; // ordered target names, best first
 let lastRefresh = 0;
+let refreshInFlight = false;
 let lastReasoning = "";
 let myDraftSlot: number | null = null;
 let agentBackoffUntil = 0; // pause agent calls after an error (limit hit, etc.)
@@ -446,6 +447,29 @@ for (const p of (await boardPicks()).filter((p) => p.slot === myDraftSlot)) {
 console.log(`[draft-run] entering pick loop (seeded ${myDrafted.length} of our picks)…`);
 
 let lastBoardAt = 0;
+// Kick a plan refresh WITHOUT blocking the poll loop.
+//
+// This was a real defect, not a tuning knob. refreshPlan is an LLM call that can
+// take tens of seconds, and the off-clock branch AWAITED it. While it ran we
+// stopped checking whether our turn had started, so the clock could be running
+// for half a minute before we noticed: the thinking face appeared ~30s late and
+// the whole turn looked sluggish. The plan is only read at decision time, so a
+// refresh that lands late simply applies to the next pick instead.
+function kickRefresh(
+  available: { name: string; pos: string }[],
+  recent: { round: number; slot: number; name: string; pos: string }[],
+): void {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  void refreshPlan(available, recent)
+    .catch(() => {
+      lastRefresh = Date.now(); // don't retry in a tight loop on a failure
+    })
+    .finally(() => {
+      refreshInFlight = false;
+    });
+}
+
 for (;;) {
   await ensureRoom();
   await resolveSlot();
@@ -465,7 +489,7 @@ for (;;) {
     const picks = await boardPicks();
     logNewBoardPicks(picks);
     await maybeTroll(picks).catch(() => {});
-    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) await refreshPlan(available, picks);
+    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) kickRefresh(available, picks);
     await Bun.sleep(1500);
     continue;
   }
@@ -648,7 +672,9 @@ for (;;) {
     console.log(`[draft-run] our R${round} = ${target.name} (${secs}s)`);
     logEvent("coach", "draft-pick", `Our R${round} pick: ${target.name} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
     await pushQueue().catch(() => {});
-    if (Date.now() > agentBackoffUntil) await refreshPlan(confirm.available, await boardPicks()).catch(() => {});
+    // Also non-blocking. At the turn of a snake we pick twice in a row, so an
+    // awaited refresh here ate the second clock.
+    if (Date.now() > agentBackoffUntil) kickRefresh(confirm.available, await boardPicks());
   } else {
     console.log(`[draft-run] our R${round} did NOT register (target ${target.name})`);
     logEvent("coach", "pick-miss", `Our R${round} target ${target.name} didn't register.`, { target: target.name });
