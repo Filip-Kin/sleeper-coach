@@ -151,17 +151,40 @@ export async function draftView(): Promise<unknown> {
     };
   });
 
-  // Backstop queue, reconstructed with the engine's algorithm from our current
-  // counts and the live-available set.
-  const counts: Record<string, number> = {};
-  for (const r of roster) if (r.pos) counts[r.pos] = (counts[r.pos] ?? 0) + 1;
-  const availSet = new Set(available.map((b) => b.name));
-  const queue = buildBackstopQueue(fullBoard, counts, availSet).map((b) => ({
-    name: b.name,
-    pos: `${b.position}${b.posRank}`,
-    team: b.team,
-    bye: byeWeek(b.team),
-  }));
+  // Backstop queue. Prefer the ACTUAL queue the engine pushed to Sleeper, which
+  // it now logs as a "queue" event (detail.queue is the full player names in push
+  // order). pushQueue fires at draft start and after each of our picks and nothing
+  // logs a removal, so the newest queue event IS the whole live queue. Fall back
+  // to rebuilding it with the engine's exact algorithm when no queue event exists
+  // yet: a draft that predates the log line, or a rotated log.
+  const enrichQ = (name: string) => {
+    const b = byName.get(name);
+    return { name, pos: b ? `${b.position}${b.posRank}` : "?", team: b?.team ?? "?", bye: b ? byeWeek(b.team) : null };
+  };
+  const queueEv = [...events].reverse().find((e) => e.actor === "coach" && e.type === "queue");
+  const loggedQueue = Array.isArray((queueEv?.detail as { queue?: unknown } | undefined)?.queue)
+    ? (queueEv!.detail as { queue: string[] }).queue
+    : null;
+  let queue: { name: string; pos: string; team: string; bye: number | null }[];
+  let queueSource: "logged" | "reconstructed";
+  let queueTs: string | null;
+  if (loggedQueue) {
+    queue = loggedQueue.map(enrichQ);
+    queueSource = "logged";
+    queueTs = queueEv?.ts ?? null;
+  } else {
+    const counts: Record<string, number> = {};
+    for (const r of roster) if (r.pos) counts[r.pos] = (counts[r.pos] ?? 0) + 1;
+    const availSet = new Set(available.map((b) => b.name));
+    queue = buildBackstopQueue(fullBoard, counts, availSet).map((b) => ({
+      name: b.name,
+      pos: `${b.position}${b.posRank}`,
+      team: b.team,
+      bye: byeWeek(b.team),
+    }));
+    queueSource = "reconstructed";
+    queueTs = null;
+  }
 
   // Recent agent overrides, with the value board's alternative. The raw VOR gap is
   // MISLEADING when the board wanted a K or DEF: those are one-starter capped, so a
@@ -202,6 +225,8 @@ export async function draftView(): Promise<unknown> {
       rows: planRows,
     },
     queue,
+    queueSource,
+    queueTs,
     roster,
     byes,
     overrides,

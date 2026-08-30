@@ -43,17 +43,21 @@ New src/web/draftview.ts and a new default tab, all read-only off the Sleeper AP
 plus the same analysis modules the engine uses. Endpoint: GET /api/draftview.
 
 - Plan AGE is the headline, ticking every second from the engine's own logged
-  plan timestamp. Coloured green under 30s, amber to 45s, red past 45s (the
-  postmortem's "treat as absent" threshold), with a note that the botched pick
-  ran on a 116s plan. Age is read from the log, never a fresh recompute, because
-  a recompute would always read ~0s and hide the exact failure.
+  plan timestamp. The whole box changes state, not just a number: fresh (green)
+  under 30s, ageing (amber) to 45s, and stale (red, tinted and pulsing) past 45s,
+  the postmortem's "treat as absent" threshold, with a plain-language note that a
+  stale plan drops to the raw value board where guidance has no effect and that
+  the botched pick ran on a 116s plan. The pulse respects prefers-reduced-motion.
+  Age is read from the log, never a fresh recompute, because a recompute would
+  always read ~0s and hide the exact failure.
 - The current plan, each player enriched with VOR, tier, news tag and bye
   (exact), plus VONA and survival (recomputed live off the Sleeper picks feed,
   labelled as an estimate since that feed lags a few picks in-draft). Targets a
   rival has already taken are struck through.
-- The backstop queue, rebuilt with the engine's exact algorithm (the engine does
-  not log the queue it pushes, and I did not change it to). Labelled a
-  reconstruction.
+- The backstop queue. It reads the ACTUAL queue the engine pushed, from the
+  "queue" log event, and labels the panel live. When no queue event exists yet (a
+  draft predating that log line, or a rotated log) it falls back to rebuilding the
+  queue with the engine's exact algorithm and labels it a reconstruction.
 - Our roster's per-week bye load, flagged red at 3+ on a week.
 - The last few agent overrides with what the value board wanted instead. When the
   board wanted a K or DEF the raw VOR gap is flagged as NOT a real cost, because
