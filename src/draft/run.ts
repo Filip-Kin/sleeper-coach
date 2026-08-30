@@ -33,6 +33,13 @@ const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
 // leads the pick. Safe: the draft clock is 90s+, and if the announcer is dead
 // this is just a short fixed wait, never an actual block.
 const ANNOUNCE_LEAD_MS = Number(process.env.ANNOUNCE_LEAD_MS ?? 6000);
+// A deliberate beat on the clock before committing, purely so the face has time
+// to show it working. There is nothing to compute here: the plan is refreshed
+// BETWEEN our picks, off the clock, so the decision is genuinely instant and an
+// instant pick looks to a viewer like nothing happened at all. Five seconds of a
+// ninety second clock costs nothing, and ANNOUNCE_LEAD_MS already sets the
+// precedent of pacing this for an audience. Set to 0 to pick immediately.
+const THINK_PAUSE_MS = Number(process.env.THINK_PAUSE_MS ?? 5000);
 const argv = process.argv.slice(2);
 const draftId = argv.find((a) => !a.startsWith("--")) ?? config.draftId;
 const rehearse = argv.includes("--rehearse");
@@ -474,6 +481,7 @@ for (;;) {
   // happened, so on its own the thinking face never appeared WHILE it was
   // thinking, which is precisely when a watcher wants to see it working.
   logEvent("coach", "on-clock", `On the clock: round ${round}.`, { round });
+  if (THINK_PAUSE_MS > 0) await Bun.sleep(THINK_PAUSE_MS);
 
   let liveSet = new Set(confirm.available.map((a) => a.name));
   if (liveSet.size === 0) { liveSet = new Set((await draftState()).available.map((a) => a.name)); }
