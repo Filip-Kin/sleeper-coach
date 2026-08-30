@@ -44,14 +44,25 @@ async function draftRecap(): Promise<{ title: string; body: string }> {
   const draftId = arg ?? config.draftId;
   const [draft, picks] = await Promise.all([sleeper.draft(draftId), sleeper.draftPicks(draftId)]);
   const slot = draft.draft_order?.[config.userId];
-  const mine = picks
-    .filter((p) => p.draft_slot === slot)
-    .sort((a, b) => a.pick_no - b.pick_no)
-    .map((p, i) => `R${i + 1} ${p.metadata?.position} ${p.metadata?.first_name} ${p.metadata?.last_name}`);
+  const ourPicks = picks.filter((p) => p.draft_slot === slot).sort((a, b) => a.pick_no - b.pick_no);
+  const mine = ourPicks.map(
+    (p, i) => `R${i + 1} ${p.metadata?.position} ${p.metadata?.first_name} ${p.metadata?.last_name}`,
+  );
+  // Only reasoning for players we ACTUALLY drafted in THIS draft. The activity
+  // log is append-only and shared with every rehearsal, so after an afternoon of
+  // mock drafts it held 221 draft-pick events. Without this the recap would
+  // explain picks from a mock as if they were ours, in a public post.
+  const ourNames = new Set(
+    ourPicks.map((p) => `${p.metadata?.first_name ?? ""} ${p.metadata?.last_name ?? ""}`.trim()),
+  );
   // Pull the reasoning we logged per pick, so the recap is grounded in what the
   // coach actually thought at the time (not invented after the fact).
   const notes = recentEvents(300)
     .filter((e) => e.actor === "coach" && e.type === "draft-pick" && e.detail && (e.detail as { reasoning?: string }).reasoning)
+    .filter((e) => {
+      const t = (e.detail as { target?: unknown }).target;
+      return typeof t === "string" && ourNames.has(t);
+    })
     .map((e) => `- ${e.summary}: ${(e.detail as { reasoning?: string }).reasoning}`);
   const prompt =
     `Write a post-draft recap for your fantasy football team's public blog. Your team is named "${await teamName()}". ` +
