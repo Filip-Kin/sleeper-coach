@@ -85,6 +85,28 @@ BLOG=$(docker exec "$COACH" bash -lc "wc -l < $STATE/blog.jsonl" 2>/dev/null | t
 RUNNING=$(docker exec "$COACH" bash -lc "ps -eo args | grep 'draft/run.ts' | grep -v grep | wc -l" 2>/dev/null | tr -d ' ')
 [ "${RUNNING:-0}" = "0" ] && ok "no draft-run already going" || bad "$RUNNING draft-run process(es) already running; kill before launching"
 
+echo "== the coach's face =="
+FACE_PORT=${FACE_PORT:-8773}
+FH=$(curl -s --max-time 5 "http://127.0.0.1:${FACE_PORT}/health" || true)
+case "$FH" in
+  *'"ok":true'*) ok "face server up on :${FACE_PORT} ($FH)" ;;
+  *)             note "face server not answering on :${FACE_PORT}; the draft still runs, just nothing to look at" ;;
+esac
+if [ -n "$FH" ]; then
+  FSIZE=$(curl -s --max-time 5 -o /dev/null -w '%{size_download}' "http://127.0.0.1:${FACE_PORT}/" || echo 0)
+  [ "${FSIZE:-0}" -gt 5000 ] && ok "face page serves (${FSIZE} bytes)" || note "face page looks truncated (${FSIZE} bytes)"
+  for ip in 192.168.1.2 $(tailscale ip -4 2>/dev/null | head -1); do
+    C=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' "http://${ip}:${FACE_PORT}/health" || echo 000)
+    [ "$C" = "200" ] && ok "reachable at http://${ip}:${FACE_PORT}/" || note "not reachable at http://${ip}:${FACE_PORT}/ (got $C)"
+  done
+fi
+VOICE=$(docker logs "$ANN" 2>&1 | grep -E 'joined voice channel|could not join voice' | tail -1)
+case "$VOICE" in
+  *"joined voice channel"*) ok "announcer is in the voice channel" ;;
+  *"could not join"*)       note "announcer could NOT join voice: ${VOICE#*: }. The face still works (speech is published before Discord playback), and the poll loop retries every ${DRAFT_POLL_SECONDS:-10}s once the draft lock appears." ;;
+  *)                        note "no voice join line in the announcer log yet" ;;
+esac
+
 echo "== board sanity =="
 docker exec "$COACH" bash -lc "cd /app && timeout 300 bun run coach board 5 2>&1 | tail -8" || note "board build failed or timed out"
 
