@@ -1,0 +1,17 @@
+[Unit]
+Description=sleeper-coach: Set the Thursday-night lineup (timer)
+
+[Timer]
+# Times are US Eastern. The host is on America/New_York, and systemd 247 (this
+# host) evaluates OnCalendar in the host timezone, which keeps these correct
+# across the EDT/EST switch automatically. If the host timezone ever changes,
+# these shift with it - re-anchor them or upgrade to a systemd that supports a
+# timezone suffix in OnCalendar (>= 251).
+OnCalendar=Thu *-*-* 16:00:00
+# Persistent: a lock missed because the box was asleep/rebooting fires on wake
+# rather than silently skipping the week.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
