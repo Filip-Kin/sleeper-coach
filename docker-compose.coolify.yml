@@ -19,6 +19,13 @@ services:
         max-file: "5"
 
   announcer:
+    # The coach's face (src/announcer/face.ts). Bound on all interfaces so it
+    # is reachable over the LAN and the tailnet for a screen share; the page is
+    # read-only and the one write endpoint (/say) needs ANNOUNCER_API_KEY.
+    environment:
+      - FACE_PORT=8773
+    ports:
+      - "8773:8773"
     build:
       context: .
       dockerfile: Dockerfile.announcer

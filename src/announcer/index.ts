@@ -38,6 +38,7 @@ import { connectVoice, type VoiceHandle } from "./voice.ts";
 import { synthesize } from "./tts.ts";
 import { announcePickLine, announceCompleteLine, announceComebackLine, type ComebackContext } from "./persona.ts";
 import { startListener } from "./listen.ts";
+import { startFaceServer, publishSpeech, publishState } from "./face.ts";
 import type { ActivityEvent } from "../log.ts";
 
 const config = loadConfig();
@@ -83,18 +84,28 @@ async function drain(): Promise<void> {
   } finally {
     draining = false;
     lastSpokeEndAt = Date.now();
+    publishState("idle");
   }
 }
 
 async function speak(line: string): Promise<void> {
-  if (!voice) {
-    console.error("[announcer] not connected to voice; dropping line.");
-    return;
-  }
   console.log(`[announcer] speaking: ${line}`);
   const speech = await synthesize(line);
   try {
-    await voice.speakFile(speech.path);
+    // The face page is handed the audio and its lip-sync table BEFORE Discord
+    // starts playing, so the page's own <audio> element and the voice channel
+    // begin within a few milliseconds of each other. Doing it in this order also
+    // means a Discord problem leaves the face talking rather than dead.
+    const durationMs = publishSpeech(line, await Bun.file(speech.path).arrayBuffer());
+    if (voice) {
+      await voice.speakFile(speech.path);
+    } else {
+      // No voice connection: hold the queue for the clip's real length anyway,
+      // or every remaining line would fire at once and the face would flicker
+      // through all of them.
+      console.error("[announcer] not connected to voice; face only.");
+      await Bun.sleep(durationMs ?? 2_000);
+    }
   } finally {
     speech.cleanup();
   }
@@ -158,6 +169,7 @@ function handleEvent(ev: ActivityEvent): void {
     enqueue(async () => {
       const team = str(detail.team);
       const bye = Number(detail.bye) || undefined;
+      publishState("thinking", `on the clock: ${player}`);
       const line = await announcePickLine({ player, round, position, team, bye, reasoning });
       await speak(line);
     });
@@ -334,6 +346,10 @@ async function shutdown(code: number): Promise<void> {
 
 process.on("SIGINT", () => void shutdown(0));
 process.on("SIGTERM", () => void shutdown(0));
+
+// Up before the Discord login, so the face is reachable even if the bot cannot
+// connect (wrong guild id, revoked token, Discord having a bad day).
+startFaceServer();
 
 try {
   await client.login(config.token);

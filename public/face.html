@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>the coach</title>
+<!--
+  The coach's face. Everything is drawn onto a 64x48 canvas and upscaled with
+  image-rendering: pixelated, so the pixels are real pixels rather than a filter:
+  the mouth quantises to the grid, which is what makes it read as deliberate
+  pixel art instead of a smooth shape with a blur over it.
+
+  The mouth is driven by src/announcer/envelope.ts, two numbers per 20ms:
+  openness from RMS energy, wideness from zero-crossing rate. Sync comes from
+  <audio>.currentTime, so the animation cannot drift from the sound.
+
+  Query flags:
+    ?mute=1   for someone already in the Discord call: silent video, and the
+              animation runs on wall-clock with the latency slider, because
+              their audio arrives via Discord's jitter buffer, not from here.
+    ?light=1  cream background instead of dark.
+    ?bare=1   face only, no caption or controls (for a clean screen share).
+-->
+<style>
+  :root{
+    --ink:#141413;      /* Claude near-black */
+    --cream:#F0EEE6;    /* Claude cream    */
+    --clay:#D97757;     /* Claude orange   */
+    --bg:var(--ink); --fg:var(--clay); --text:var(--cream);
+  }
+  body.light{ --bg:var(--cream); --fg:var(--clay); --text:var(--ink); }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);overflow:hidden;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  #wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:20px}
+  #screen{position:relative;line-height:0}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;display:block;
+    width:min(92vw,880px);height:auto}
+  #cap{max-width:min(92vw,880px);min-height:2.6em;text-align:center;font-size:15px;
+    line-height:1.45;letter-spacing:.01em;opacity:.9}
+  #cap.empty{opacity:.35}
+  #ctl{display:flex;gap:14px;align-items:center;font-size:11px;letter-spacing:.1em;
+    text-transform:uppercase;opacity:.5}
+  #ctl button{font:inherit;letter-spacing:.1em;text-transform:uppercase;background:transparent;
+    color:var(--text);border:1px solid currentColor;border-radius:4px;padding:5px 10px;cursor:pointer;opacity:.8}
+  #ctl button:hover{opacity:1;border-color:var(--clay);color:var(--clay)}
+  #ctl input[type=range]{width:110px;accent-color:var(--clay)}
+  #gate{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:16px;cursor:pointer;z-index:5}
+  #gate b{color:var(--clay);font-size:13px;letter-spacing:.22em;text-transform:uppercase}
+  #gate span{font-size:12px;opacity:.45;max-width:320px;text-align:center;line-height:1.6}
+  .hide{display:none!important}
+  #dot{position:absolute;top:10px;right:12px;width:9px;height:9px;border-radius:50%;
+    background:var(--text);opacity:.18;transition:opacity .2s}
+  #dot.live{background:var(--clay);opacity:1}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="screen">
+    <canvas id="c" width="64" height="48"></canvas>
+    <div id="dot" title="stream connected"></div>
+  </div>
+  <div id="cap" class="empty">waiting for the draft</div>
+  <div id="ctl">
+    <button id="mute">audio on</button>
+    <label id="offwrap" class="hide">delay <input id="off" type="range" min="0" max="1200" step="25" value="250"><span id="offv">250ms</span></label>
+  </div>
+</div>
+<div id="gate">
+  <b>the coach</b>
+  <span>Click anywhere to allow audio. Browsers block sound until you do.</span>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const Q = new URLSearchParams(location.search);
+if (Q.get("light") === "1") document.body.classList.add("light");
+if (Q.get("bare") === "1") { $("cap").classList.add("hide"); $("ctl").classList.add("hide"); }
+
+const W = 64, H = 48;
+const cv = $("c"), cx = cv.getContext("2d");
+const css = (n) => getComputedStyle(document.body).getPropertyValue(n).trim();
+
+// #region drawing — everything snaps to the 64x48 grid
+function px(x, y, w, h, colour) {
+  cx.fillStyle = colour;
+  cx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+}
+// Rasterise an ellipse onto the grid a row at a time. Drawing an arc() and
+// letting the browser antialias it would defeat the whole point: the stair-step
+// edge IS the look, so the shape has to be quantised before it is painted.
+function ellipse(cxp, cyp, rx, ry, colour) {
+  if (rx < 0.5) return;
+  // A shut mouth still has to be a line. Below about one pixel of radius every
+  // row of the ellipse rounds outside the shape and nothing at all gets drawn,
+  // which reads as a face with no mouth rather than a closed one.
+  if (ry < 1) { px(cxp - rx, cyp, Math.max(2, rx * 2), 1, colour); return; }
+  cx.fillStyle = colour;
+  const top = Math.round(cyp - ry), bot = Math.round(cyp + ry);
+  for (let y = top; y <= bot; y++) {
+    const dy = (y + 0.5 - cyp) / ry;
+    if (Math.abs(dy) > 1) continue;
+    const half = rx * Math.sqrt(1 - dy * dy);
+    const x0 = Math.round(cxp - half), x1 = Math.round(cxp + half);
+    if (x1 > x0) cx.fillRect(x0, y, x1 - x0, 1);
+  }
+}
+
+let blink = 0;          // 0..1, 1 = fully shut
+let openness = 0, wideness = 0.4;   // smoothed mouth state
+let bob = 0;
+
+function draw() {
+  const bg = css("--bg"), fg = css("--fg"), text = css("--text");
+  cx.fillStyle = bg; cx.fillRect(0, 0, W, H);
+
+  const lift = openness * 2.2;                       // brows rise as the jaw drops
+  const drift = Math.sin(bob) * 0.9;                 // slow idle sway, keeps it alive
+  const oy = Math.round(drift + lift * 0.45);
+
+  // brows
+  px(11, 9 - Math.round(lift) + oy, 11, 3, fg);
+  px(42, 9 - Math.round(lift) + oy, 11, 3, fg);
+
+  // eyes, collapsing to a slit through a blink
+  const eh = Math.max(1, Math.round(10 * (1 - blink)));
+  const ey = 14 + Math.round((10 - eh) / 2) + oy;
+  px(12, ey, 10, eh, fg);
+  px(42, ey, 10, eh, fg);
+  if (blink < 0.35) {                                 // pupils vanish when shut
+    const pw = 4, ph = Math.max(1, Math.round(eh * 0.4));
+    const py = ey + Math.round((eh - ph) / 2);
+    px(12 + (10 - pw) / 2, py, pw, ph, bg);
+    px(42 + (10 - pw) / 2, py, pw, ph, bg);
+  }
+
+  // mouth: width from wideness (fricatives wide and flat, back vowels round),
+  // height from loudness.
+  // Width from wideness, but pulled in when the mouth is nearly shut: a closed
+  // mouth is a short line, not a full-width one.
+  const rx = (5.0 + wideness * 8.0) * (0.62 + 0.38 * Math.min(1, openness * 3));
+  const ry = 0.5 + openness * 7.5;
+  ellipse(32, 33 + oy, rx, ry, fg);
+  // Dark cavity, only once the mouth is open enough to have one. It must stay
+  // clear of the outer edge: an inner shape that degrades to the flat-line case
+  // paints straight through the bottom lip and leaves a stray pixel behind.
+  if (ry >= 4) ellipse(32, 33 + oy + ry * 0.15, rx * 0.5, ry * 0.35, bg);
+}
+// #endregion
+
+// #region playback clock
+let tl = null;          // {frames, frameMs, durationMs}
+let audio = null;
+let startedAt = 0;      // wall-clock start, used only in muted mode
+let muted = Q.get("mute") === "1";
+let offsetMs = Number($("off").value);
+
+function frameAt(ms) {
+  if (!tl) return null;
+  const i = Math.floor(ms / tl.frameMs);
+  if (i < 0) return { openness: 0, wideness: 0.4 };
+  if (i >= tl.frames.length) return null;
+  return tl.frames[i];
+}
+
+function tick() {
+  bob += 0.02;
+  let target = null;
+  if (tl) {
+    const ms = muted ? (performance.now() - startedAt - offsetMs)
+                     : (audio ? audio.currentTime * 1000 : 0);
+    target = frameAt(ms);
+    if (!target) { tl = null; $("dot").classList.remove("live"); }
+  }
+  const to = target ?? { openness: 0, wideness: 0.4 };
+  // Smoothing at ~0.45 keeps 20ms frames from strobing at 60fps without
+  // smearing consonants into each other.
+  openness += (to.openness - openness) * 0.45;
+  wideness += (to.wideness - wideness) * 0.25;
+  draw();
+  requestAnimationFrame(tick);
+}
+
+// Blink on an irregular timer; a fixed interval looks mechanical.
+(function scheduleBlink() {
+  const wait = 2200 + Math.random() * 3600;
+  setTimeout(() => {
+    let t = 0;
+    const iv = setInterval(() => {
+      t += 16;
+      blink = t < 90 ? t / 90 : Math.max(0, 1 - (t - 90) / 120);
+      if (t > 210) { blink = 0; clearInterval(iv); }
+    }, 16);
+    scheduleBlink();
+  }, wait);
+})();
+// #endregion
+
+// #region stream
+function onSpeak(d) {
+  tl = { frames: d.frames, frameMs: d.frameMs, durationMs: d.durationMs };
+  startedAt = performance.now();
+  $("cap").textContent = d.text || "";
+  $("cap").classList.toggle("empty", !d.text);
+  $("dot").classList.add("live");
+  if (muted) return;
+  if (audio) { audio.pause(); audio.src = ""; }
+  audio = new Audio(d.url);
+  audio.preload = "auto";
+  // If audio will not play (blocked, or the clip has already been evicted),
+  // fall back to the wall-clock so the face still talks rather than freezing.
+  audio.play().catch(() => { muted = true; startedAt = performance.now(); });
+}
+
+function connect() {
+  const es = new EventSource("/events");
+  es.addEventListener("speak", (e) => { try { onSpeak(JSON.parse(e.data)); } catch (err) { console.error(err); } });
+  es.addEventListener("state", (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.state === "thinking") { $("cap").textContent = d.detail || "thinking"; $("cap").classList.add("empty"); }
+    } catch (err) { console.error(err); }
+  });
+  es.onerror = () => { /* EventSource reconnects on its own; nothing to do */ };
+}
+// #endregion
+
+// #region controls
+$("mute").onclick = () => {
+  muted = !muted;
+  $("mute").textContent = muted ? "audio off" : "audio on";
+  $("offwrap").classList.toggle("hide", !muted);
+  if (muted && audio) { audio.pause(); }
+};
+$("off").oninput = () => { offsetMs = Number($("off").value); $("offv").textContent = offsetMs + "ms"; };
+$("gate").onclick = () => {
+  $("gate").classList.add("hide");
+  // Unlock playback with a real (silent) play() inside the click handler.
+  const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=");
+  a.play().catch(() => {});
+  connect();
+};
+if (muted) { $("mute").textContent = "audio off"; $("offwrap").classList.remove("hide"); $("gate").classList.add("hide"); connect(); }
+// #endregion
+
+draw();                       // paint a face immediately, before any stream
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
