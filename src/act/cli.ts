@@ -10,8 +10,9 @@
 //   act pick <player>                  draft a player
 //   act queue <p1;p2;...>              set the autopick draft queue
 //   act lineup <id1,id2,...>           set the week's starters
-//   act trade-respond <txid> accept|reject
-//   act trade-send <json>              send a trade offer
+//   act trade-respond <txid> accept|reject [leagueId]
+//   act trade-send <json>              send a trade offer (json includes leagueId)
+//   act trade-capture [leagueId] [outfile]   dump the trades-page DOM to a file
 //   act import-session [file]          transplant a logged-in session
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
@@ -78,9 +79,9 @@ async function main(): Promise<void> {
       break;
     }
     case "trade-respond": {
-      const [txid, decision] = args;
-      if (!txid || (decision !== "accept" && decision !== "reject")) throw new Error("usage: act trade-respond <txid> accept|reject");
-      await call("/trade-respond", { txid, decision });
+      const [txid, decision, leagueId] = args;
+      if (!txid || (decision !== "accept" && decision !== "reject")) throw new Error("usage: act trade-respond <txid> accept|reject [leagueId]");
+      await call("/trade-respond", { txid, decision, ...(leagueId ? { leagueId } : {}) });
       console.log(`${decision}ed trade ${txid}`);
       break;
     }
@@ -88,6 +89,15 @@ async function main(): Promise<void> {
       const spec = JSON.parse(args.join(" ") || "{}");
       await call("/trade-send", { spec });
       console.log("trade sent");
+      break;
+    }
+    case "trade-capture": {
+      // A leagueId is a long number; anything else is the output file path.
+      const leagueId = args.find((a) => /^\d{12,}$/.test(a));
+      const outfile = args.find((a) => !/^\d{12,}$/.test(a)) ?? `trade-dom-${Date.now()}.json`;
+      const { dom } = await call("/trade-capture", leagueId ? { leagueId } : {});
+      await Bun.write(outfile, JSON.stringify(dom, null, 2));
+      console.log(`wrote trades-page DOM to ${outfile}`);
       break;
     }
     case "import-session": {
@@ -100,7 +110,7 @@ async function main(): Promise<void> {
       process.exit(ok ? 0 : 5);
     }
     default:
-      console.log("commands: login-check | dom [url] | goto <url> | shot [name] | pick <player> | queue <p1;p2> | lineup <ids> | trade-respond <txid> accept|reject | trade-send <json> | import-session [file]");
+      console.log("commands: login-check | dom [url] | goto <url> | shot [name] | pick <player> | queue <p1;p2> | lineup <ids> | trade-respond <txid> accept|reject [leagueId] | trade-send <json> | trade-capture [leagueId] [outfile] | import-session [file]");
       process.exit(command ? 1 : 0);
   }
 }

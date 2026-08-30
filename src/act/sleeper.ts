@@ -483,20 +483,291 @@ export async function addPlayer(page: Page, spec: AddDropSpec): Promise<void> {
 }
 // #endregion
 
-// Accept or reject a pending trade by its Sleeper transaction id.
-export async function respondTrade(page: Page, transactionId: string, decision: "accept" | "reject"): Promise<void> {
-  await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(2000);
-  await screenshot(page, `trade-${decision}-${transactionId}`);
-  throw new Error("respondTrade: selectors pending Phase C DOM capture");
+// #region trades
+//
+// The trade UI lives at /leagues/<id>/trades. Selectors observed on 2026-08-30
+// against the staging league: `.propose-trade-partners` is the propose modal,
+// `.trade-partners-container` holds the columns, `.trade-partner-roster-item.is-owner`
+// is OUR column, `.trade-center-player-box` is a player card.
+//
+// Two things make this the strictest write path, and both are honoured here:
+//
+//   1. It cannot be fully exercised yet. The staging league has no trade
+//      partner at all (all seven other teams are orphans with owner_id null), so
+//      the click path has never run end to end. Everything below is therefore
+//      GATED behind TRADE_WRITE_ARMED and refuses to click until a real offer
+//      has let us verify the selectors with `captureTradeDom`. Off by default,
+//      it still does the safe half: navigate, screenshot, dump the DOM.
+//
+//   2. The trade UI shows NO player avatar. Identity there is position + team +
+//      an ABBREVIATED name like "J. Daniels", which is ambiguous in principle
+//      (two J. Daniels could exist). So a card is matched on the loose form AND
+//      cross-checked on position and team, and anything that matches more than
+//      one card throws rather than guesses, the exact discipline addPlayer uses
+//      on the free-agent list. The cost of clicking the wrong player into a
+//      trade is a whole asset.
+
+const tradeWriteArmed = () => /^(1|true|yes|on)$/i.test(process.env.TRADE_WRITE_ARMED ?? "");
+
+function tradesUrl(leagueId?: string): string {
+  const base = leagueId ? `${SLEEPER}/leagues/${leagueId}` : leagueUrl();
+  return `${base}/trades`;
 }
 
-// Send a trade offer. `spec` describes what each side gives/gets.
-export async function sendTrade(page: Page, spec: unknown): Promise<void> {
-  await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });
+// A player card as read off the trade UI: abbreviated name plus the position and
+// team we disambiguate on.
+interface TradeCard {
+  index: number;
+  name: string; // abbreviated, e.g. "J. Daniels"
+  pos: string;
+  team: string;
+  text: string;
+}
+
+// Read every `.trade-center-player-box` within a scope (a column, or the whole
+// page). The internal structure is not yet confirmed, so this is written to
+// degrade gracefully: it pulls the visible text and best-effort position/team,
+// and `captureTradeDom` exists to finish it against real markup.
+async function readTradeCards(page: Page, scopeSelector: string): Promise<TradeCard[]> {
+  return (await page.evaluate((scopeSel: string) => {
+    const scope = scopeSel ? document.querySelector(scopeSel) : document.body;
+    if (!scope) return [];
+    return Array.from(scope.querySelectorAll(".trade-center-player-box")).map((el, index) => {
+      const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+      const name = (el.querySelector(".player-name")?.textContent ?? "").trim();
+      const posRaw = (el.querySelector(".position")?.textContent ?? "").trim();
+      // "RB - SEA" or "RB SEA": split position from team.
+      const parts = posRaw.split(/[\s-]+/).filter(Boolean);
+      const pos = parts[0] ?? "";
+      const team = parts[1] ?? "";
+      return { index, name: name || text, pos, team, text };
+    });
+  }, scopeSelector)) as TradeCard[];
+}
+
+// Find the single card matching a full name, position and team. Refuses on more
+// than one match (the abbreviated-name ambiguity) and on none.
+function matchCard(cards: TradeCard[], full: string, position?: string, team?: string): TradeCard {
+  const re = abbrevMatcher(full);
+  const hits = cards.filter((c) => {
+    if (!re.test(c.name)) return false;
+    if (position && c.pos && c.pos.toUpperCase() !== position.toUpperCase()) return false;
+    if (team && c.team && c.team.toUpperCase() !== team.toUpperCase()) return false;
+    return true;
+  });
+  if (hits.length === 0) throw new Error(`trade: no card matched "${full}"${position ? ` (${position})` : ""}${team ? ` ${team}` : ""}`);
+  if (hits.length > 1) {
+    throw new Error(
+      `trade: "${full}" is ambiguous in the trade UI (${hits.map((h) => `${h.name} ${h.pos} ${h.team}`).join(" | ")}); refusing to guess`,
+    );
+  }
+  return hits[0]!;
+}
+
+// A best-effort read of the pending INCOMING offers on the trades page. Selectors
+// unconfirmed, so this is heuristic: a block that offers both an Accept and a
+// Reject affordance is a pending offer awaiting our decision. Returns how many
+// there are so the caller can refuse to act when it cannot tell them apart.
+async function pendingOfferCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const blocks = Array.from(document.querySelectorAll("[class*='trade']"));
+    let n = 0;
+    for (const b of blocks) {
+      const txt = (b.textContent ?? "").toLowerCase();
+      const hasAccept = /\baccept\b/.test(txt);
+      const hasReject = /\b(reject|decline)\b/.test(txt);
+      // Only count a block that is itself the offer, not an ancestor that
+      // contains one: require it to be reasonably small.
+      if (hasAccept && hasReject && txt.length < 800) n++;
+    }
+    return n;
+  });
+}
+
+// Accept or reject a pending incoming trade. `leagueId` is explicit, like every
+// other write path, so a staging test can never rearrange the real team.
+//
+// GATED: with TRADE_WRITE_ARMED unset this navigates, screenshots and then
+// throws without clicking, because the accept/reject selectors have not been
+// verified against a real offer. Arm it only after `captureTradeDom` on a live
+// offer confirms them.
+export async function respondTrade(
+  page: Page,
+  transactionId: string,
+  decision: "accept" | "reject",
+  leagueId?: string,
+): Promise<void> {
+  await page.goto(tradesUrl(leagueId), { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(2500);
+  await screenshot(page, `trade-${decision}-${transactionId}`);
+
+  const pendingBefore = await pendingOfferCount(page).catch(() => 0);
+
+  if (!tradeWriteArmed()) {
+    throw new Error(
+      `respondTrade is GATED (set TRADE_WRITE_ARMED=1 to enable). Saw ~${pendingBefore} pending offer block(s). ` +
+        `Run \`act trade-capture ${leagueId ?? ""}\` on a real offer and finish the accept/reject selectors before arming.`,
+    );
+  }
+
+  // Sleeper does not expose the transaction id in the DOM, so we cannot target a
+  // specific offer by id. Refuse unless there is exactly one pending offer to
+  // act on; batching or guessing which of several is "the" one is precisely the
+  // ambiguity these rails exist to stop.
+  if (pendingBefore !== 1) {
+    throw new Error(`respondTrade: expected exactly one pending offer to ${decision}, saw ~${pendingBefore}; refusing to guess which`);
+  }
+
+  const label = decision === "accept" ? /^accept$/i : /^(reject|decline)$/i;
+  const btn = page.getByRole("button", { name: label }).first();
+  if ((await btn.count().catch(() => 0)) === 0) {
+    throw new Error(`respondTrade: no ${decision} button found; selectors need finishing from a real offer capture`);
+  }
+  await btn.click({ timeout: 8000 });
+  await page.waitForTimeout(1500);
+  // Sleeper usually shows a confirm dialog; accept it if present.
+  const confirm = page.getByRole("button", { name: decision === "accept" ? /^(accept|confirm|yes)$/i : /^(reject|decline|confirm|yes)$/i }).first();
+  if (await confirm.isVisible().catch(() => false)) await confirm.click().catch(() => {});
+  await page.waitForTimeout(2500);
+
+  // Read back from the DOM, never the rosters API (it served a stale roster for
+  // over five minutes after a confirmed change on 2026-08-30). The offer must no
+  // longer be pending. A silent no-op has to fail loudly rather than look done.
+  await page.goto(tradesUrl(leagueId), { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(2500);
+  await screenshot(page, `trade-${decision}-${transactionId}-after`);
+  const pendingAfter = await pendingOfferCount(page).catch(() => 1);
+  if (pendingAfter >= pendingBefore) {
+    throw new Error(`respondTrade: the offer is still pending after ${decision} (before ~${pendingBefore}, after ~${pendingAfter}); state is now unknown, stopping`);
+  }
+}
+
+// What a proposed outgoing trade offers. Player identity is a loose (name, pos,
+// team) triple, matched against the abbreviated cards in the trade UI.
+export interface TradePlayerRef {
+  name: string; // full name, e.g. "Jayden Daniels"
+  position?: string;
+  team?: string;
+}
+
+export interface TradeSendSpec {
+  leagueId?: string; // explicit, so a write path never resolves its own target
+  partnerRosterId?: number; // the partner to trade with, by roster id
+  partnerTeam?: string; // or by team/display name, if the roster id is unknown
+  give: TradePlayerRef[]; // our players to send
+  receive: TradePlayerRef[]; // their players to request
+}
+
+// Propose an outgoing trade. GATED behind TRADE_WRITE_ARMED for the same reason
+// as respondTrade: the propose flow has never run against a real partner (the
+// staging league has none), so until it is verified this refuses to click.
+export async function sendTrade(page: Page, spec: TradeSendSpec): Promise<void> {
+  if (!spec || !Array.isArray(spec.give) || !Array.isArray(spec.receive)) {
+    throw new Error(`sendTrade: malformed spec ${JSON.stringify(spec).slice(0, 120)}`);
+  }
+  await page.goto(tradesUrl(spec.leagueId), { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(2500);
+  await screenshot(page, "trade-send-before");
+
+  if (!tradeWriteArmed()) {
+    throw new Error(
+      "sendTrade is GATED (set TRADE_WRITE_ARMED=1 to enable). The propose flow has not been verified against a real trade partner. " +
+        "Run `act trade-capture` with the propose modal open and finish the partner-select and add-player selectors before arming.",
+    );
+  }
+
+  // 1. Open the propose flow and confirm the modal rendered.
+  const proposeBtn = page.getByRole("button", { name: /propose( a)? trade|new trade|create trade/i }).first();
+  if (await proposeBtn.count().catch(() => 0)) await proposeBtn.click({ timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+  const modal = page.locator(".propose-trade-partners").first();
+  await modal.waitFor({ state: "visible", timeout: 10_000 }).catch(() => {
+    throw new Error("sendTrade: the .propose-trade-partners modal did not open; selectors need finishing from a real capture");
+  });
+
+  // 2. Select the partner. Preferring the roster id keeps this unambiguous;
+  //    a team name is a fallback that must still resolve to exactly one option.
+  const partnerKey = spec.partnerTeam ?? (spec.partnerRosterId != null ? String(spec.partnerRosterId) : "");
+  if (!partnerKey) throw new Error("sendTrade: no partner specified (partnerRosterId or partnerTeam)");
+  const partnerOpt = page.getByText(new RegExp(partnerKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first();
+  if ((await partnerOpt.count().catch(() => 0)) === 0) {
+    throw new Error(`sendTrade: no partner matched "${partnerKey}"`);
+  }
+  await partnerOpt.click({ timeout: 8000 });
+  await page.waitForTimeout(1500);
+
+  // 3. Add players from each column. Our players come from the .is-owner column;
+  //    theirs from the other column. Each match refuses on ambiguity.
+  const ourCol = ".trade-partner-roster-item.is-owner";
+  const theirCol = ".trade-partner-roster-item:not(.is-owner)";
+  const addFrom = async (colSel: string, refs: TradePlayerRef[]): Promise<void> => {
+    if (refs.length === 0) return;
+    const cards = await readTradeCards(page, colSel);
+    for (const ref of refs) {
+      const card = matchCard(cards, ref.name, ref.position, ref.team);
+      await page.locator(`${colSel} .trade-center-player-box`).nth(card.index).click({ timeout: 8000 });
+      await page.waitForTimeout(500);
+    }
+  };
+  await addFrom(ourCol, spec.give);
+  await addFrom(theirCol, spec.receive);
+  await screenshot(page, "trade-send-filled");
+
+  // 4. Send.
+  const sendBtn = page.getByRole("button", { name: /^(send|propose|review)( trade| offer)?$/i }).first();
+  if ((await sendBtn.count().catch(() => 0)) === 0) {
+    throw new Error("sendTrade: no send/propose button found; selectors need finishing from a real capture");
+  }
+  await sendBtn.click({ timeout: 8000 });
   await page.waitForTimeout(2000);
-  await screenshot(page, "trade-send");
-  throw new Error(`sendTrade: selectors pending Phase C (${JSON.stringify(spec).slice(0, 80)})`);
+  const confirm = page.getByRole("button", { name: /^(send|confirm|yes|propose)$/i }).first();
+  if (await confirm.isVisible().catch(() => false)) await confirm.click().catch(() => {});
+  await page.waitForTimeout(2500);
+
+  // Read back: a pending outgoing offer should now exist on the trades page.
+  await page.goto(tradesUrl(spec.leagueId), { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(2500);
+  await screenshot(page, "trade-send-after");
+  const pending = await pendingOfferCount(page).catch(() => 0);
+  if (pending === 0) {
+    throw new Error("sendTrade: no pending trade is visible after sending; the proposal may not have gone through, state is unknown, stopping");
+  }
+}
+
+// Discovery tool for finishing the trade selectors from real markup. Navigates
+// to the trades page and dumps the structured facts and raw HTML of the trade
+// containers, so respondTrade/sendTrade can be completed the moment a real offer
+// or a real partner exists. Read-only: it clicks nothing.
+export async function captureTradeDom(page: Page, leagueId?: string): Promise<unknown> {
+  await page.goto(tradesUrl(leagueId), { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(3500);
+  await screenshot(page, "trade-capture");
+  return page.evaluate(() => {
+    const clip = (el: Element | null, n = 20000): string => (el ? (el.outerHTML ?? "").slice(0, n) : "");
+    const cards = Array.from(document.querySelectorAll(".trade-center-player-box")).map((el) => ({
+      text: (el.textContent ?? "").replace(/\s+/g, " ").trim(),
+      classes: typeof el.className === "string" ? el.className : "",
+      html: (el as HTMLElement).outerHTML.slice(0, 600),
+    }));
+    const partnerItems = Array.from(document.querySelectorAll(".trade-partner-roster-item")).map((el) => ({
+      classes: typeof el.className === "string" ? el.className : "",
+      isOwner: el.classList.contains("is-owner"),
+      text: (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 200),
+    }));
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"], a'))
+      .map((el) => (el.textContent ?? "").replace(/\s+/g, " ").trim())
+      .filter((t) => t.length > 0 && t.length < 40);
+    return {
+      url: location.href,
+      title: document.title,
+      proposeModal: clip(document.querySelector(".propose-trade-partners")),
+      partnersContainer: clip(document.querySelector(".trade-partners-container")),
+      cards,
+      partnerItems,
+      buttons: Array.from(new Set(buttons)).slice(0, 80),
+      mainHtml: clip(document.querySelector("main") ?? document.body, 60000),
+    };
+  });
 }
 // #endregion
 

@@ -7,6 +7,7 @@
 //   bun run coach draft         draft type, clock, rounds, order (if set)
 //   bun run coach board [POS] [N]   top-N value board (optionally one position)
 //   bun run coach roster [ID]   a roster's players by name (default: yours)
+//   bun run coach trade-eval <txid>   deterministic verdict on a pending trade
 //   bun run coach players [--refresh]   player cache status / refresh
 
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -149,6 +150,32 @@ async function cmdRoster(): Promise<void> {
   if (!(r.players ?? []).length) console.log("  (empty — pre-draft, keepers not designated yet)");
 }
 
+// The deterministic trade verdict for a pending offer, from the pure engine
+// over live data. Read-only: it evaluates and prints, it never accepts, rejects
+// or sends anything. This is the "surface for a human" view and the same verdict
+// the daemon's agent should defer to rather than reasoning a trade through by
+// feel. Value is starting-lineup impact, not the sum of player values.
+async function cmdTradeEval(): Promise<void> {
+  const txid = args[0];
+  if (!txid) {
+    console.log("usage: coach trade-eval <transaction_id>");
+    process.exit(1);
+  }
+  const { findTransaction, evaluateTransactionForUs } = await import("./analysis/trade-live.ts");
+  const tx = await findTransaction(txid);
+  if (!tx) {
+    console.log(`No transaction ${txid} found in the recent transactions for league ${config.leagueId}.`);
+    process.exit(2);
+  }
+  const { evaluation, summary } = await evaluateTransactionForUs(tx);
+  console.log(`\n${summary}\n`);
+  console.log(`  verdict:      ${evaluation.verdict.toUpperCase()}`);
+  console.log(`  lineup delta: ${evaluation.lineupDelta >= 0 ? "+" : ""}${evaluation.lineupDelta} (${evaluation.before} -> ${evaluation.after})`);
+  if (evaluation.railBlocks.length) console.log(`  rail blocks:  ${evaluation.railBlocks.join("; ")}`);
+  console.log("  reasoning:");
+  for (const r of evaluation.reasons) console.log(`    - ${r}`);
+}
+
 // The coach files a change request here (no code touched). A separate engineer
 // agent drains the queue and implements it.
 async function cmdRequestImprovement(): Promise<void> {
@@ -192,13 +219,14 @@ const commands: Record<string, () => Promise<void>> = {
   board: cmdBoard,
   available: cmdAvailable,
   roster: cmdRoster,
+  "trade-eval": cmdTradeEval,
   players: cmdPlayers,
   "request-improvement": cmdRequestImprovement,
 };
 
 const run = command ? commands[command] : undefined;
 if (!run) {
-  console.log("commands: ping | league | managers | draft | board [POS] [N] | roster [ID] | players [--refresh]");
+  console.log("commands: ping | league | managers | draft | board [POS] [N] | roster [ID] | trade-eval <txid> | players [--refresh]");
   process.exit(command ? 1 : 0);
 }
 await run();
