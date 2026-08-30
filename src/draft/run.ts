@@ -469,6 +469,12 @@ for (;;) {
   const confirm = await draftState();
   if (!confirm.onClock) continue;
 
+  // Tell the face we are on the clock the MOMENT the button goes live, not when
+  // the decision is done. pick-intent fires after all the thinking has already
+  // happened, so on its own the thinking face never appeared WHILE it was
+  // thinking, which is precisely when a watcher wants to see it working.
+  logEvent("coach", "on-clock", `On the clock: round ${round}.`, { round });
+
   let liveSet = new Set(confirm.available.map((a) => a.name));
   if (liveSet.size === 0) { liveSet = new Set((await draftState()).available.map((a) => a.name)); }
 

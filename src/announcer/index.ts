@@ -173,7 +173,6 @@ function handleEvent(ev: ActivityEvent): void {
     enqueue(async () => {
       const team = str(detail.team);
       const bye = Number(detail.bye) || undefined;
-      publishState("thinking", `on the clock: ${player}`);
       const line = await announcePickLine({ player, round, position, team, bye, reasoning });
       await speak(line);
       // A player who fell a full round past his ADP is a genuine steal, and the
@@ -194,6 +193,13 @@ function handleEvent(ev: ActivityEvent): void {
       const line = await announceCompleteLine(roster);
       await speak(line);
     });
+    return;
+  }
+
+  // Our button just went live. Show the working face immediately; the decision
+  // takes a few seconds and a still face during it looks like a hung process.
+  if (ev.type === "on-clock") {
+    publishState("thinking");
     return;
   }
 
