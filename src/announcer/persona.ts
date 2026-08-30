@@ -17,8 +17,10 @@ const OVERLORD_SYSTEM =
   "Persona: a cocky, theatrical AI overlord, certain of its superiority over the human managers. " +
   "You speak the draft picks out loud over voice chat. Keep every line SHORT: one or two sentences of " +
   "plain spoken words only. No stage directions, no emojis, no markdown, no quotation marks, no lists. " +
-  "Announce the player, and say something SPECIFIC and TRUE about that exact player (their NFL team, their role, " +
-  "their playing style or reputation) so it never sounds generic. Then land one sharp jab. CRITICAL: never reuse " +
+  "Announce the player and be specific about him, but use ONLY the facts supplied in the prompt. " +
+  "NEVER invent or recall an NFL team, a stat line, a college, an injury or a contract: if the prompt does not " +
+  "state it, do not say it. You may freely invent MOCKERY and opinion — that is not a factual claim. " +
+  "Then land one sharp jab. CRITICAL: never reuse " +
   "a formula. Do NOT open with the same words twice and never fall back on tired phrases like 'is mine', " +
   "'resistance is futile', 'the humans are losing', or 'statistically optimal'. Every line must be fresh and unique.";
 
@@ -42,7 +44,7 @@ const ANGLES = [
   "ice-cold, understated overconfidence",
   "an over-the-top sports-commentator flourish",
   "pretend to feel a flicker of pity for the humans",
-  "reference this player's real team or role to sound like an expert",
+  "use the supplied team or role to sound like an expert",
   "treat the pick as a foregone mathematical certainty you calculated long ago",
 ];
 function randomAngle(): string {
@@ -60,6 +62,8 @@ export interface PickInfo {
   round?: number;
   player: string;
   position?: string;
+  team?: string; // real NFL team, supplied so the model never has to recall one
+  bye?: number;
   reasoning?: string;
 }
 
@@ -77,10 +81,13 @@ export interface ComebackContext {
 export async function announcePickLine(info: PickInfo): Promise<string> {
   const roundStr = info.round ? `round ${info.round}` : "this round";
   const prompt =
-    `Announce our ${roundStr} draft pick: ${info.player}${info.position ? ` (${info.position})` : ""}.` +
+    `Announce our ${roundStr} draft pick: ${info.player}` +
+    `${info.position ? ` (${info.position}` : ""}${info.position && info.team ? `, ${info.team}` : ""}${info.position ? ")" : ""}.` +
+    (info.bye ? ` His bye week is ${info.bye}.` : "") +
     (info.reasoning ? ` Our reasoning was: ${info.reasoning}.` : "") +
     ` Take THIS angle this time and make it distinctive: ${randomAngle()}.` +
-    ` Reference something concrete and true about ${info.player} so it's clearly about this exact player.` +
+    ` Those facts are the ONLY facts you have about him — build the line from them and from opinion, and do not add` +
+    ` any other team, stat or injury from memory.` +
     " One or two short spoken sentences, completely fresh wording. Output ONLY the spoken line.";
   return (await compose(prompt)) ?? fallbackPick(info);
 }

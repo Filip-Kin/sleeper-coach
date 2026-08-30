@@ -368,7 +368,9 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
       `draft a backup QB (leave that to the very last round, if at all). Draft K and DEF only in the final 2-3 rounds. ` +
       `Anticipate RB/WR runs and respect tiers over raw rank. ` +
       `First write two or three sentences of reasoning about the board, runs, and roster needs. Then on a new line write "PICKS:" followed by up to 8 exact names ` +
-      `from the list above, semicolon-separated, YOUR CHOICE FIRST and the rest as fallbacks in order if someone is taken before the click lands.`,
+      `from the list above, semicolon-separated, YOUR CHOICE FIRST and the rest as fallbacks in order if someone is taken before the click lands.\n` +
+      `Your reasoning MUST justify the FIRST name on that list. If your reasoning talks you into a different player, change the LIST, not the reasoning — ` +
+      `the first name is what actually gets drafted, and a mismatch means we draft someone you argued against.`,
   });
   if (res.error || !res.text.trim()) {
     plan = board.map((b) => b.name);
@@ -473,17 +475,43 @@ for (;;) {
   const availOk = (b: RankedPlayer): boolean => liveSet.size === 0 || liveSet.has(b.name);
   const needOk = (pos: string): boolean => (counts[pos] ?? 0) < positionCap(pos, round);
 
-  // Must-fill the mandatory starters (DEF, K): value never prioritises them, so
-  // reserve the final picks. They're usually outside the visible window, so pick
-  // the best by value and let makePick search for it (no availOk gate).
-  const mandatoryMissing = ["DEF", "K"].filter((p) => (counts[p] ?? 0) === 0);
+  // Must-fill EVERY mandatory starting slot, not just DEF and K. Derived from
+  // the league's own roster_positions so it cannot drift from the real settings.
+  // RB and WR fill themselves, but QB and TE do not: value never prioritises
+  // them, and now that the agent chooses freely it is entirely capable of taking
+  // a fifth running back every round and finishing with an empty TE slot. Mock
+  // #4 took a third RB over the top TE at R5, which is defensible on its own but
+  // shows the failure mode is live. Reserve exactly as many final picks as there
+  // are unfilled mandatory slots.
+  const mandatorySlots = [...new Set(league.roster_positions.filter((p) => ["QB", "TE", "K", "DEF"].includes(p)))];
+  const mandatoryMissing = mandatorySlots.filter((p) => (counts[p] ?? 0) === 0);
   const remaining = rounds - myDrafted.length; // picks left, including this one
   let target: RankedPlayer | undefined;
   let forcedMandatory = false;
   if (mandatoryMissing.length && remaining <= mandatoryMissing.length) {
     const pos = mandatoryMissing[0]!;
-    target = fullBoard.find((b) => b.position === pos);
+    // Kickers and defences are near-interchangeable (K1 to K11 spans about five
+    // projected points across a whole season), so spend that spread on a clean
+    // bye instead. Mock #4 force-filled a kicker onto week 11 and gave us four
+    // players off that week; this path bypasses the bye veto, so it needs its
+    // own check. Prefer names the draft room can actually see when it lists any
+    // at this position, otherwise fall back to board order as before (DEF and K
+    // are often outside the visible window, which is why there is no hard gate).
+    const load = byeCounts(myDrafted.map((d) => byName.get(d.name)?.team));
+    const atPos = fullBoard.filter((b) => b.position === pos);
+    const visible = atPos.filter((b) => liveSet.has(b.name));
+    const pool = (visible.length ? visible : atPos).slice(0, 8);
+    target = pool.reduce((best, b) => {
+      const lb = byeWeek(b.team) == null ? 0 : load.get(byeWeek(b.team)!) ?? 0;
+      const lbest = byeWeek(best.team) == null ? 0 : load.get(byeWeek(best.team)!) ?? 0;
+      if (lb < lbest) return b;
+      if (lb === lbest && b.vor > best.vor) return b;
+      return best;
+    }, pool[0] ?? atPos[0]!);
     forcedMandatory = !!target;
+    if (target && atPos[0] && target.name !== atPos[0].name) {
+      console.log(`[draft-run] must-fill ${pos}: took ${target.name} (bye ${byeWeek(target.team) ?? "?"}) over ${atPos[0].name} (bye ${byeWeek(atPos[0].team) ?? "?"}) on bye load`);
+    }
   }
   if (!target) {
     // DIVISION OF LABOUR. The deterministic layer owns the OPTION SET: what is
@@ -529,9 +557,12 @@ for (;;) {
           }
         }
         if (planRank > 1) {
-          console.log(`[draft-run] agent call: ${pick.name} (VONA rank ${planRank} of ${eligible.length}, top was ${vonaTop.name})`);
+          console.log(`[draft-run] agent call: ${pick.name} (VONA rank ${planRank} of ${eligible.length}, top was ${vonaTop.name}, VONA -${(vonaTop.vona - pick.vona).toFixed(1)} VOR -${(vonaTop.vor - pick.vor).toFixed(1)})`);
           logEvent("coach", "agent-override", `Agent took ${pick.name} over the value board's ${vonaTop.name}.`, {
-            picked: pick.name, vonaTop: vonaTop.name, vonaRank: planRank, reasoning: lastReasoning,
+            picked: pick.name, vonaTop: vonaTop.name, vonaRank: planRank,
+            vonaGap: Math.round((vonaTop.vona - pick.vona) * 10) / 10,
+            vorGap: Math.round((vonaTop.vor - pick.vor) * 10) / 10,
+            reasoning: lastReasoning,
           });
         }
         target = pick;
@@ -559,12 +590,17 @@ for (;;) {
   }
   if (!target) { console.log("[draft-run] no target available"); await Bun.sleep(1500); continue; }
 
-  console.log(`[debug] our R${round} (global ${globalPick}) slot=${myDraftSlot} availN=${liveSet.size} target=${target.name} (${target.position})${forcedMandatory ? " [must-fill]" : ""}`);
+  // Plan age matters: the agent plans off the clock, so rivals can take its top
+  // target before our turn (mock #4 lost Garrett Wilson 10 picks ahead of us and
+  // correctly fell through to the next name on its list). Log the age so a
+  // genuinely stale plan is visible rather than inferred.
+  const planAgeS = ((Date.now() - lastRefresh) / 1000).toFixed(0);
+  console.log(`[debug] our R${round} (global ${globalPick}) slot=${myDraftSlot} availN=${liveSet.size} planAge=${planAgeS}s target=${target.name} (${target.position})${forcedMandatory ? " [must-fill]" : ""}`);
   logBoard(globalPick, round, confirm.available, target.name);
   lastBoardAt = Date.now();
   // Announce BEFORE we click. The announcer (a separate process) speaks off this
   // event; we do NOT wait for it, so slow/failed voice never holds up the pick.
-  logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, round, reasoning: lastReasoning });
+  logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, team: target.team, bye: byeWeek(target.team), round, reasoning: lastReasoning });
   await Bun.sleep(ANNOUNCE_LEAD_MS); // let the announcer's voice lead the click
   const t0 = Date.now();
   try {

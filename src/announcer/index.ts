@@ -105,6 +105,8 @@ async function speak(line: string): Promise<void> {
 interface PickDetail {
   target?: unknown;
   reasoning?: unknown;
+  team?: unknown;
+  bye?: unknown;
 }
 interface CompleteDetail {
   roster?: unknown;
@@ -154,7 +156,9 @@ function handleEvent(ev: ActivityEvent): void {
     const position = /\(([A-Z]+)\)/.exec(ev.summary)?.[1];
     const reasoning = str(detail.reasoning);
     enqueue(async () => {
-      const line = await announcePickLine({ player, round, position, reasoning });
+      const team = str(detail.team);
+      const bye = Number(detail.bye) || undefined;
+      const line = await announcePickLine({ player, round, position, team, bye, reasoning });
       await speak(line);
     });
     return;
