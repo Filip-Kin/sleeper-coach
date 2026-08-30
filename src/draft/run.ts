@@ -569,8 +569,12 @@ for (;;) {
       } else {
         // No usable plan (agent errored, backed off, or named someone outside
         // the bound). Fall back to the value board, and here bye spreading acts
-        // as a general tie-break since nothing intelligent is watching.
-        const nearTop = eligible.filter((b) => vonaTop.vona - b.vona <= vonaConfig.byeEps);
+        // as a tie-break since nothing intelligent is watching — but only once
+        // the week is genuinely crowded. Two players sharing a bye is a bench
+        // swap, so below byeSoftMin we just take the best available and move on.
+        const nearTop = byeLoad(vonaTop) >= vonaConfig.byeSoftMin
+          ? eligible.filter((b) => vonaTop.vona - b.vona <= vonaConfig.byeEps)
+          : [vonaTop];
         target = nearTop.reduce((best, b) => {
           const d = byeLoad(b) - byeLoad(best);
           if (d < 0) return b;

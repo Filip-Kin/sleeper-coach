@@ -42,7 +42,13 @@ export const vonaConfig = {
   // Refuse to put this many players on a single bye week when a comparable
   // alternative exists. The one veto that outranks the agent, because it is
   // mechanical and mock #1 got it wrong (four players off in week 10).
+  // At 3 this vetoes a FOURTH player on one week and leaves two or three alone,
+  // which is right: with 16 roster spots and 9 starters in an 8-team league, two
+  // players sharing a bye is a bench swap, not a problem (Filip's call).
   byeStackMax: Number(process.env.VONA_BYE_STACK_MAX ?? "3"),
+  // Below this load the value board just takes its best pick and ignores byes
+  // entirely. Only from here up is spreading worth even a tie-break.
+  byeSoftMin: Number(process.env.VONA_BYE_SOFT_MIN ?? "2"),
   // VONA gap within which a bye-week clash may redirect the pick. Value models
   // never see byes, so without this the picker cheerfully takes a fourth player
   // who is off in week 10. Kept small on purpose: bye spreading is a tie-break,
