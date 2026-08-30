@@ -57,9 +57,17 @@ function markSeen(txId: string, status: string): void {
 
 // Name the players in an offer, so the notification is actionable rather than a
 // transaction id. Falls back to the raw id if the player map cannot be loaded.
+//
+// Sleeper's `adds` and `drops` map player_id -> the roster_id that GAINS or LOSES
+// that player, so a two-team trade lists BOTH directions in both maps. The first
+// version of this ignored that and reported every player on both sides as ours:
+// "we receive: A, B; we give up: A, B", which is worse than useless in an alert.
+// Found by the trades session on 2026-08-30 before any real offer arrived.
 async function describeTrade(tx: TransactionLike): Promise<string> {
   const side = async (m: Record<string, number> | null | undefined): Promise<string> => {
-    const ids = Object.keys(m ?? {});
+    const ids = Object.entries(m ?? {})
+      .filter(([, rosterId]) => rosterId === config.rosterId)
+      .map(([playerId]) => playerId);
     if (!ids.length) return "nothing";
     try {
       const { loadPlayers } = await import("./data/players.ts");

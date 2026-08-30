@@ -227,7 +227,14 @@ function buildQueue(counts: Record<string, number>, availSet: Set<string>): stri
 async function pushQueue(): Promise<void> {
   const s = await draftState();
   const q = buildQueue(localCounts(), new Set(s.available.map((a) => a.name)));
-  if (q.length) await api("/queue", { players: q }).catch(() => {});
+  if (q.length) {
+    await api("/queue", { players: q }).catch(() => {});
+    // Log what we actually pushed. The dashboard previously had to reconstruct
+    // the queue from the lagging picks feed and label it an estimate, because
+    // nothing recorded it. During the 2026 draft Filip could not see what the
+    // engine intended to do, which was the clearest UX failure of the night.
+    logEvent("coach", "queue", `Backstop queue: ${q.join(", ")}`, { queue: q });
+  }
 }
 
 // Log every NEW board pick once, so downstream consumers (the Discord announcer)
