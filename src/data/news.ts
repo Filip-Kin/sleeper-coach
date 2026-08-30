@@ -13,7 +13,7 @@
 // Two effects, deliberately separated:
 //   1. `note` is advisory text shown to the agent on the shortlist. It cannot
 //      move a player; it only lets the agent's plan break a near-tie (the
-//      existing `planEps` window) with an actual football read.
+//      option set the deterministic layer offers) with an actual football read.
 //   2. `status`/`multiplier` scale projected points BEFORE value is computed, so
 //      VOR, tiers and VONA all see it. This is reserved for facts, not vibes:
 //      a player who is out for the season is worth ~nothing and leaving him

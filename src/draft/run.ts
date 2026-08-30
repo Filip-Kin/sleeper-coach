@@ -345,8 +345,12 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
     prompt:
       `You are the coach in a ${teams}-team ${scoringLabel} snake draft, about to make your round ${round} pick. ${have}\n` +
       `Recent picks (react to runs and what rivals are stacking):\n${recentStr}\n\n` +
-      `Best available now, ranked by VONA (value over next available: value now minus what you can still get at that position when the pick snakes back to you). ` +
-      `VOR is raw value, "surv" is the chance the player is still there at your next pick, VONA is the value you forfeit by waiting. Prefer higher VONA — it already accounts for who falls back to you:\n${shortlist}\n\n` +
+      `YOU MAKE THE PICK. The first name you list that is still available is what gets drafted, so lead with your actual choice. ` +
+      `Everything below is an input to that decision, not an instruction. ` +
+      `The list is ranked by VONA (value over next available: value now minus what you can still get at that position when the pick snakes back to you). ` +
+      `VOR is raw value, "surv" is the chance the player is still there at your next pick, VONA is the value you forfeit by waiting. ` +
+      `VONA is a good default and you should usually take the top of it, but you are the only one who can see news, tiers, a run developing and the shape of your roster — ` +
+      `so depart from it when you have a real football reason, and say what that reason is:\n${shortlist}\n\n` +
       (goneStr ? `${goneStr}\n\n` : "") +
       `Reading the tags: "bye N" is that player's bye week. A bracket marked NOISE means Sleeper flags him but the ` +
       `reporting says he is fine — do NOT downgrade him for it. RISK or OUT means a real chance of missing games, and ` +
@@ -363,7 +367,8 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
       `the best value AND you have none. Take exactly ONE QB in this 1-QB league and only from the mid rounds; do NOT ` +
       `draft a backup QB (leave that to the very last round, if at all). Draft K and DEF only in the final 2-3 rounds. ` +
       `Anticipate RB/WR runs and respect tiers over raw rank. ` +
-      `First write two or three sentences of reasoning about the board, runs, and roster needs. Then on a new line write "PICKS:" followed by up to 8 exact names from the list above, semicolon-separated, best first.`,
+      `First write two or three sentences of reasoning about the board, runs, and roster needs. Then on a new line write "PICKS:" followed by up to 8 exact names ` +
+      `from the list above, semicolon-separated, YOUR CHOICE FIRST and the rest as fallbacks in order if someone is taken before the click lands.`,
   });
   if (res.error || !res.text.trim()) {
     plan = board.map((b) => b.name);
@@ -481,44 +486,72 @@ for (;;) {
     forcedMandatory = !!target;
   }
   if (!target) {
-    // Deterministic core: the biggest value drop-off to our next snake pick
-    // (VONA), among positions we still need. The agent's plan only overrides
-    // when it picks a near-tie on VONA — i.e. it has a football read (news,
-    // injury) that separates two comparably-valued players.
+    // DIVISION OF LABOUR. The deterministic layer owns the OPTION SET: what is
+    // available, what the position caps allow, and the VONA value ranking over
+    // that. The agent chooses WITHIN it. It is the only layer that can read
+    // news, tiers, roster shape and a run developing, so confining it to a
+    // near-tie made it decorative and pushed every real rule down into
+    // mechanical hacks. The remaining deterministic powers are narrow and
+    // named: the caps above, the DEF/K must-fill, and a bye-stack veto.
+    //
+    // planMaxRank is the safety bound and the revert knob: the agent may take
+    // anything inside the top N of the eligible ranking. Set VONA_PLAN_MAX_RANK=1
+    // to restore fully deterministic picking without touching code.
     const ranked = rankAvailable(liveSet, round);
     const eligible = ranked.filter((b) => availOk(b) && needOk(b.position));
     const vonaTop = eligible[0];
     const planPick = plan.map((nm) => byName.get(nm)).find((b): b is RankedPlayer => !!b && availOk(b) && needOk(b.position));
     if (vonaTop) {
-      // Bye spreading, as a TIE-BREAK only. Value never sees a bye week, so left
-      // alone the picker will happily take a fourth player who is off in week 10
-      // — which costs a real week of the season. Among candidates within a small
-      // VONA epsilon of the best, prefer the one whose bye we are least loaded
-      // on. Bounded by the epsilon, so it can never override a clear value pick.
       const load = byeCounts(myDrafted.map((d) => byName.get(d.name)?.team));
       const byeLoad = (b: RankedPlayer): number => {
         const wk = byeWeek(b.team);
         return wk == null ? 0 : load.get(wk) ?? 0;
       };
-      // The agent's football read comes first, then bye spreading tie-breaks
-      // whatever that settled on — so a plan pick gets the same protection.
-      const planVona = planPick ? eligible.find((v) => v.name === planPick.name)?.vona ?? -Infinity : -Infinity;
-      const chosen = planPick && vonaTop.vona - planVona <= vonaConfig.planEps ? planPick : vonaTop;
-      // planPick comes off fullBoard (no vona field), so re-resolve it against
-      // the ranked set to compare like with like.
-      const base: VonaPlayer = eligible.find((v) => v.name === chosen.name) ?? { ...chosen, vona: vonaTop.vona, pSurvive: 1 };
-      const nearBase = eligible.filter((b) => base.vona - b.vona <= vonaConfig.byeEps);
-      target = nearBase.reduce((best, b) => {
-        const d = byeLoad(b) - byeLoad(best);
-        if (d < 0) return b;
-        if (d === 0 && b.vona > best.vona) return b;
-        return best;
-      }, base);
-      if (target.name !== base.name) {
-        console.log(`[draft-run] bye spread: ${base.name} (bye ${byeWeek(base.team) ?? "?"}, load ${byeLoad(base)}) -> ${target.name} (bye ${byeWeek(target.team) ?? "?"}, load ${byeLoad(target)})`);
-        logEvent("coach", "bye-spread", `Avoided a bye stack: ${target.name} over ${base.name}.`, {
-          from: base.name, to: target.name, fromBye: byeWeek(base.team), toBye: byeWeek(target.team),
-        });
+      const planRank = planPick ? eligible.findIndex((v) => v.name === planPick.name) + 1 : 0;
+      const agentInCharge = !!planPick && planRank > 0 && planRank <= vonaConfig.planMaxRank;
+
+      if (agentInCharge && planPick) {
+        let pick: VonaPlayer = eligible[planRank - 1]!;
+        // Sole veto over the agent's call: refuse to pile a fourth player onto
+        // one bye week when a comparable alternative exists. Mechanical, easily
+        // checked, and a model cannot be trusted to never slip on it — mock #1
+        // put four players on week 10.
+        if (byeLoad(pick) >= vonaConfig.byeStackMax) {
+          const alt = eligible
+            .filter((b) => pick.vona - b.vona <= vonaConfig.byeEps && byeLoad(b) < byeLoad(pick))
+            .sort((a, b) => b.vona - a.vona)[0];
+          if (alt) {
+            console.log(`[draft-run] bye-stack veto: ${pick.name} (bye ${byeWeek(pick.team) ?? "?"}, load ${byeLoad(pick)}) -> ${alt.name} (bye ${byeWeek(alt.team) ?? "?"}, load ${byeLoad(alt)})`);
+            logEvent("coach", "bye-veto", `Vetoed a bye stack: ${alt.name} over ${pick.name}.`, {
+              from: pick.name, to: alt.name, fromBye: byeWeek(pick.team), toBye: byeWeek(alt.team),
+            });
+            pick = alt;
+          }
+        }
+        if (planRank > 1) {
+          console.log(`[draft-run] agent call: ${pick.name} (VONA rank ${planRank} of ${eligible.length}, top was ${vonaTop.name})`);
+          logEvent("coach", "agent-override", `Agent took ${pick.name} over the value board's ${vonaTop.name}.`, {
+            picked: pick.name, vonaTop: vonaTop.name, vonaRank: planRank, reasoning: lastReasoning,
+          });
+        }
+        target = pick;
+      } else {
+        // No usable plan (agent errored, backed off, or named someone outside
+        // the bound). Fall back to the value board, and here bye spreading acts
+        // as a general tie-break since nothing intelligent is watching.
+        const nearTop = eligible.filter((b) => vonaTop.vona - b.vona <= vonaConfig.byeEps);
+        target = nearTop.reduce((best, b) => {
+          const d = byeLoad(b) - byeLoad(best);
+          if (d < 0) return b;
+          if (d === 0 && b.vona > best.vona) return b;
+          return best;
+        }, vonaTop);
+        if (planPick && planRank > vonaConfig.planMaxRank) {
+          console.log(`[draft-run] agent pick ${planPick.name} rejected: VONA rank ${planRank} > planMaxRank ${vonaConfig.planMaxRank}`);
+        }
+        if (target.name !== vonaTop.name) {
+          console.log(`[draft-run] bye spread: ${vonaTop.name} (bye ${byeWeek(vonaTop.team) ?? "?"}) -> ${target.name} (bye ${byeWeek(target.team) ?? "?"})`);
+        }
       }
     } else {
       target = planPick ?? fullBoard.find((b) => availOk(b)) ?? fullBoard[0];

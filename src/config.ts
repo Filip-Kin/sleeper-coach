@@ -31,7 +31,18 @@ export const vonaConfig = {
   enabled: (process.env.VONA ?? "1") !== "0", // VONA=0 → pure VOR (old behaviour)
   adpSpread: Number(process.env.VONA_ADP_SPREAD ?? "8"), // logistic scale on ADP; higher = humbler
   oppNudge: Number(process.env.VONA_OPP_NUDGE ?? "0.15"), // max survival shave from a leaned opponent (0 disables)
-  planEps: Number(process.env.VONA_PLAN_EPS ?? "2.5"), // VONA gap within which the agent's read may override the top pick
+  // How much authority the planning agent actually has. The deterministic layer
+  // owns the option set (availability + position caps + the VONA ranking); the
+  // agent picks within the top N of it. It is the only layer that can read news,
+  // tiers, roster shape and a developing run, so a tight leash here made it
+  // decorative and forced every real rule down into mechanical hacks.
+  // planMaxRank=1 restores fully deterministic picking with no code change,
+  // which is the draft-night revert knob.
+  planMaxRank: Number(process.env.VONA_PLAN_MAX_RANK ?? "22"),
+  // Refuse to put this many players on a single bye week when a comparable
+  // alternative exists. The one veto that outranks the agent, because it is
+  // mechanical and mock #1 got it wrong (four players off in week 10).
+  byeStackMax: Number(process.env.VONA_BYE_STACK_MAX ?? "3"),
   // VONA gap within which a bye-week clash may redirect the pick. Value models
   // never see byes, so without this the picker cheerfully takes a fourth player
   // who is off in week 10. Kept small on purpose: bye spreading is a tie-break,
