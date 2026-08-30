@@ -8,8 +8,9 @@
 import { launchContext, firstPage } from "./browser.ts";
 import {
   leagueUrl, isLoggedIn, authState, isOnClock, liveAvailable, draftedCells, domFacts, screenshot,
-  makePick, setQueue, reactToPick, setLineup, readRoster, addPlayer, respondTrade, sendTrade, importSession,
+  makePick, setQueue, reactToPick, setLineup, readRoster, addPlayer, respondTrade, sendTrade, captureTradeDom, importSession,
 } from "./sleeper.ts";
+import type { TradeSendSpec } from "./sleeper.ts";
 
 const PORT = Number(process.env.BROWSER_API_PORT ?? 9223);
 
@@ -135,9 +136,15 @@ Bun.serve({
         case "/roster":
           return Response.json({ rows: await run(() => readRoster(page)) });
         case "/trade-respond":
-          await run(() => respondTrade(page, str(b.txid), b.decision === "accept" ? "accept" : "reject")); return Response.json({ ok: true });
+          // leagueId explicit, like /lineup and /add: a trade write must never
+          // resolve its own target from ambient config.
+          await run(() => respondTrade(page, str(b.txid), b.decision === "accept" ? "accept" : "reject", b.leagueId ? str(b.leagueId) : undefined)); return Response.json({ ok: true });
         case "/trade-send":
-          await run(() => sendTrade(page, b.spec)); return Response.json({ ok: true });
+          await run(() => sendTrade(page, b.spec as TradeSendSpec)); return Response.json({ ok: true });
+        case "/trade-capture":
+          // Read-only: dump the trades-page DOM so the selectors can be finished
+          // from real markup the moment a live offer or partner exists.
+          return Response.json({ dom: await run(() => captureTradeDom(page, b.leagueId ? str(b.leagueId) : undefined)) });
         case "/import-session":
           return Response.json({ ok: await run(() => importSession(ctx, page, (b.entries as Record<string, string>) ?? {}, b.cookies as never)) });
       }
