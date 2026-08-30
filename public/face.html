@@ -129,20 +129,20 @@ function brow(x, y, w, rise, dir, colour) {
 // Negative is a frown, which has to be symmetric with the middle raised, because
 // an asymmetric frown reads as a smirk pointing the other way rather than as
 // displeasure.
-function restMouth(cxp, cy, w, curve, colour) {
+function restMouth(cxp, cy, w, curve, thick, colour) {
   const seg = Math.round(w / 3);
   const x0 = cxp - Math.round(w / 2);
   if (curve >= 0) {
     const rise = Math.round(curve * 2);
-    px(x0, cy, seg, 2, colour);
-    px(x0 + seg, cy - Math.min(1, rise), seg, 2, colour);
-    px(x0 + 2 * seg, cy - rise, seg, 2, colour);
+    px(x0, cy, seg, thick, colour);
+    px(x0 + seg, cy - Math.min(1, rise), seg, thick, colour);
+    px(x0 + 2 * seg, cy - rise, seg, thick, colour);
     if (rise > 0) px(x0 + 3 * seg - 1, cy - rise - 1, 2, 1, colour);
   } else {
     const arch = Math.round(-curve * 2);
-    px(x0, cy, seg, 2, colour);
-    px(x0 + seg, cy - arch, seg, 2, colour);
-    px(x0 + 2 * seg, cy, seg, 2, colour);
+    px(x0, cy, seg, thick, colour);
+    px(x0 + seg, cy - arch, seg, thick, colour);
+    px(x0 + 2 * seg, cy, seg, thick, colour);
     if (arch > 1) { px(x0 + seg - 1, cy - arch + 1, 1, arch, colour); px(x0 + 2 * seg, cy - arch + 1, 1, arch, colour); }
   }
 }
@@ -157,6 +157,9 @@ let bob = 0;
 let lid = 0.42;       // 0 = wide open, 1 = fully hooded
 let browTilt = -0.7;  // negative lifts the inner ends (smug), positive drops them
 let curve = 1;        // -1 frown .. +1 smirk, only visible when not talking
+let browRaise = 1;    // pixels the LEFT brow sits above the right, the quizzical one
+let mouthSkew = 0;    // pixels the resting mouth shifts sideways
+let mouthPurse = 0;   // 0 = full width, 1 = bunched up short and thick
 let gaze = 0;         // -1..1 horizontal pupil offset
 let gazeTarget = 0;
 
@@ -178,7 +181,7 @@ function draw() {
   // asymmetric on purpose; a matched pair reads as surprise instead.
   const browY = 8 - Math.round(lift) + oy;
   const rise = browTilt * 2;
-  brow(EX_L + 1, browY - Math.round(Math.max(0, curve) * 2), EW - 2, rise, 1, fg);
+  brow(EX_L + 1, browY - Math.round(browRaise), EW - 2, rise, 1, fg);
   brow(EX_R + 1, browY, EW - 2, rise, -1, fg);
 
   // Eyes. The upper lid comes down and the lower edge stays put, which is what
@@ -211,7 +214,11 @@ function draw() {
     // case paints straight through the bottom lip and leaves a stray pixel.
     if (ry >= 4) ellipse(32, 34 + oy + ry * 0.15, rx * 0.5, ry * 0.35, bg);
   } else {
-    restMouth(32, 34 + oy, 17, curve, fg);
+    // Pursing shortens the mouth AND thickens it, which is what "bunched up to
+    // one side" actually looks like: a narrower line is just a smaller mouth.
+    const restW = Math.round(17 - mouthPurse * 7);
+    const restT = 2 + Math.round(mouthPurse);
+    restMouth(32 + Math.round(mouthSkew), 34 + oy, restW, curve, restT, fg);
   }
 }
 // #endregion
@@ -238,15 +245,20 @@ function frameAt(ms) {
 // `ease` per mood on purpose: anger arrives fast and settles slowly, which is
 // what makes a flash of it read as a reaction rather than a mood swing.
 const MOODS = {
-  idle:     { lid: 0.42, browTilt: -0.70, curve:  1.0, gazeAmp: 1.00, ease: 0.05 },
-  speaking: { lid: 0.05, browTilt: -0.20, curve:  0.0, gazeAmp: 0.45, ease: 0.07 },
-  thinking: { lid: 0.55, browTilt:  0.75, curve:  0.2, gazeAmp: 0.80, ease: 0.05 },
-  annoyed:  { lid: 0.30, browTilt:  1.00, curve: -0.5, gazeAmp: 0.30, ease: 0.14 },
-  angry:    { lid: 0.10, browTilt:  1.45, curve: -1.0, gazeAmp: 0.15, ease: 0.22 },
+  //          eyelid  brow shape   mouth curve  brow raise  mouth skew  gaze   ease
+  idle:     { lid: 0.42, browTilt: -0.70, curve:  1.00, browRaise: 1.0, mouthSkew:  0.0, mouthPurse: 0.00, gazeAmp: 1.00, ease: 0.05 },
+  speaking: { lid: 0.05, browTilt: -0.20, curve:  0.00, browRaise: 0.5, mouthSkew:  0.0, mouthPurse: 0.00, gazeAmp: 0.45, ease: 0.07 },
+  // Thinking gets its OWN vocabulary rather than a milder scowl. Dropping both
+  // inner brow ends is the same gesture as anger, just less of it, so it read as
+  // annoyance. One brow well up and the lips slanted and pushed off centre is
+  // what actually reads as working something out.
+  thinking: { lid: 0.34, browTilt: -0.15, curve:  0.80, browRaise: 3.0, mouthSkew: -4.0, mouthPurse: 1.00, gazeAmp: 0.80, ease: 0.07 },
+  annoyed:  { lid: 0.30, browTilt:  1.00, curve: -0.50, browRaise: 0.0, mouthSkew:  0.0, mouthPurse: 0.25, gazeAmp: 0.30, ease: 0.14 },
+  angry:    { lid: 0.10, browTilt:  1.45, curve: -1.00, browRaise: 0.0, mouthSkew:  0.0, mouthPurse: 0.00, gazeAmp: 0.15, ease: 0.22 },
   // Smugger than idle, which is already smug: the eyes narrow further rather
   // than widening, because a delighted squint is what separates "pleased with
   // myself" from merely "awake".
-  pleased:  { lid: 0.62, browTilt: -1.15, curve:  1.0, gazeAmp: 0.25, ease: 0.10 },
+  pleased:  { lid: 0.62, browTilt: -1.15, curve:  1.00, browRaise: 1.5, mouthSkew:  0.0, mouthPurse: 0.00, gazeAmp: 0.25, ease: 0.10 },
 };
 const TRANSIENT = new Set(["angry", "annoyed", "pleased"]);
 let mode = "idle";
@@ -288,14 +300,35 @@ function tick() {
   // settle, which is roughly how long a face takes to change its mind.
   const m = MOODS[mode] ?? MOODS.idle;
   const e = m.ease;
+  const curveTarget = mode === "idle" ? restCurve : m.curve;
   lid += (m.lid - lid) * e;
   browTilt += (m.browTilt - browTilt) * e;
-  curve += (m.curve - curve) * e;
+  curve += (curveTarget - curve) * e;
+  browRaise += (m.browRaise - browRaise) * e;
+  mouthSkew += (m.mouthSkew - mouthSkew) * e;
+  mouthPurse += (m.mouthPurse - mouthPurse) * e;
   gaze += (gazeTarget * m.gazeAmp - gaze) * 0.12;
 
   draw();
   requestAnimationFrame(tick);
 }
+
+// The resting mouth wanders between flat and a full smirk, on its own slow
+// timer. A fixed resting expression is most of what makes an idle face look like
+// a still image. Kept small and slow deliberately: a resting face that moves a
+// lot reads as twitchy, not alive. Only idle drifts; a mood means something and
+// should hold its shape.
+let restCurve = 1;
+(function scheduleRest() {
+  const wait = 2600 + Math.random() * 4200;
+  setTimeout(() => {
+    const spots = [0.05, 0.3, 0.65, 1, 1];   // 1 twice: it settles back to smug
+    let next = spots[Math.floor(Math.random() * spots.length)];
+    if (Math.abs(next - restCurve) < 0.2) next = restCurve > 0.5 ? 0.1 : 1;
+    restCurve = next;
+    scheduleRest();
+  }, wait);
+})();
 
 // Saccades, not a sine wave: eyes flick to a new spot and hold it. A smooth
 // oscillation reads as a machine scanning, which is the opposite of relaxed.
