@@ -9,10 +9,19 @@ export const config = {
   username: "Filip96",
   userId: "1267685386142887936",
 
-  // The active league and its draft.
-  leagueId: "1389357604773322752",
-  draftId: "1389357604773322753",
-  rosterId: 3, // Filip's roster in this league ("--dangerously-skip-perms").
+  // The active league and its draft. Env-overridable so the whole coach can be
+  // pointed at the staging league for development. This matters because every
+  // write path (setLineup, add/drop, trades) resolves its URL from here, so
+  // without an override the only place to develop them is the REAL team. There
+  // is no undo in-season: a bad drop is gone the moment someone claims him.
+  //   docker exec -e SLEEPER_LEAGUE_ID=1399830848848592896 \
+  //               -e SLEEPER_DRAFT_ID=1399830849339338752 \
+  //               -e SLEEPER_ROSTER_ID=1 ...
+  // Staging league (created 2026-08-30, exact settings clone of the real one):
+  //   league 1399830848848592896 "coach-staging DO NOT USE", draft 1399830849339338752.
+  leagueId: process.env.SLEEPER_LEAGUE_ID ?? "1389357604773322752",
+  draftId: process.env.SLEEPER_DRAFT_ID ?? "1389357604773322753",
+  rosterId: Number(process.env.SLEEPER_ROSTER_ID ?? "3"), // Filip's roster ("--dangerously-skip-perms")
 
   // Last season's league, kept linked by Sleeper. Used to learn manager
   // tendencies and inform keeper analysis.
@@ -55,6 +64,14 @@ export const vonaConfig = {
   // never a reason to pass on a clearly better player. 0 disables it.
   byeEps: Number(process.env.VONA_BYE_EPS ?? "3"),
 } as const;
+
+// Say out loud which league we are pointed at whenever an override is in play.
+// Silence here is how a "staging" test ends up writing to the real team.
+export const REAL_LEAGUE_ID = "1389357604773322752";
+export const isStagingTarget = config.leagueId !== REAL_LEAGUE_ID;
+if (isStagingTarget) {
+  console.log(`[config] STAGING TARGET: league ${config.leagueId}, draft ${config.draftId}, roster ${config.rosterId} (NOT the real league)`);
+}
 
 // The read-only public Sleeper API. No auth token: it cannot write anything.
 export const SLEEPER_API = "https://api.sleeper.app/v1";

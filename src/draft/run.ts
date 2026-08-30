@@ -557,7 +557,11 @@ for (;;) {
           }
         }
         if (planRank > 1) {
-          console.log(`[draft-run] agent call: ${pick.name} (VONA rank ${planRank} of ${eligible.length}, top was ${vonaTop.name}, VONA -${(vonaTop.vona - pick.vona).toFixed(1)} VOR -${(vonaTop.vor - pick.vor).toFixed(1)})`);
+          // Sign these properly: the gap can be NEGATIVE when the agent's pick has
+          // higher raw VOR than the VONA top, which reordering by survival makes
+          // perfectly possible. A hardcoded minus printed "VOR --1.0".
+          const gap = (n: number): string => `${n >= 0 ? "-" : "+"}${Math.abs(n).toFixed(1)}`;
+          console.log(`[draft-run] agent call: ${pick.name} (VONA rank ${planRank} of ${eligible.length}, top was ${vonaTop.name}, VONA ${gap(vonaTop.vona - pick.vona)} VOR ${gap(vonaTop.vor - pick.vor)})`);
           logEvent("coach", "agent-override", `Agent took ${pick.name} over the value board's ${vonaTop.name}.`, {
             picked: pick.name, vonaTop: vonaTop.name, vonaRank: planRank,
             vonaGap: Math.round((vonaTop.vona - pick.vona) * 10) / 10,

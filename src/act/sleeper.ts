@@ -258,12 +258,109 @@ export async function setQueue(page: Page, playerNames: string[]): Promise<void>
 
 // Set this week's starting lineup. `starters` is an ordered list of player ids
 // matching the league's roster slots.
-export async function setLineup(page: Page, starters: string[]): Promise<void> {
-  await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(2000);
-  await screenshot(page, "lineup-before");
-  throw new Error(`setLineup: selectors pending Phase C (${starters.length} starters)`);
+// #region lineup
+// Team page structure, mapped from a real 16-round roster in the staging league
+// on 2026-08-30. Rows are `.team-roster-item` in roster_positions order: the
+// starting slots first (qb, rb, rb, wr, wr, te, flex, flex, k, def), then bn,
+// then ir. The slot is the extra class on `.league-slot-position-square`.
+//
+// Identity comes from the avatar URL (`/players/thumb/<player_id>.jpg`), not the
+// visible name, which is abbreviated to "D Montgomery" and would be ambiguous.
+// Team defences have no thumbnail; Sleeper uses the team abbreviation as the
+// player id and renders it as the name, so fall back to that.
+//
+// The page says "Click on position buttons to update your lineup": clicking one
+// row's position square then another's swaps them. There is NO save step, and
+// the write persists across a reload (verified).
+export interface RosterRow {
+  index: number;
+  slot: string; // qb | rb | wr | te | flex | k | def | bn | ir
+  playerId: string; // "" for an empty IR slot
+  name: string;
 }
+
+const ROW = ".team-roster-item";
+const SQUARE = ".team-roster-item .league-slot-position-square";
+const BENCH_SLOTS = new Set(["bn", "ir"]);
+
+export async function readRoster(page: Page): Promise<RosterRow[]> {
+  return (await page.evaluate(() => {
+    return Array.from(document.querySelectorAll(".team-roster-item")).map((el, index) => {
+      const sq = el.querySelector(".league-slot-position-square");
+      const nm = el.querySelector(".player-name");
+      const name = nm ? (nm.textContent || "").trim() : "";
+      let playerId = "";
+      for (const img of Array.from(el.querySelectorAll("img"))) {
+        const m = (img.getAttribute("src") || "").match(/\/players\/thumb\/(\w+)\./);
+        if (m) { playerId = m[1]!; break; }
+      }
+      const slot = sq && typeof sq.className === "string"
+        ? sq.className.replace("league-slot-position-square", "").trim()
+        : "";
+      // Team defence: no thumbnail, and the abbreviation IS the player id.
+      if (!playerId && slot === "def" && /^[A-Z]{2,4}$/.test(name)) playerId = name;
+      return { index, slot, playerId, name };
+    });
+  })) as RosterRow[];
+}
+
+async function openTeamPage(page: Page): Promise<RosterRow[]> {
+  await page.goto(`${leagueUrl()}/team`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(ROW, { timeout: 20000 });
+  await page.waitForTimeout(1500); // let the rows finish populating
+  return readRoster(page);
+}
+
+// Set the starting lineup. `starters` is a list of Sleeper player ids in
+// STARTING SLOT ORDER, matching the league's roster_positions (so for this
+// league: QB, RB, RB, WR, WR, TE, FLEX, FLEX, K, DEF).
+//
+// Never trust the write: Sleeper's rosters API is heavily cached and still
+// served a stale `starters` array minutes after a confirmed change, so
+// verification reloads the page and re-reads the DOM instead.
+export async function setLineup(page: Page, starters: string[]): Promise<void> {
+  let rows = await openTeamPage(page);
+  await screenshot(page, "lineup-before");
+
+  const startingCount = rows.filter((r) => !BENCH_SLOTS.has(r.slot)).length;
+  if (starters.length !== startingCount) {
+    throw new Error(`setLineup: got ${starters.length} starters, the league has ${startingCount} starting slots`);
+  }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const wrong: number[] = [];
+    for (let i = 0; i < starters.length; i++) {
+      if (rows[i]?.playerId !== starters[i]) wrong.push(i);
+    }
+    if (wrong.length === 0) break;
+
+    for (const i of wrong) {
+      const want = starters[i]!;
+      const from = rows.findIndex((r) => r.playerId === want);
+      if (from < 0) throw new Error(`setLineup: ${want} is not on the roster`);
+      if (from === i) continue;
+      await page.locator(SQUARE).nth(i).click({ timeout: 8000 });
+      await page.waitForTimeout(400);
+      await page.locator(SQUARE).nth(from).click({ timeout: 8000 });
+      await page.waitForTimeout(700);
+      rows = await readRoster(page); // positions shift after each swap
+    }
+    rows = await openTeamPage(page); // reload so the next pass sees persisted truth
+  }
+
+  // Final verification against a fresh load. A silently-refused swap (an
+  // ineligible position, say) has to fail loudly rather than look applied.
+  rows = await openTeamPage(page);
+  await screenshot(page, "lineup-after");
+  const got = rows.slice(0, starters.length).map((r) => r.playerId);
+  const mismatch = got.findIndex((id, i) => id !== starters[i]);
+  if (mismatch >= 0) {
+    throw new Error(
+      `setLineup: slot ${mismatch} (${rows[mismatch]?.slot}) is ${got[mismatch] || "empty"}, wanted ${starters[mismatch]}. Full lineup: ${got.join(",")}`,
+    );
+  }
+}
+// #endregion
 
 // Accept or reject a pending trade by its Sleeper transaction id.
 export async function respondTrade(page: Page, transactionId: string, decision: "accept" | "reject"): Promise<void> {
