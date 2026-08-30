@@ -74,6 +74,55 @@ daemon's agent should defer to. It only reads; it never accepts, rejects or send
 4. Only then set `TRADE_WRITE_ARMED=1`, and separately `TRADES_ENABLED=1`, to go
    live. Every write still verifies by DOM read-back and refuses on ambiguity.
 
+## What `captureTradeDom` needs to see to finish the selectors
+
+Run one command per path. Each dump already includes a 60KB `mainHtml` catch-all,
+so even if my named selectors miss, the raw markup is there to work from.
+
+**respondTrade (the priority path — this is what the daemon watches).** Capture
+with a real PENDING INCOMING offer on screen:
+
+    act trade-capture <realLeagueId> incoming-offer.json
+
+From that one file, to finish `respondTrade` we need to read off:
+- the selector for the container that wraps a SINGLE pending offer (replaces the
+  `pendingOfferCount` heuristic that currently scans `[class*='trade']`), so we
+  can scope to one offer and count reliably;
+- the Accept and Reject/Decline controls: exact class/role and text, and whether
+  they sit inside that per-offer container;
+- whether the transaction id is exposed anywhere in the DOM (a `data-*` on the
+  offer block). If it is, we can target a specific offer by id instead of
+  refusing whenever more than one is pending — a real upgrade over the current
+  one-offer-only rule;
+- whether a confirmation dialog appears after the click, and its confirm
+  button's selector/text;
+- what the offer block looks like once actioned (for the read-back that confirms
+  it is gone).
+
+**sendTrade (the propose flow).** `captureTradeDom` only navigates and dumps; it
+does NOT open the modal. So open the propose flow in the noVNC browser and select
+a partner FIRST, then capture:
+
+    act trade-capture <realLeagueId> propose-open.json
+
+From that file we need:
+- the "Propose trade" entry control (selector/text) that opens the flow;
+- inside `.propose-trade-partners`, how partners are listed and clicked, and
+  whether roster_id or team name is exposed as an attribute for an unambiguous
+  pick;
+- confirmation that `.trade-partner-roster-item.is-owner` is our column and the
+  other item is theirs;
+- the internal structure of `.trade-center-player-box`: where the abbreviated
+  name, position and team actually live (current `readTradeCards` assumes
+  `.player-name` and `.position` — confirm), what you click to ADD a card to the
+  trade (the card, or a +/toggle inside it), and the added/selected state class;
+- the Send/Propose/Review button (selector/text) and any confirm step;
+- the pending OUTGOING offer block after sending (for read-back — same block
+  respondTrade needs).
+
+Hand a future session either JSON file plus this list and it can finish the path
+with no second trip to the live UI.
+
 ## Known limitation
 
 `points` in the live bridge is the full-season projection used as a
