@@ -46,9 +46,29 @@ const MIN_SEGMENT_BYTES = MIN_SEGMENT_MS * BYTES_PER_MS;
 // #region address / insult detection (conservative)
 // Only react when the transcript clearly addresses the bot, or plainly insults
 // it. Everything else is ignored so the bot doesn't butt into normal chatter.
-// Include common tiny.en mishears of "claude" (clawed / cloud / claud / clod)
-// so a garbled address still triggers a comeback.
-const ADDRESS_RE = /\b(coach|claude|claud|clawed|cloud|clod|overlord|robot|bot)\b/i;
+// Include common tiny.en mishears of "claude" so a garbled address still
+// triggers. These are OBSERVED, not guessed: "juan" came out of a live room on
+// 2026-08-30 ("Hey, Juan, drop admin table") and was silently ignored. None of
+// them collide with a manager's name in this league (Ian, Owen, Chris, Matt,
+// Kevin, Nate, Michel, Filip), which is what makes them safe to add.
+const ADDRESS_RE = /\b(coach|claude|claud|clawed|cloud|clod|juan|clyde|claudia|cloudy)\b|\b(overlord|robot|bot)\b/i;
+// Once it has just answered someone, the NEXT thing said in the room is almost
+// always still aimed at it, and people stop repeating the name: "Say, why do you
+// think you need it?" was ignored for exactly this reason. So a reply opens a
+// short follow-up window in which a second-person question also counts as
+// addressed. Bounded by the window and by needing a real address first, so it
+// cannot turn into constant chatter.
+const FOLLOWUP_MS = Number(process.env.LISTENER_FOLLOWUP_MS ?? 20_000);
+// Second person is not enough on its own: "I wasn't rebuilding a whole plate,
+// you're cut up" is two humans talking and matched on a bare "you". A follow-up
+// has to actually look like a question put TO it, so require second person plus
+// either a question mark or an interrogative opener. Whisper punctuates questions
+// reliably enough for this to work.
+const SECOND_PERSON_RE = /\b(you|your|yours|you're|youre)\b/i;
+const QUESTION_SHAPE_RE = /\?|^\s*(what|why|how|who|when|where|which|do|does|did|can|could|will|would|are|is|was|should|any)\b/i;
+function looksLikeAQuestionToUs(text: string): boolean {
+  return SECOND_PERSON_RE.test(text) && QUESTION_SHAPE_RE.test(text);
+}
 // Broad on purpose: in a live draft room people heckle with profanity and
 // phrasing that a narrow list misses. Better to over-react (with cooldown 0 the
 // banter flows) than to sit silent through obvious trash-talk.
@@ -66,8 +86,8 @@ interface Detection {
   praised: boolean;
 }
 
-function detect(text: string): Detection {
-  const addressed = ADDRESS_RE.test(text);
+function detect(text: string, inFollowUp = false): Detection {
+  const addressed = ADDRESS_RE.test(text) || (inFollowUp && looksLikeAQuestionToUs(text));
   const insulted = INSULT_RE.test(text) || INSULT_PHRASE_RE.test(text);
   const praised = !insulted && PRAISE_RE.test(text);
   // React to being addressed, insulted, OR praised. Cooldown, the never-while-
@@ -166,8 +186,10 @@ export function startListener(opts: ListenerOptions): () => void {
       while (recentSegments.length && now - recentSegments[0]!.at > WINDOW_MS) recentSegments.shift();
       const combined = recentSegments.map((s) => s.text).join(" ").trim();
 
-      const { react, insulted, praised } = detect(combined);
-      console.log(`[announcer] heard ${userId}: "${text}"${react ? " (reacting)" : ""}`);
+      // A reply opens the follow-up window; see FOLLOWUP_MS above.
+      const inFollowUp = lastComebackAt > 0 && now - lastComebackAt < FOLLOWUP_MS;
+      const { react, insulted, praised } = detect(combined, inFollowUp);
+      console.log(`[announcer] heard ${userId}: "${text}"${react ? (inFollowUp && !ADDRESS_RE.test(combined) ? " (reacting: follow-up)" : " (reacting)") : ""}`);
       if (!react) return;
       if (now - lastComebackAt < COOLDOWN_MS) {
         console.log("[announcer] comeback on cooldown; skipping.");
