@@ -8,7 +8,7 @@
 import { launchContext, firstPage } from "./browser.ts";
 import {
   leagueUrl, isLoggedIn, authState, isOnClock, liveAvailable, draftedCells, domFacts, screenshot,
-  makePick, setQueue, reactToPick, setLineup, respondTrade, sendTrade, importSession,
+  makePick, setQueue, reactToPick, setLineup, readRoster, respondTrade, sendTrade, importSession,
 } from "./sleeper.ts";
 
 const PORT = Number(process.env.BROWSER_API_PORT ?? 9223);
@@ -115,7 +115,12 @@ Bun.serve({
         case "/react":
           return Response.json({ ok: await run(() => reactToPick(page, str(b.player), str(b.emoji, "crying"))) });
         case "/lineup":
-          await run(() => setLineup(page, (b.ids as string[]) ?? [])); return Response.json({ ok: true });
+          // leagueId is optional and defaults to the configured league; pass it
+          // explicitly to drive the staging league without restarting this server.
+          await run(() => setLineup(page, (b.ids as string[]) ?? [], b.leagueId ? str(b.leagueId) : undefined));
+          return Response.json({ ok: true });
+        case "/roster":
+          return Response.json({ rows: await run(() => readRoster(page)) });
         case "/trade-respond":
           await run(() => respondTrade(page, str(b.txid), b.decision === "accept" ? "accept" : "reject")); return Response.json({ ok: true });
         case "/trade-send":

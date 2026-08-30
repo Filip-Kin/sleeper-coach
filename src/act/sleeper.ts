@@ -304,8 +304,9 @@ export async function readRoster(page: Page): Promise<RosterRow[]> {
   })) as RosterRow[];
 }
 
-async function openTeamPage(page: Page): Promise<RosterRow[]> {
-  await page.goto(`${leagueUrl()}/team`, { waitUntil: "domcontentloaded" });
+async function openTeamPage(page: Page, leagueId?: string): Promise<RosterRow[]> {
+  const url = leagueId ? `${SLEEPER}/leagues/${leagueId}` : leagueUrl();
+  await page.goto(`${url}/team`, { waitUntil: "domcontentloaded" });
   await page.waitForSelector(ROW, { timeout: 20000 });
   await page.waitForTimeout(1500); // let the rows finish populating
   return readRoster(page);
@@ -318,8 +319,11 @@ async function openTeamPage(page: Page): Promise<RosterRow[]> {
 // Never trust the write: Sleeper's rosters API is heavily cached and still
 // served a stale `starters` array minutes after a confirmed change, so
 // verification reloads the page and re-reads the DOM instead.
-export async function setLineup(page: Page, starters: string[]): Promise<void> {
-  let rows = await openTeamPage(page);
+// `leagueId` is explicit on purpose. A write path should never quietly resolve
+// its own target from ambient config: that is how a staging test ends up
+// rearranging the real team. Callers say which league they mean.
+export async function setLineup(page: Page, starters: string[], leagueId?: string): Promise<void> {
+  let rows = await openTeamPage(page, leagueId);
   await screenshot(page, "lineup-before");
 
   const startingCount = rows.filter((r) => !BENCH_SLOTS.has(r.slot)).length;
@@ -345,12 +349,12 @@ export async function setLineup(page: Page, starters: string[]): Promise<void> {
       await page.waitForTimeout(700);
       rows = await readRoster(page); // positions shift after each swap
     }
-    rows = await openTeamPage(page); // reload so the next pass sees persisted truth
+    rows = await openTeamPage(page, leagueId); // reload so the next pass sees persisted truth
   }
 
   // Final verification against a fresh load. A silently-refused swap (an
   // ineligible position, say) has to fail loudly rather than look applied.
-  rows = await openTeamPage(page);
+  rows = await openTeamPage(page, leagueId);
   await screenshot(page, "lineup-after");
   const got = rows.slice(0, starters.length).map((r) => r.playerId);
   const mismatch = got.findIndex((id, i) => id !== starters[i]);
