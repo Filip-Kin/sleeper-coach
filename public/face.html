@@ -122,16 +122,27 @@ function brow(x, y, w, rise, dir, colour) {
   }
 }
 
-// A closed mouth with an attitude. One end lifted in whole pixels, with a short
-// tick above the raised end so it reads as a curve rather than a staircase.
-function smirkLine(cxp, cy, w, amt, colour) {
-  const rise = Math.round(amt * 2);
+// The closed mouth, as a signed curve. Positive is a smirk: one end lifted in
+// whole pixels with a tick above it, so it reads as a curve and not a staircase.
+// Negative is a frown, which has to be symmetric with the middle raised, because
+// an asymmetric frown reads as a smirk pointing the other way rather than as
+// displeasure.
+function restMouth(cxp, cy, w, curve, colour) {
   const seg = Math.round(w / 3);
   const x0 = cxp - Math.round(w / 2);
-  px(x0, cy, seg, 2, colour);
-  px(x0 + seg, cy - Math.min(1, rise), seg, 2, colour);
-  px(x0 + 2 * seg, cy - rise, seg, 2, colour);
-  if (rise > 0) px(x0 + 3 * seg - 1, cy - rise - 1, 2, 1, colour);
+  if (curve >= 0) {
+    const rise = Math.round(curve * 2);
+    px(x0, cy, seg, 2, colour);
+    px(x0 + seg, cy - Math.min(1, rise), seg, 2, colour);
+    px(x0 + 2 * seg, cy - rise, seg, 2, colour);
+    if (rise > 0) px(x0 + 3 * seg - 1, cy - rise - 1, 2, 1, colour);
+  } else {
+    const arch = Math.round(-curve * 2);
+    px(x0, cy, seg, 2, colour);
+    px(x0 + seg, cy - arch, seg, 2, colour);
+    px(x0 + 2 * seg, cy, seg, 2, colour);
+    if (arch > 1) { px(x0 + seg - 1, cy - arch + 1, 1, arch, colour); px(x0 + 2 * seg, cy - arch + 1, 1, arch, colour); }
+  }
 }
 
 let blink = 0;          // 0..1, 1 = fully shut
@@ -143,7 +154,7 @@ let bob = 0;
 // looks like a bug and an expression that eases looks like a decision.
 let lid = 0.42;       // 0 = wide open, 1 = fully hooded
 let browTilt = -0.7;  // negative lifts the inner ends (smug), positive drops them
-let smirk = 1;        // 0..1, only visible when the mouth is not talking
+let curve = 1;        // -1 frown .. +1 smirk, only visible when not talking
 let gaze = 0;         // -1..1 horizontal pupil offset
 let gazeTarget = 0;
 
@@ -165,7 +176,7 @@ function draw() {
   // asymmetric on purpose; a matched pair reads as surprise instead.
   const browY = 8 - Math.round(lift) + oy;
   const rise = browTilt * 2;
-  brow(EX_L + 1, browY - Math.round(smirk * 2), EW - 2, rise, 1, fg);
+  brow(EX_L + 1, browY - Math.round(Math.max(0, curve) * 2), EW - 2, rise, 1, fg);
   brow(EX_R + 1, browY, EW - 2, rise, -1, fg);
 
   // Eyes. The upper lid comes down and the lower edge stays put, which is what
@@ -198,7 +209,7 @@ function draw() {
     // case paints straight through the bottom lip and leaves a stray pixel.
     if (ry >= 4) ellipse(32, 34 + oy + ry * 0.15, rx * 0.5, ry * 0.35, bg);
   } else {
-    smirkLine(32, 34 + oy, 17, smirk, fg);
+    restMouth(32, 34 + oy, 17, curve, fg);
   }
 }
 // #endregion
@@ -222,12 +233,17 @@ function frameAt(ms) {
 // smirk. It is a draft bot that thinks it has already won, and the resting face
 // is the only place that comes across, since the mouth is busy the rest of the
 // time.
+// `ease` per mood on purpose: anger arrives fast and settles slowly, which is
+// what makes a flash of it read as a reaction rather than a mood swing.
 const MOODS = {
-  idle:     { lid: 0.42, browTilt: -0.70, smirk: 1.0, gazeAmp: 1.00 },
-  speaking: { lid: 0.05, browTilt: -0.20, smirk: 0.0, gazeAmp: 0.45 },
-  thinking: { lid: 0.55, browTilt:  0.75, smirk: 0.2, gazeAmp: 0.80 },
+  idle:     { lid: 0.42, browTilt: -0.70, curve:  1.0, gazeAmp: 1.00, ease: 0.05 },
+  speaking: { lid: 0.05, browTilt: -0.20, curve:  0.0, gazeAmp: 0.45, ease: 0.07 },
+  thinking: { lid: 0.55, browTilt:  0.75, curve:  0.2, gazeAmp: 0.80, ease: 0.05 },
+  annoyed:  { lid: 0.30, browTilt:  1.00, curve: -0.5, gazeAmp: 0.30, ease: 0.14 },
+  angry:    { lid: 0.10, browTilt:  1.45, curve: -1.0, gazeAmp: 0.15, ease: 0.22 },
 };
 let mode = "idle";
+let moodTimer = null;
 
 function tick() {
   bob += 0.02;
@@ -247,9 +263,10 @@ function tick() {
   // Expressions ease far more slowly than the mouth. 0.05 is about a second to
   // settle, which is roughly how long a face takes to change its mind.
   const m = MOODS[mode] ?? MOODS.idle;
-  lid += (m.lid - lid) * 0.05;
-  browTilt += (m.browTilt - browTilt) * 0.05;
-  smirk += (m.smirk - smirk) * 0.05;
+  const e = m.ease;
+  lid += (m.lid - lid) * e;
+  browTilt += (m.browTilt - browTilt) * e;
+  curve += (m.curve - curve) * e;
   gaze += (gazeTarget * m.gazeAmp - gaze) * 0.12;
 
   draw();
@@ -308,7 +325,16 @@ function connect() {
     try {
       const d = JSON.parse(e.data);
       if (d.state === "thinking") { mode = "thinking"; $("cap").textContent = d.detail || "thinking"; $("cap").classList.add("empty"); }
-      if (d.state === "idle" && !tl) mode = "idle";
+      if (d.state === "angry" || d.state === "annoyed") {
+        // Never override a line being spoken: the mouth is the priority and a
+        // scowl mid-sentence would break the lip sync's read.
+        if (!tl) mode = d.state;
+        $("cap").textContent = d.detail || "";
+        $("cap").classList.add("empty");
+        clearTimeout(moodTimer);
+        moodTimer = setTimeout(() => { if (!tl) mode = "idle"; }, d.state === "angry" ? 7000 : 5000);
+      }
+      if (d.state === "idle" && !tl) { clearTimeout(moodTimer); mode = "idle"; }
     } catch (err) { console.error(err); }
   });
   es.onerror = () => { /* EventSource reconnects on its own; nothing to do */ };

@@ -186,7 +186,19 @@ function handleEvent(ev: ActivityEvent): void {
     return;
   }
 
-  // Other event types (troll, plan, etc.) are intentionally ignored for now.
+  // A rival just took someone we wanted. The draft engine already distinguishes
+  // how much it stings (crying for a top-three target, shock for top-eight), so
+  // reuse that rather than inventing a second scale. Face only: it must NOT say
+  // anything, because a line for every sniped pick would have it talking through
+  // the whole draft.
+  if (ev.type === "troll") {
+    const detail = (ev.detail ?? {}) as { player?: unknown; emoji?: unknown };
+    const player = str(detail.player);
+    publishState(detail.emoji === "crying" ? "angry" : "annoyed", player ? `${player} taken` : "one of mine gone");
+    return;
+  }
+
+  // Other event types (plan, etc.) are intentionally ignored for now.
 }
 // #endregion
 
