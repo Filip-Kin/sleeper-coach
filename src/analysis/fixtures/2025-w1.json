@@ -1,0 +1,160 @@
+{
+  "season": "2025",
+  "week": 1,
+  "leagueId": "1267682977899364352",
+  "rosterId": 3,
+  "slots": [
+    "QB",
+    "RB",
+    "RB",
+    "WR",
+    "WR",
+    "TE",
+    "FLEX",
+    "FLEX",
+    "K",
+    "DEF"
+  ],
+  "players": [
+    {
+      "playerId": "10859",
+      "name": "Sam LaPorta",
+      "position": "TE",
+      "projPoints": 10.67,
+      "actualPoints": 13.9,
+      "injuryStatus": "Questionable"
+    },
+    {
+      "playerId": "11539",
+      "name": "Jake Bates",
+      "position": "K",
+      "projPoints": 7.93,
+      "actualPoints": 7,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "11631",
+      "name": "Brian Thomas",
+      "position": "WR",
+      "projPoints": 17.17,
+      "actualPoints": 9,
+      "injuryStatus": "Questionable"
+    },
+    {
+      "playerId": "11638",
+      "name": "Ricky Pearsall",
+      "position": "WR",
+      "projPoints": 12.5,
+      "actualPoints": 14.8,
+      "injuryStatus": "IR"
+    },
+    {
+      "playerId": "12504",
+      "name": "Kaleb Johnson",
+      "position": "RB",
+      "projPoints": 7.73,
+      "actualPoints": -0.2,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "12507",
+      "name": "Omarion Hampton",
+      "position": "RB",
+      "projPoints": 14.45,
+      "actualPoints": 8.1,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "4046",
+      "name": "Patrick Mahomes",
+      "position": "QB",
+      "projPoints": 19.08,
+      "actualPoints": 26.02,
+      "injuryStatus": "Questionable"
+    },
+    {
+      "playerId": "6904",
+      "name": "Jalen Hurts",
+      "position": "QB",
+      "projPoints": 22.69,
+      "actualPoints": 24.28,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "8112",
+      "name": "Drake London",
+      "position": "WR",
+      "projPoints": 17.61,
+      "actualPoints": 13.5,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "8137",
+      "name": "George Pickens",
+      "position": "WR",
+      "projPoints": 13.15,
+      "actualPoints": 6,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "8144",
+      "name": "Chris Olave",
+      "position": "WR",
+      "projPoints": 13.48,
+      "actualPoints": 12.4,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "8151",
+      "name": "Kenneth Walker",
+      "position": "RB",
+      "projPoints": 12.75,
+      "actualPoints": 5.4,
+      "injuryStatus": "Questionable"
+    },
+    {
+      "playerId": "9221",
+      "name": "Jahmyr Gibbs",
+      "position": "RB",
+      "projPoints": 19.02,
+      "actualPoints": 15,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "9480",
+      "name": "Brenton Strange",
+      "position": "TE",
+      "projPoints": 8.07,
+      "actualPoints": 9.9,
+      "injuryStatus": null
+    },
+    {
+      "playerId": "9484",
+      "name": "Tucker Kraft",
+      "position": "TE",
+      "projPoints": 9.43,
+      "actualPoints": 9.9,
+      "injuryStatus": "Questionable"
+    },
+    {
+      "playerId": "PHI",
+      "name": "Philadelphia Eagles",
+      "position": "DEF",
+      "projPoints": 8.95,
+      "actualPoints": 4,
+      "injuryStatus": null
+    }
+  ],
+  "actualStarters": [
+    "6904",
+    "9221",
+    "12507",
+    "11631",
+    "8112",
+    "10859",
+    "8151",
+    "8144",
+    "11539",
+    "PHI"
+  ]
+}
