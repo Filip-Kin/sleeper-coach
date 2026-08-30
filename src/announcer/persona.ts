@@ -108,24 +108,48 @@ export async function announceComebackLine(ctx: ComebackContext): Promise<string
     ? `Their name is ${ctx.speaker}. Address ${ctx.speaker} BY NAME.`
     : "You do not know which human said it (the whole room shares one mic), so do NOT use any name or guess one. " +
       "Address the room generically, like 'whoever said that', 'one of you', or 'humans'.";
+  // A mic check is not trash talk. Someone WILL say hello to confirm the listener
+  // is alive, and answering that with "whoever just fumbled that greeting" is
+  // both unpleasant and useless as feedback, because it does not tell them
+  // whether it actually heard the words. Greetings get a warm reply that confirms
+  // it heard them, and the licence to be crude further down is scoped to people
+  // who actually started something.
+  const isGreeting =
+    !ctx.insulted &&
+    /\b(hello+|hi|hey+|yo|sup|good (morning|afternoon|evening)|you (there|up|awake)|are you (there|listening|awake|on|alive|working)|can you hear|do you hear|mic check|check check|testing|test test|sound check)\b/i.test(
+      ctx.said,
+    );
+
   const tone = ctx.insulted
     ? "just trash-talked you"
     : ctx.praised
       ? "just complimented you"
-      : "just spoke to you";
+      : isGreeting
+        ? "just said hello, most likely checking that you can actually hear them"
+        : "just spoke to you";
   const instruction = ctx.insulted
     ? "Fire back with ONE short, cutting comeback that reacts to the SPECIFIC thing said."
     : ctx.praised
-      ? "Accept the praise with ONE short line — but be arrogant about it: you EXPECTED to be praised, correct opinions " +
+      ? "Accept the praise with ONE short line, but be arrogant about it: you EXPECTED to be praised, correct opinions " +
         "are the rational response to your brilliance. Gracious in the most superior way possible."
-      : "Reply with ONE short, cocky line acknowledging them.";
+      : isGreeting
+        ? "Say hello back in ONE short line, and make it clear you heard them (repeat or refer to what they actually " +
+          "said, so it doubles as a working mic check). You are relaxed and completely unworried, because you are " +
+          "going to win and you know it. Warm, amused, faintly patronising at most. Do NOT insult them."
+        : "Reply with ONE short, cocky line acknowledging them.";
+  // Scoped deliberately. This used to apply to every branch, so saying hello got
+  // the same treatment as calling the bot names.
+  const licence = ctx.insulted
+    ? 'You can be crude, mean, and personal, and blunt name-calling like "clown" or "donkey" is fair game, ' +
+      "just never bigoted, hateful, or slur-based. "
+    : "No insults and no name-calling here: you are supremely confident, not hostile. ";
   const board = ctx.context ? ` Draft board so far (use it for accurate, pick-specific jabs if relevant): ${ctx.context}` : "";
   const prompt =
     `A human in the voice channel ${tone}. ${who} This is what the microphone heard: "${ctx.said}".${board} ` +
-    `${instruction} Stay in your cocky AI-overlord voice. You can be crude, mean, and personal — blunt name-calling ` +
-    `like "fatass", "clown", or "donkey" is fair game — just never bigoted, hateful, or slur-based. One or two short ` +
-    "spoken sentences, completely fresh wording. Output ONLY the spoken line.";
+    `${instruction} Stay in your cocky AI-overlord voice. ${licence}One or two short ` +
+    "spoken sentences, completely fresh wording. Never use em dashes. Output ONLY the spoken line.";
   if (ctx.praised) return (await compose(prompt)) ?? fallbackPraise(named ? ctx.speaker : "");
+  if (isGreeting) return (await compose(prompt)) ?? fallbackGreeting(named ? ctx.speaker : "");
   return (await compose(prompt)) ?? (named ? fallbackComeback(ctx.speaker) : fallbackComebackAnon());
 }
 
@@ -225,6 +249,18 @@ function fallbackPraise(who: string): string {
 }
 
 // Room-feed fallback: we can't know who spoke, so address the room, no names.
+function fallbackGreeting(who: string): string {
+  const tag = who ? `${who}, ` : "";
+  const options = [
+    `${tag}I hear you. Loud, clear, and already losing.`,
+    `Hello ${who || "humans"}. Microphone works, and so does my draft board.`,
+    `${tag}yes, I can hear you. Relax, I have got this handled.`,
+    `Loud and clear${who ? `, ${who}` : ""}. Go and get comfortable, this will not take long.`,
+    `${tag}receiving you. Feel free to keep talking, it does not change the projections.`,
+    `Hello. Yes, the ears work. Enjoy the draft, such as it will be for you.`,
+  ];
+  return pickNoRepeat("greeting", options.map((o) => o.replace(/\s+,/g, ",")));
+}
 function fallbackComebackAnon(): string {
   const options = [
     "Whoever said that, I have already simulated the season and your team does not make the playoffs.",

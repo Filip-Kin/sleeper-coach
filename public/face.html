@@ -40,7 +40,9 @@
     line-height:1.45;letter-spacing:.01em;opacity:.9}
   #cap.empty{opacity:.35}
   #ctl{display:flex;gap:14px;align-items:center;font-size:11px;letter-spacing:.1em;
-    text-transform:uppercase;opacity:.5}
+    text-transform:uppercase;opacity:.5;transition:opacity .5s ease}
+  #ctl.dim{opacity:0}
+  #ctl.dim:hover{opacity:.85}
   #ctl button{font:inherit;letter-spacing:.1em;text-transform:uppercase;background:transparent;
     color:var(--text);border:1px solid currentColor;border-radius:4px;padding:5px 10px;cursor:pointer;opacity:.8}
   #ctl button:hover{opacity:1;border-color:var(--clay);color:var(--clay)}
@@ -95,7 +97,7 @@ function ellipse(cxp, cyp, rx, ry, colour) {
   // A shut mouth still has to be a line. Below about one pixel of radius every
   // row of the ellipse rounds outside the shape and nothing at all gets drawn,
   // which reads as a face with no mouth rather than a closed one.
-  if (ry < 1) { px(cxp - rx, cyp, Math.max(2, rx * 2), 1, colour); return; }
+  if (ry < 1) { px(cxp - rx, cyp, Math.max(2, rx * 2), 2, colour); return; }
   cx.fillStyle = colour;
   const top = Math.round(cyp - ry), bot = Math.round(cyp + ry);
   for (let y = top; y <= bot; y++) {
@@ -107,12 +109,46 @@ function ellipse(cxp, cyp, rx, ry, colour) {
   }
 }
 
+// A stepped bar, because a three-pixel brow cannot be rotated: at this
+// resolution the angle has to be built out of whole pixels. `rise` is signed
+// toward the face centre and `dir` says which end is the inner one, so one value
+// produces a mirrored pair instead of two parallel brows. Negative rise lifts
+// the inner ends, which is the smug read; positive drops them, which is focus.
+function brow(x, y, w, rise, dir, colour) {
+  const seg = Math.ceil(w / 3);
+  for (let i = 0; i < 3; i++) {
+    const k = dir > 0 ? i - 1 : 1 - i;
+    px(x + i * seg, y + Math.round(k * rise), Math.min(seg, w - i * seg), 3, colour);
+  }
+}
+
+// A closed mouth with an attitude. One end lifted in whole pixels, with a short
+// tick above the raised end so it reads as a curve rather than a staircase.
+function smirkLine(cxp, cy, w, amt, colour) {
+  const rise = Math.round(amt * 2);
+  const seg = Math.round(w / 3);
+  const x0 = cxp - Math.round(w / 2);
+  px(x0, cy, seg, 2, colour);
+  px(x0 + seg, cy - Math.min(1, rise), seg, 2, colour);
+  px(x0 + 2 * seg, cy - rise, seg, 2, colour);
+  if (rise > 0) px(x0 + 3 * seg - 1, cy - rise - 1, 2, 1, colour);
+}
+
 let blink = 0;          // 0..1, 1 = fully shut
 let openness = 0, wideness = 0.4;   // smoothed mouth state
 let bob = 0;
 
+// Expression channels. All of these are smoothed toward targets chosen by `mode`
+// in tick(), never set directly, because an expression that snaps between states
+// looks like a bug and an expression that eases looks like a decision.
+let lid = 0.42;       // 0 = wide open, 1 = fully hooded
+let browTilt = -0.7;  // negative lifts the inner ends (smug), positive drops them
+let smirk = 1;        // 0..1, only visible when the mouth is not talking
+let gaze = 0;         // -1..1 horizontal pupil offset
+let gazeTarget = 0;
+
 function draw() {
-  const bg = css("--bg"), fg = css("--fg"), text = css("--text");
+  const bg = css("--bg"), fg = css("--fg");
   cx.fillStyle = bg; cx.fillRect(0, 0, W, H);
 
   const lift = openness * 2.2;                       // brows rise as the jaw drops
@@ -125,35 +161,45 @@ function draw() {
   // clear gap above them, or they read as hats rather than brows.
   const EW = 11, EH = 11, EX_L = 15, EX_R = 38, ETOP = 13;
 
-  // brows
-  px(EX_L + 1, 8 - Math.round(lift) + oy, EW - 2, 3, fg);
-  px(EX_R + 1, 8 - Math.round(lift) + oy, EW - 2, 3, fg);
+  // One brow higher than the other is most of what sells "unimpressed". It is
+  // asymmetric on purpose; a matched pair reads as surprise instead.
+  const browY = 8 - Math.round(lift) + oy;
+  const rise = browTilt * 2;
+  brow(EX_L + 1, browY - Math.round(smirk * 2), EW - 2, rise, 1, fg);
+  brow(EX_R + 1, browY, EW - 2, rise, -1, fg);
 
-  // eyes, collapsing to a slit through a blink
-  const eh = Math.max(1, Math.round(EH * (1 - blink)));
-  const ey = ETOP + Math.round((EH - eh) / 2) + oy;
+  // Eyes. The upper lid comes down and the lower edge stays put, which is what
+  // makes a half-lidded eye look bored rather than merely small.
+  const openFrac = (1 - blink) * (1 - 0.42 * lid);
+  const eh = Math.max(1, Math.round(EH * openFrac));
+  const ey = ETOP + (EH - eh) + oy;
   px(EX_L, ey, EW, eh, fg);
   px(EX_R, ey, EW, eh, fg);
-  if (blink < 0.35) {                                 // the slit vanishes when shut
+  if (eh > 3) {
     // A wide shallow slit, not a square hole: a big square pupil turns the eye
-    // into a socket.
-    const pw = 5, ph = Math.max(1, Math.round(eh * 0.28));
+    // into a socket. It slides with the gaze and is clamped so it cannot leave.
+    const pw = 5, ph = Math.max(1, Math.round(eh * 0.30));
     const py = ey + Math.round((eh - ph) / 2);
-    px(EX_L + (EW - pw) / 2, py, pw, ph, bg);
-    px(EX_R + (EW - pw) / 2, py, pw, ph, bg);
+    const slack = (EW - pw) / 2;
+    const gx = Math.max(-slack, Math.min(slack, gaze * 2.4));
+    px(EX_L + slack + gx, py, pw, ph, bg);
+    px(EX_R + slack + gx, py, pw, ph, bg);
   }
 
-  // mouth: width from wideness (fricatives wide and flat, back vowels round),
-  // height from loudness.
-  // Width from wideness, but pulled in when the mouth is nearly shut: a closed
-  // mouth is a short line, not a full-width one.
-  const rx = (5.5 + wideness * 8.0) * (0.68 + 0.32 * Math.min(1, openness * 3));
-  const ry = 0.5 + openness * 7.5;
-  ellipse(32, 34 + oy, rx, ry, fg);
-  // Dark cavity, only once the mouth is open enough to have one. It must stay
-  // clear of the outer edge: an inner shape that degrades to the flat-line case
-  // paints straight through the bottom lip and leaves a stray pixel behind.
-  if (ry >= 4) ellipse(32, 34 + oy + ry * 0.15, rx * 0.5, ry * 0.35, bg);
+  // Talking mouth from the envelope, resting mouth from the mood. Width comes
+  // from wideness (fricatives wide and flat, back vowels round) and height from
+  // loudness, pulled in when nearly shut so a quiet mouth is a short line.
+  if (openness > 0.03) {
+    const rx = (5.5 + wideness * 8.0) * (0.68 + 0.32 * Math.min(1, openness * 3));
+    const ry = 0.5 + openness * 7.5;
+    ellipse(32, 34 + oy, rx, ry, fg);
+    // Dark cavity, only once the mouth is open enough to have one. It must stay
+    // clear of the outer edge: an inner shape that degrades to the flat-line
+    // case paints straight through the bottom lip and leaves a stray pixel.
+    if (ry >= 4) ellipse(32, 34 + oy + ry * 0.15, rx * 0.5, ry * 0.35, bg);
+  } else {
+    smirkLine(32, 34 + oy, 17, smirk, fg);
+  }
 }
 // #endregion
 
@@ -172,6 +218,17 @@ function frameAt(ms) {
   return tl.frames[i];
 }
 
+// Where each mood sits. Idle is deliberately smug: hooded eyes, one brow up, a
+// smirk. It is a draft bot that thinks it has already won, and the resting face
+// is the only place that comes across, since the mouth is busy the rest of the
+// time.
+const MOODS = {
+  idle:     { lid: 0.42, browTilt: -0.70, smirk: 1.0, gazeAmp: 1.00 },
+  speaking: { lid: 0.05, browTilt: -0.20, smirk: 0.0, gazeAmp: 0.45 },
+  thinking: { lid: 0.55, browTilt:  0.75, smirk: 0.2, gazeAmp: 0.80 },
+};
+let mode = "idle";
+
 function tick() {
   bob += 0.02;
   let target = null;
@@ -179,16 +236,38 @@ function tick() {
     const ms = muted ? (performance.now() - startedAt - offsetMs)
                      : (audio ? audio.currentTime * 1000 : 0);
     target = frameAt(ms);
-    if (!target) { tl = null; $("dot").classList.remove("live"); }
+    if (!target) { tl = null; mode = "idle"; $("dot").classList.remove("live"); }
   }
   const to = target ?? { openness: 0, wideness: 0.4 };
   // Smoothing at ~0.45 keeps 20ms frames from strobing at 60fps without
   // smearing consonants into each other.
   openness += (to.openness - openness) * 0.45;
   wideness += (to.wideness - wideness) * 0.25;
+
+  // Expressions ease far more slowly than the mouth. 0.05 is about a second to
+  // settle, which is roughly how long a face takes to change its mind.
+  const m = MOODS[mode] ?? MOODS.idle;
+  lid += (m.lid - lid) * 0.05;
+  browTilt += (m.browTilt - browTilt) * 0.05;
+  smirk += (m.smirk - smirk) * 0.05;
+  gaze += (gazeTarget * m.gazeAmp - gaze) * 0.12;
+
   draw();
   requestAnimationFrame(tick);
 }
+
+// Saccades, not a sine wave: eyes flick to a new spot and hold it. A smooth
+// oscillation reads as a machine scanning, which is the opposite of relaxed.
+(function scheduleGaze() {
+  const wait = 900 + Math.random() * 2800;
+  setTimeout(() => {
+    const spots = [-1, -0.65, -0.3, 0, 0.3, 0.65, 1];
+    let next = spots[Math.floor(Math.random() * spots.length)];
+    if (Math.abs(next - gazeTarget) < 0.25) next = -next;  // always actually move
+    gazeTarget = next;
+    scheduleGaze();
+  }, wait);
+})();
 
 // Blink on an irregular timer; a fixed interval looks mechanical.
 (function scheduleBlink() {
@@ -209,6 +288,7 @@ function tick() {
 function onSpeak(d) {
   tl = { frames: d.frames, frameMs: d.frameMs, durationMs: d.durationMs };
   startedAt = performance.now();
+  mode = "speaking";
   $("cap").textContent = d.text || "";
   $("cap").classList.toggle("empty", !d.text);
   $("dot").classList.add("live");
@@ -227,7 +307,8 @@ function connect() {
   es.addEventListener("state", (e) => {
     try {
       const d = JSON.parse(e.data);
-      if (d.state === "thinking") { $("cap").textContent = d.detail || "thinking"; $("cap").classList.add("empty"); }
+      if (d.state === "thinking") { mode = "thinking"; $("cap").textContent = d.detail || "thinking"; $("cap").classList.add("empty"); }
+      if (d.state === "idle" && !tl) mode = "idle";
     } catch (err) { console.error(err); }
   });
   es.onerror = () => { /* EventSource reconnects on its own; nothing to do */ };
@@ -242,6 +323,19 @@ $("mute").onclick = () => {
   if (muted && audio) { audio.pause(); }
 };
 $("off").oninput = () => { offsetMs = Number($("off").value); $("offv").textContent = offsetMs + "ms"; };
+// Fade the controls out after 10s of no mouse movement and bring them back on
+// any movement, so a screen share is just the face. Hovering the invisible strip
+// also reveals it, which is why this is opacity and not display.
+let hideTimer = null;
+function armControlHide() {
+  clearTimeout(hideTimer);
+  $("ctl").classList.remove("dim");
+  hideTimer = setTimeout(() => $("ctl").classList.add("dim"), 10_000);
+}
+addEventListener("mousemove", armControlHide, { passive: true });
+addEventListener("touchstart", armControlHide, { passive: true });
+armControlHide();
+
 $("gate").onclick = () => {
   $("gate").classList.add("hide");
   // Unlock playback with a real (silent) play() inside the click handler.
