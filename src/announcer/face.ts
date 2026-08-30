@@ -72,7 +72,7 @@ export function publishSpeech(text: string, wav: ArrayBuffer): number | null {
 
 // Coarse mood for the look between lines. The face decays back to idle on its
 // own, so a caller never has to remember to clear one.
-export type FaceState = "idle" | "thinking" | "annoyed" | "angry";
+export type FaceState = "idle" | "thinking" | "annoyed" | "angry" | "pleased";
 
 export function publishState(state: FaceState, detail?: string): void {
   broadcast("state", { state, detail: detail ?? "" });

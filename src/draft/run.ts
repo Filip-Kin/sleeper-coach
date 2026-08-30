@@ -608,7 +608,7 @@ for (;;) {
   lastBoardAt = Date.now();
   // Announce BEFORE we click. The announcer (a separate process) speaks off this
   // event; we do NOT wait for it, so slow/failed voice never holds up the pick.
-  logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, team: target.team, bye: byeWeek(target.team), round, reasoning: lastReasoning });
+  logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, team: target.team, bye: byeWeek(target.team), round, adp: target.adp, reasoning: lastReasoning });
   await Bun.sleep(ANNOUNCE_LEAD_MS); // let the announcer's voice lead the click
   const t0 = Date.now();
   try {

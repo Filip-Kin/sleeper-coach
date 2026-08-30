@@ -249,6 +249,24 @@ function fallbackPraise(who: string): string {
 }
 
 // Room-feed fallback: we can't know who spoke, so address the room, no names.
+// A rival just took someone off our plan. Canned rather than composed: this
+// fires often, a model round trip would land after the moment has passed, and
+// there is nothing here worth inventing a fact about. The player name is the only
+// variable, so it cannot say anything untrue.
+export function snipeLine(player: string): string {
+  const options = [
+    `Hm. ${player}. Recalculating.`,
+    `Someone took ${player}. Bold. Wrong, but bold.`,
+    `Damn. ${player} gone. Give me a moment to redraw the board.`,
+    `They took ${player}. I had a plan for him. I have four more.`,
+    `${player}, off the board. Noted. Adjusting.`,
+    `Fine. Take ${player}. I was only mildly attached.`,
+    `That was my ${player}. I will remember this in week fourteen.`,
+    `Interesting. ${player} was on my list. So are eleven other people.`,
+  ];
+  return pickNoRepeat("snipe", options);
+}
+
 function fallbackGreeting(who: string): string {
   const tag = who ? `${who}, ` : "";
   const options = [

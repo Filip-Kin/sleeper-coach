@@ -36,7 +36,7 @@ import { loadConfig, discordNames, ROOM_FEED_IDS } from "./config.ts";
 import { startTail } from "./tail.ts";
 import { connectVoice, type VoiceHandle } from "./voice.ts";
 import { synthesize } from "./tts.ts";
-import { announcePickLine, announceCompleteLine, announceComebackLine, type ComebackContext } from "./persona.ts";
+import { announcePickLine, announceCompleteLine, announceComebackLine, snipeLine, type ComebackContext } from "./persona.ts";
 import { startListener } from "./listen.ts";
 import { startFaceServer, publishSpeech, publishState } from "./face.ts";
 import type { ActivityEvent } from "../log.ts";
@@ -57,6 +57,9 @@ const activityLog = config.activityLog;
 
 // The voice encryption backend must be initialised before we join.
 await sodium.ready;
+
+// How often a sniped pick gets a spoken grumble as well as a scowl.
+const SNIPE_SPEAK_CHANCE = Number(process.env.SNIPE_SPEAK_CHANCE ?? 0.35);
 
 // #region speech queue — one line at a time, never overlapping
 const queue: Array<() => Promise<void>> = [];
@@ -118,6 +121,7 @@ interface PickDetail {
   reasoning?: unknown;
   team?: unknown;
   bye?: unknown;
+  adp?: unknown;
 }
 interface CompleteDetail {
   roster?: unknown;
@@ -172,6 +176,13 @@ function handleEvent(ev: ActivityEvent): void {
       publishState("thinking", `on the clock: ${player}`);
       const line = await announcePickLine({ player, round, position, team, bye, reasoning });
       await speak(line);
+      // A player who fell a full round past his ADP is a genuine steal, and the
+      // face should look like it knows. Sent after the line so it lands as it
+      // stops talking; the page holds it until the mouth is actually finished.
+      const adp = Number(detail.adp);
+      if (round && round >= 2 && Number.isFinite(adp) && adp < 999 && Math.ceil(adp / 8) <= round - 1) {
+        publishState("pleased", `${player} at ADP ${Math.round(adp)}`);
+      }
     });
     return;
   }
@@ -195,6 +206,13 @@ function handleEvent(ev: ActivityEvent): void {
     const detail = (ev.detail ?? {}) as { player?: unknown; emoji?: unknown };
     const player = str(detail.player);
     publishState(detail.emoji === "crying" ? "angry" : "annoyed", player ? `${player} taken` : "one of mine gone");
+    // Sometimes it grumbles out loud. Deliberately occasional: every snipe would
+    // be relentless, and never would waste the moment. The empty-queue check
+    // matters more than the dice roll, because it means a grumble can never
+    // delay our own pick announcement or stack up behind one.
+    if (player && queue.length === 0 && !draining && Math.random() < SNIPE_SPEAK_CHANCE) {
+      enqueue(() => speak(snipeLine(player)));
+    }
     return;
   }
 
