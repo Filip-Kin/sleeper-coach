@@ -119,33 +119,41 @@ function draw() {
   const drift = Math.sin(bob) * 0.9;                 // slow idle sway, keeps it alive
   const oy = Math.round(drift + lift * 0.45);
 
+  // Geometry in one place. Eyes sit closer together than feels right in the
+  // abstract: pushed out toward the edges they stop reading as a face and start
+  // reading as two separate objects. Brows are narrower than the eyes and keep a
+  // clear gap above them, or they read as hats rather than brows.
+  const EW = 11, EH = 11, EX_L = 15, EX_R = 38, ETOP = 13;
+
   // brows
-  px(11, 9 - Math.round(lift) + oy, 11, 3, fg);
-  px(42, 9 - Math.round(lift) + oy, 11, 3, fg);
+  px(EX_L + 1, 8 - Math.round(lift) + oy, EW - 2, 3, fg);
+  px(EX_R + 1, 8 - Math.round(lift) + oy, EW - 2, 3, fg);
 
   // eyes, collapsing to a slit through a blink
-  const eh = Math.max(1, Math.round(10 * (1 - blink)));
-  const ey = 14 + Math.round((10 - eh) / 2) + oy;
-  px(12, ey, 10, eh, fg);
-  px(42, ey, 10, eh, fg);
-  if (blink < 0.35) {                                 // pupils vanish when shut
-    const pw = 4, ph = Math.max(1, Math.round(eh * 0.4));
+  const eh = Math.max(1, Math.round(EH * (1 - blink)));
+  const ey = ETOP + Math.round((EH - eh) / 2) + oy;
+  px(EX_L, ey, EW, eh, fg);
+  px(EX_R, ey, EW, eh, fg);
+  if (blink < 0.35) {                                 // the slit vanishes when shut
+    // A wide shallow slit, not a square hole: a big square pupil turns the eye
+    // into a socket.
+    const pw = 5, ph = Math.max(1, Math.round(eh * 0.28));
     const py = ey + Math.round((eh - ph) / 2);
-    px(12 + (10 - pw) / 2, py, pw, ph, bg);
-    px(42 + (10 - pw) / 2, py, pw, ph, bg);
+    px(EX_L + (EW - pw) / 2, py, pw, ph, bg);
+    px(EX_R + (EW - pw) / 2, py, pw, ph, bg);
   }
 
   // mouth: width from wideness (fricatives wide and flat, back vowels round),
   // height from loudness.
   // Width from wideness, but pulled in when the mouth is nearly shut: a closed
   // mouth is a short line, not a full-width one.
-  const rx = (5.0 + wideness * 8.0) * (0.62 + 0.38 * Math.min(1, openness * 3));
+  const rx = (5.5 + wideness * 8.0) * (0.68 + 0.32 * Math.min(1, openness * 3));
   const ry = 0.5 + openness * 7.5;
-  ellipse(32, 33 + oy, rx, ry, fg);
+  ellipse(32, 34 + oy, rx, ry, fg);
   // Dark cavity, only once the mouth is open enough to have one. It must stay
   // clear of the outer edge: an inner shape that degrades to the flat-line case
   // paints straight through the bottom lip and leaves a stray pixel behind.
-  if (ry >= 4) ellipse(32, 33 + oy + ry * 0.15, rx * 0.5, ry * 0.35, bg);
+  if (ry >= 4) ellipse(32, 34 + oy + ry * 0.15, rx * 0.5, ry * 0.35, bg);
 }
 // #endregion
 
