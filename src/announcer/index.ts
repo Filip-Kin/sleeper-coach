@@ -36,7 +36,10 @@ import { loadConfig, discordNames, ROOM_FEED_IDS } from "./config.ts";
 import { startTail } from "./tail.ts";
 import { connectVoice, type VoiceHandle } from "./voice.ts";
 import { synthesize } from "./tts.ts";
-import { announcePickLine, announceCompleteLine, announceComebackLine, snipeLine, type ComebackContext } from "./persona.ts";
+import { announcePickLine, announceCompleteLine, announceComebackLine, snipeLine, draftOpenerLine, type ComebackContext } from "./persona.ts";
+import { config as leagueConfig } from "../config.ts";
+import { sleeper } from "../sleeper/client.ts";
+import { MANAGER_NAMES } from "./config.ts";
 import { startListener } from "./listen.ts";
 import { startFaceServer, publishSpeech, publishState, type FaceState } from "./face.ts";
 import type { ActivityEvent } from "../log.ts";
@@ -153,6 +156,52 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() ? v.trim() : undefined;
 }
 
+
+// #region round one opener
+// Round one gets the formal broadcast read. Everything it needs beyond the pick
+// itself (our slot, and who is up next) comes from draft_order, which is
+// authoritative. Resolved once and cached; any failure returns null so the
+// normal composed line still goes out and a bad lookup cannot silence round one.
+let openerCtx: { slot: number; nextManager?: string; nextTeam?: string } | null = null;
+async function openerContext(): Promise<typeof openerCtx> {
+  if (openerCtx) return openerCtx;
+  const draft = await sleeper.draft(leagueConfig.draftId);
+  const order = draft.draft_order ?? {};
+  const slot = order[leagueConfig.userId];
+  if (typeof slot !== "number") return null;
+  // Round one only, so the next pick is simply the next slot up.
+  const nextUid = Object.entries(order).find(([, v]) => v === slot + 1)?.[0];
+  let nextManager: string | undefined;
+  let nextTeam: string | undefined;
+  if (nextUid) {
+    const users = await sleeper.leagueUsers(leagueConfig.leagueId);
+    const u = users.find((x) => x.user_id === nextUid);
+    if (u) {
+      nextManager = MANAGER_NAMES[u.display_name ?? ""] ?? u.display_name ?? undefined;
+      nextTeam = u.metadata?.team_name?.trim() || undefined;
+    }
+  }
+  openerCtx = { slot, nextManager, nextTeam };
+  return openerCtx;
+}
+
+async function openerLine(player: string, position: string | undefined, nflTeam: string | undefined): Promise<string | null> {
+  const ctx = await openerContext();
+  if (!ctx) return null;
+  const users = await sleeper.leagueUsers(leagueConfig.leagueId);
+  const ourTeam = users.find((u) => u.user_id === leagueConfig.userId)?.metadata?.team_name?.trim();
+  return draftOpenerLine({
+    pick: ctx.slot,
+    ourTeam: ourTeam ?? "dangerously-skip-perms",
+    player,
+    position: position ?? "",
+    nflTeam,
+    nextManager: ctx.nextManager,
+    nextTeam: ctx.nextTeam,
+  });
+}
+// #endregion
+
 function handleEvent(ev: ActivityEvent): void {
   if (ev.actor !== "coach") return;
 
@@ -178,7 +227,15 @@ function handleEvent(ev: ActivityEvent): void {
     enqueue(async () => {
       const team = str(detail.team);
       const bye = Number(detail.bye) || undefined;
-      const line = await announcePickLine({ player, round, position, team, bye, reasoning });
+      // Round one is read to a script; every other round is composed.
+      const opener =
+        round === 1
+          ? await openerLine(player, position, team).catch((e) => {
+              console.error(`[announcer] opener lookup failed, falling back: ${e instanceof Error ? e.message : String(e)}`);
+              return null;
+            })
+          : null;
+      const line = opener ?? (await announcePickLine({ player, round, position, team, bye, reasoning }));
       await speak(line);
       // A player who fell a full round past his ADP is a genuine steal, and the
       // face should look like it knows. Sent after the line so it lands as it

@@ -61,8 +61,11 @@ ENV PIPER_BIN=/opt/piper/piper \
 COPY --from=whisper-build /opt/whisper /opt/whisper
 # Default to tiny.en for speed (fast enough to read short trash-talk); base.en is
 # also baked in and can be selected via WHISPER_MODEL if accuracy matters more.
+# base.en, not tiny.en. Measured on a room-degraded clip on the NAS: tiny.en
+# returned "The Runny. The Rubbinson was right there", base.en with the
+# vocabulary prompt returned the sentence exactly, for +350ms. See whisper.ts.
 ENV WHISPER_BIN=/opt/whisper/whisper-cli \
-    WHISPER_MODEL=/opt/whisper/models/ggml-tiny.en.bin
+    WHISPER_MODEL=/opt/whisper/models/ggml-base.en.bin
 
 # Claude CLI, used by the runner to compose the overlord lines. Installed at
 # build into a fixed HOME so no writable data mount is needed at runtime; auth

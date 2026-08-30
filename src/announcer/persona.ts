@@ -78,6 +78,62 @@ export interface ComebackContext {
 }
 // #endregion
 
+
+// #region round one: the formal opener
+// Round one is read to a script rather than composed, because the room wants the
+// real broadcast cadence and a model paraphrases it differently every time.
+// Everything here is spelled for a TTS engine, not for a screen: positions and
+// team abbreviations are expanded, because Piper reads "RB" as "R B" and "DET"
+// as "D E T".
+const SPOKEN_POSITION: Record<string, string> = {
+  QB: "quarterback", RB: "running back", WR: "wide receiver",
+  TE: "tight end", K: "kicker", DEF: "defense", DL: "defensive lineman",
+  LB: "linebacker", DB: "defensive back",
+};
+const SPOKEN_TEAM: Record<string, string> = {
+  ARI: "Arizona", ATL: "Atlanta", BAL: "Baltimore", BUF: "Buffalo",
+  CAR: "Carolina", CHI: "Chicago", CIN: "Cincinnati", CLE: "Cleveland",
+  DAL: "Dallas", DEN: "Denver", DET: "Detroit", GB: "Green Bay",
+  HOU: "Houston", IND: "Indianapolis", JAX: "Jacksonville", KC: "Kansas City",
+  LAC: "the Chargers", LAR: "the Rams", LV: "Las Vegas", MIA: "Miami",
+  MIN: "Minnesota", NE: "New England", NO: "New Orleans", NYG: "the Giants",
+  NYJ: "the Jets", PHI: "Philadelphia", PIT: "Pittsburgh", SEA: "Seattle",
+  SF: "San Francisco", TB: "Tampa Bay", TEN: "Tennessee", WAS: "Washington",
+};
+const ORDINAL: Record<number, string> = {
+  1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth",
+  6: "sixth", 7: "seventh", 8: "eighth",
+};
+
+export interface OpenerInfo {
+  pick: number; // overall pick number
+  ourTeam: string; // our team name as it appears in the league
+  player: string;
+  position: string;
+  nflTeam?: string;
+  nextManager?: string;
+  nextTeam?: string;
+}
+
+export function draftOpenerLine(info: OpenerInfo): string {
+  const ordinal = ORDINAL[info.pick] ?? `number ${info.pick}`;
+  const pos = SPOKEN_POSITION[info.position.toUpperCase()] ?? info.position;
+  const team = info.nflTeam ? (SPOKEN_TEAM[info.nflTeam.toUpperCase()] ?? info.nflTeam) : "";
+  // Hyphens read as word joiners, so the team name comes out as words rather
+  // than as punctuation.
+  const ourTeam = info.ourTeam.replace(/^-+/, "").replace(/-/g, "-");
+  const next =
+    info.nextManager || info.nextTeam
+      ? ` ${[info.nextManager, info.nextTeam].filter(Boolean).join(", ")} has the next pick.`
+      : "";
+  return (
+    `With the ${ordinal} pick in the 2026 M P L draft, ` +
+    `Claude ${ourTeam} selects ${info.player}, ${pos}${team ? `, ${team}` : ""}.` +
+    next
+  );
+}
+// #endregion
+
 export async function announcePickLine(info: PickInfo): Promise<string> {
   const roundStr = info.round ? `round ${info.round}` : "this round";
   const prompt =

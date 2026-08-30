@@ -35,6 +35,12 @@ trap 'shred -u "$ENVFILE" "$LBLFILE" 2>/dev/null || rm -f "$ENVFILE" "$LBLFILE"'
 
 # Carry the whole environment across (bot token, Claude token, Discord ids), then
 # let the caller override individual keys.
+#
+# GOTCHA: docker inspect returns image-baked ENV as well as explicitly-set vars,
+# so anything the Dockerfile defines gets frozen into every future container and
+# a later change to the Dockerfile default is silently masked. This is how a
+# WHISPER_MODEL change appeared to deploy and did not. Pass the key explicitly
+# when you change a Dockerfile ENV.
 docker inspect "$ANN" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -v '^$' > "$ENVFILE"
 for kv in "$@"; do
   key=${kv%%=*}
