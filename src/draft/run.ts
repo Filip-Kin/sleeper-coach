@@ -646,7 +646,16 @@ for (;;) {
   lastBoardAt = Date.now();
   // Announce BEFORE we click. The announcer (a separate process) speaks off this
   // event; we do NOT wait for it, so slow/failed voice never holds up the pick.
-  logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, team: target.team, bye: byeWeek(target.team), round, adp: target.adp, reasoning: lastReasoning });
+  // The agent's rationale is written for the top of ITS plan. Sitting at slot 4
+  // that player is regularly gone by our turn, we take someone else, and the
+  // stale rationale rides along: a slot-6 mock had three of five picks carrying a
+  // rationale that argued for a DIFFERENT player. It reaches the spoken line and,
+  // worse, the public blog recap, which would then explain a pick we never made.
+  // Keep it only when it is actually about the player we took, and otherwise say
+  // nothing, which every consumer already handles.
+  const reasoningForPick =
+    lastReasoning && lastReasoning.toLowerCase().includes(lastName(target.name)) ? lastReasoning : undefined;
+  logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, team: target.team, bye: byeWeek(target.team), round, adp: target.adp, reasoning: reasoningForPick });
   await Bun.sleep(ANNOUNCE_LEAD_MS); // let the announcer's voice lead the click
   const t0 = Date.now();
   try {
