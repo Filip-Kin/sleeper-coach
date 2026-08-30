@@ -29,6 +29,8 @@ const KEEP_CLIPS = 8;
 
 type Payload = Record<string, unknown>;
 
+export type FaceState = "idle" | "thinking" | "annoyed" | "angry" | "pleased";
+
 const clips = new Map<string, ArrayBuffer>();
 const clients = new Set<(chunk: string) => void>();
 let seq = 0;
@@ -49,7 +51,11 @@ function broadcast(event: string, data: Payload): void {
 // Announce a line that is ABOUT to be played into Discord. Returns the clip
 // length so a caller with no voice connection can still pace itself. Never
 // throws: a broken face page must not stop the bot talking.
-export function publishSpeech(text: string, wav: ArrayBuffer): number | null {
+//
+// `mood` is the expression to WEAR while saying it. The mouth always comes from
+// the envelope, and the brows and eyes always come from the mood, so the two are
+// independent: it can scowl through a sentence without the lip sync suffering.
+export function publishSpeech(text: string, wav: ArrayBuffer, mood?: FaceState): number | null {
   try {
     const id = `${Date.now().toString(36)}-${(seq++).toString(36)}`;
     const env: Envelope = envelopeFromWav(new Uint8Array(wav));
@@ -59,6 +65,7 @@ export function publishSpeech(text: string, wav: ArrayBuffer): number | null {
       id,
       url: `/audio/${id}.wav`,
       text,
+      mood: mood ?? null,
       frameMs: env.frameMs,
       durationMs: env.durationMs,
       frames: env.frames,
@@ -72,8 +79,6 @@ export function publishSpeech(text: string, wav: ArrayBuffer): number | null {
 
 // Coarse mood for the look between lines. The face decays back to idle on its
 // own, so a caller never has to remember to clear one.
-export type FaceState = "idle" | "thinking" | "annoyed" | "angry" | "pleased";
-
 export function publishState(state: FaceState, detail?: string): void {
   broadcast("state", { state, detail: detail ?? "" });
 }

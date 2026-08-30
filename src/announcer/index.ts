@@ -38,7 +38,7 @@ import { connectVoice, type VoiceHandle } from "./voice.ts";
 import { synthesize } from "./tts.ts";
 import { announcePickLine, announceCompleteLine, announceComebackLine, snipeLine, type ComebackContext } from "./persona.ts";
 import { startListener } from "./listen.ts";
-import { startFaceServer, publishSpeech, publishState } from "./face.ts";
+import { startFaceServer, publishSpeech, publishState, type FaceState } from "./face.ts";
 import type { ActivityEvent } from "../log.ts";
 
 const config = loadConfig();
@@ -60,6 +60,10 @@ await sodium.ready;
 
 // How often a sniped pick gets a spoken grumble as well as a scowl.
 const SNIPE_SPEAK_CHANCE = Number(process.env.SNIPE_SPEAK_CHANCE ?? 0.35);
+// How often an insult actually gets under its skin. Leaning smug is the funnier
+// default and the more in-character one: being unbothered is the flex, and the
+// occasional crack in it lands precisely because it is rare.
+const INSULT_ANGRY_CHANCE = Number(process.env.INSULT_ANGRY_CHANCE ?? 0.3);
 
 // #region speech queue — one line at a time, never overlapping
 const queue: Array<() => Promise<void>> = [];
@@ -91,15 +95,15 @@ async function drain(): Promise<void> {
   }
 }
 
-async function speak(line: string): Promise<void> {
-  console.log(`[announcer] speaking: ${line}`);
+async function speak(line: string, mood?: FaceState): Promise<void> {
+  console.log(`[announcer] speaking${mood ? ` (${mood})` : ""}: ${line}`);
   const speech = await synthesize(line);
   try {
     // The face page is handed the audio and its lip-sync table BEFORE Discord
     // starts playing, so the page's own <audio> element and the voice channel
     // begin within a few milliseconds of each other. Doing it in this order also
     // means a Discord problem leaves the face talking rather than dead.
-    const durationMs = publishSpeech(line, await Bun.file(speech.path).arrayBuffer());
+    const durationMs = publishSpeech(line, await Bun.file(speech.path).arrayBuffer(), mood);
     if (voice) {
       await voice.speakFile(speech.path);
     } else {
@@ -217,7 +221,8 @@ function handleEvent(ev: ActivityEvent): void {
     // matters more than the dice roll, because it means a grumble can never
     // delay our own pick announcement or stack up behind one.
     if (player && queue.length === 0 && !draining && Math.random() < SNIPE_SPEAK_CHANCE) {
-      enqueue(() => speak(snipeLine(player)));
+      // Still scowling while it grumbles about the pick it just lost.
+      enqueue(() => speak(snipeLine(player), "angry"));
     }
     return;
   }
@@ -242,9 +247,19 @@ function isBusy(): boolean {
 // over a pick call: they simply wait their turn like any other spoken line.
 function enqueueComeback(ctx: ComebackContext): void {
   const withBoard: ComebackContext = { ...ctx, context: draftContext() };
+  // Wear the reply. An insult answered by a completely neutral face wastes the
+  // line. Which face it wears is a coin weighted toward smug, so most jabs get
+  // the unbothered smirk and every so often one visibly gets to it.
+  const mood: FaceState | undefined = ctx.insulted
+    ? Math.random() < INSULT_ANGRY_CHANCE
+      ? "angry"
+      : "pleased"
+    : ctx.praised
+      ? "pleased"
+      : undefined;
   enqueue(async () => {
     const line = await announceComebackLine(withBoard);
-    await speak(line);
+    await speak(line, mood);
   });
 }
 

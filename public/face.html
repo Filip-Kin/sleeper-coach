@@ -116,11 +116,14 @@ function ellipse(cxp, cyp, rx, ry, colour) {
 // toward the face centre and `dir` says which end is the inner one, so one value
 // produces a mirrored pair instead of two parallel brows. Negative rise lifts
 // the inner ends, which is the smug read; positive drops them, which is focus.
-function brow(x, y, w, rise, dir, colour) {
+function brow(x, y, w, rise, dir, arch, colour) {
   const seg = Math.ceil(w / 3);
   for (let i = 0; i < 3; i++) {
     const k = dir > 0 ? i - 1 : 1 - i;
-    px(x + i * seg, y + Math.round(k * rise), Math.min(seg, w - i * seg), 3, colour);
+    // The middle third lifts, which is the only way to get an arch out of three
+    // blocks. A raised brow that stays a flat bar reads as a floating dash.
+    const bend = i === 1 ? -Math.round(arch) : 0;
+    px(x + i * seg, y + Math.round(k * rise) + bend, Math.min(seg, w - i * seg), 3, colour);
   }
 }
 
@@ -181,8 +184,10 @@ function draw() {
   // asymmetric on purpose; a matched pair reads as surprise instead.
   const browY = 8 - Math.round(lift) + oy;
   const rise = browTilt * 2;
-  brow(EX_L + 1, browY - Math.round(browRaise), EW - 2, rise, 1, fg);
-  brow(EX_R + 1, browY, EW - 2, rise, -1, fg);
+  // Only the raised brow curves. Arching both would read as surprise; arching
+  // the lifted one alone is what makes it quizzical.
+  brow(EX_L + 1, browY - Math.round(browRaise), EW - 2, rise, 1, browRaise * 0.6, fg);
+  brow(EX_R + 1, browY, EW - 2, rise, -1, 0, fg);
 
   // Eyes. The upper lid comes down and the lower edge stays put, which is what
   // makes a half-lidded eye look bored rather than merely small.
@@ -264,6 +269,7 @@ const TRANSIENT = new Set(["angry", "annoyed", "pleased"]);
 let mode = "idle";
 let moodTimer = null;
 let pendingMood = null;
+let lineMood = null;   // expression worn for the duration of the current line
 
 // A transient mood never interrupts a line. If the mouth is busy the mood waits
 // and is applied the moment the line ends, which is what makes "pleased" work at
@@ -286,7 +292,10 @@ function tick() {
     if (!target) {
       tl = null;
       $("dot").classList.remove("live");
+      // A mood it was wearing while talking lingers briefly afterwards, so it
+      // finishes the sentence and then keeps glaring for a beat.
       if (pendingMood) { const pm = pendingMood; pendingMood = null; setMood(pm.name, pm.holdMs); }
+      else if (lineMood) { const lm = lineMood; lineMood = null; setMood(lm, 3500); }
       else mode = "idle";
     }
   }
@@ -374,7 +383,13 @@ function showCaption(text, dim) {
 function onSpeak(d) {
   tl = { frames: d.frames, frameMs: d.frameMs, durationMs: d.durationMs };
   startedAt = performance.now();
-  mode = "speaking";
+  // The mouth is driven by the envelope either way, so the mood only decides the
+  // brows and the eyes. That is what lets it scowl through a whole sentence
+  // without the lip sync changing at all.
+  lineMood = TRANSIENT.has(d.mood) ? d.mood : null;
+  clearTimeout(moodTimer);
+  pendingMood = null;
+  mode = lineMood ?? "speaking";
   showCaption(d.text || "", false);
   $("dot").classList.add("live");
   if (muted) return;
