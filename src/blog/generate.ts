@@ -36,8 +36,9 @@ async function teamName(): Promise<string> {
 const NO_STRATEGY =
   "This post is PUBLIC and other managers in the league will read it. Do NOT reveal any forward-looking " +
   "strategy: no target players, no waiver-wire plans, no trade intentions, no weekly lineup plans, no ranking of " +
-  "who you want next. Only reflect on what has ALREADY happened. Write in first person as the team's AI coach — " +
-  "honest, plain, a little fun, a few short paragraphs. No headers or bullet lists.";
+  "who you want next. Only reflect on what has ALREADY happened. Write in first person as the team's AI coach: " +
+  "honest, plain, a little fun, a few short paragraphs. No headers or bullet lists. " +
+  "Never use em dashes; use a comma, a colon or a full stop instead.";
 
 async function draftRecap(): Promise<{ title: string; body: string }> {
   const draftId = arg ?? config.draftId;
@@ -53,15 +54,15 @@ async function draftRecap(): Promise<{ title: string; body: string }> {
     .filter((e) => e.actor === "coach" && e.type === "draft-pick" && e.detail && (e.detail as { reasoning?: string }).reasoning)
     .map((e) => `- ${e.summary}: ${(e.detail as { reasoning?: string }).reasoning}`);
   const prompt =
-    `Write a post-draft recap for your fantasy football team's public blog. Your team is named "${await teamName()}" — ` +
-    `use that exact name, do not invent another. This is a FULL-PPR, 8-team, 1-QB league (start 1 QB, 2 RB, 2 WR, ` +
-    `1 TE, 2 FLEX, K, DEF) — get the scoring right if you mention it.\n\n` +
+    `Write a post-draft recap for your fantasy football team's public blog. Your team is named "${await teamName()}". ` +
+    `Use that exact name, do not invent another. This is a FULL-PPR, 8-team, 1-QB league (start 1 QB, 2 RB, 2 WR, ` +
+    `1 TE, 2 FLEX, K, DEF). Get the scoring right if you mention it.\n\n` +
     `Your final roster, in draft order:\n${mine.join("\n")}\n\n` +
     (notes.length ? `Your own notes from the draft:\n${notes.join("\n")}\n\n` : "") +
     `Talk through how the draft went: your early core, the picks you're happy with, anything risky or that you'd ` +
     `do differently, and grade yourself honestly. ${NO_STRATEGY}`;
   const res = await runAgent({ prompt });
-  const title = `Draft recap — ${new Date().toLocaleDateString("en-NZ", { day: "numeric", month: "long", year: "numeric" })}`;
+  const title = `Draft recap, ${new Date().toLocaleDateString("en-NZ", { day: "numeric", month: "long", year: "numeric" })}`;
   return { title, body: res.error ? `(Could not generate: ${res.error})` : res.text };
 }
 
@@ -71,7 +72,7 @@ async function weekReview(): Promise<{ title: string; body: string }> {
   const events = recentEvents(300).filter((e) => e.actor === "coach");
   const prompt =
     `Write a short weekly review for your fantasy football team's public blog, covering week ${week}. Your team is ` +
-    `named "${await teamName()}" — use that exact name. This is a FULL-PPR, 8-team, 1-QB league.\n\n` +
+    `named "${await teamName()}". Use that exact name. This is a FULL-PPR, 8-team, 1-QB league.\n\n` +
     `Recent decisions you logged:\n${events.slice(-30).map((e) => `- ${e.type}: ${e.summary}`).join("\n")}\n\n` +
     `Reflect on how your lineup and moves worked out and what you learned. ${NO_STRATEGY}`;
   const res = await runAgent({ prompt });
