@@ -20,6 +20,11 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 90_000);
 // navigate it (auth checks / trade handling), or it hijacks the draft.
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
 const draftActive = () => existsSync(DRAFT_LOCK);
+// Trades are the coach's call BY DESIGN, but the write path (respondTrade) is
+// still a stub that throws, so with this off a real offer produced a failed agent
+// run and nothing else. Off means shadow: describe the offer, alert Filip, act on
+// nothing. Turn it on once respondTrade is implemented and the drop rails exist.
+const TRADES_ENABLED = /^(1|true|yes|on)$/i.test(process.env.TRADES_ENABLED ?? "");
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
@@ -39,6 +44,8 @@ interface TransactionLike {
   status: string;
   roster_ids?: number[];
   consenter_ids?: number[];
+  adds?: Record<string, number> | null;
+  drops?: Record<string, number> | null;
 }
 
 function alreadyHandled(txId: string): boolean {
@@ -48,7 +55,45 @@ function markSeen(txId: string, status: string): void {
   db.run("INSERT OR REPLACE INTO seen_transactions (transaction_id, status, first_seen) VALUES (?, ?, ?)", [txId, status, Date.now()]);
 }
 
+// Name the players in an offer, so the notification is actionable rather than a
+// transaction id. Falls back to the raw id if the player map cannot be loaded.
+async function describeTrade(tx: TransactionLike): Promise<string> {
+  const side = async (m: Record<string, number> | null | undefined): Promise<string> => {
+    const ids = Object.keys(m ?? {});
+    if (!ids.length) return "nothing";
+    try {
+      const { loadPlayers } = await import("./data/players.ts");
+      const players = await loadPlayers();
+      return ids
+        .map((id) => {
+          const p = (players as Record<string, { full_name?: string; position?: string }>)[id];
+          return p?.full_name ? `${p.full_name}${p.position ? ` (${p.position})` : ""}` : id;
+        })
+        .join(", ");
+    } catch {
+      return ids.join(", ");
+    }
+  };
+  return `we receive: ${await side(tx.adds)}; we give up: ${await side(tx.drops)}`;
+}
+
 async function handlePendingTrade(tx: TransactionLike): Promise<void> {
+  if (!TRADES_ENABLED) {
+    // Shadow mode. Do NOT spawn the agent: it holds the act CLI, and a run whose
+    // only possible outcome is a thrown stub is noise, not a decision.
+    const what = await describeTrade(tx).catch(() => "could not read the offer");
+    logEvent("coach", "trade-shadow", `Pending trade ${tx.transaction_id} involves us; SHADOW MODE, acting on nothing. ${what}`, {
+      transaction_id: tx.transaction_id,
+      shadow: true,
+    });
+    await sendAlert(
+      "Trade offer pending (coach is in shadow mode)",
+      `${what}. The coach will NOT respond. Handle it in Sleeper, or set TRADES_ENABLED=1 once respondTrade is implemented.`,
+    ).catch(() => {});
+    markSeen(tx.transaction_id, "shadow");
+    return;
+  }
+
   // Trades are the coach's call, not Filip's — evaluate and decide autonomously.
   // Logged to the activity feed for watching; no phone ping (per Filip).
   logEvent("coach", "trade-offer", `Pending trade ${tx.transaction_id} involves us; evaluating.`, { transaction_id: tx.transaction_id });

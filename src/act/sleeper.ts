@@ -366,6 +366,123 @@ export async function setLineup(page: Page, starters: string[], leagueId?: strin
 }
 // #endregion
 
+
+// #region add / drop  (waivers and free agency)
+//
+// DOM captured against the staging league on 2026-08-30. The flow is: the
+// players tab lists free agents as `.player-list-item`, each with a `+` button
+// at `.owner-cell a.player-action-button.add`; clicking it opens a `.modal-item`
+// titled "Add Player"; if the roster is full the modal shows "Your roster is
+// full, please select a player to drop" plus a table of our own players; then
+// `.form-elements.button` labelled "Add Player" commits it.
+//
+// Two different name formats appear on the same screen, which is the trap here.
+// The FREE AGENT list abbreviates ("B. Purdy"), so an incoming name has to be
+// matched as first-initial + surname and cross-checked against the position and
+// team or it is genuinely ambiguous. The DROP TABLE inside the modal uses FULL
+// names ("Jayden Daniels"), so the dangerous half of the operation is the
+// unambiguous half. Anything ambiguous throws rather than guessing, because the
+// cost of dropping the wrong player is a whole asset.
+
+export interface AddDropSpec {
+  add: string; // full name of the free agent to add, e.g. "Brock Purdy"
+  drop?: string; // full name of the player to drop; required only if the roster is full
+  leagueId?: string; // explicit, so a write path never resolves its own target
+}
+
+// "Brock Purdy" -> /^B\.?\s*Purdy$/i, to match the abbreviated list form.
+function abbrevMatcher(full: string): RegExp {
+  const parts = full.trim().split(/\s+/);
+  const first = parts[0] ?? "";
+  const last = parts.slice(1).join(" ") || first;
+  const esc = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${esc(first[0] ?? "")}\\.?\\s*${esc(last)}$`, "i");
+}
+
+export async function addPlayer(page: Page, spec: AddDropSpec): Promise<void> {
+  const league = spec.leagueId ?? config.leagueId;
+  await page.goto(`${SLEEPER}/leagues/${league}/players`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(3000);
+
+  // Narrow to free agents, then search, because the list is long and virtualised
+  // so the target row may simply not be in the DOM yet.
+  await page.getByText(/^Free agents$/i).click({ timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  const surname = spec.add.trim().split(/\s+/).slice(-1)[0] ?? spec.add;
+  const search = page.getByPlaceholder(/search/i).first();
+  if (await search.count().catch(() => 0)) {
+    await search.fill(surname).catch(() => {});
+    await page.waitForTimeout(1500);
+  }
+
+  const wanted = abbrevMatcher(spec.add).source;
+  const found = (await page.evaluate((src: string) => {
+    const re = new RegExp(src, "i");
+    const rows = Array.from(document.querySelectorAll(".player-list-item"));
+    const hits: { name: string; position: string }[] = [];
+    let idx = -1;
+    rows.forEach((r, i) => {
+      const name = (r.querySelector(".name")?.textContent ?? "").trim();
+      if (!re.test(name)) return;
+      hits.push({ name, position: (r.querySelector(".position")?.textContent ?? "").trim() });
+      if (idx < 0) idx = i;
+    });
+    return { hits, idx };
+  }, wanted)) as { hits: { name: string; position: string }[]; idx: number };
+
+  if (found.hits.length === 0) throw new Error(`addPlayer: no free agent row matched "${spec.add}"`);
+  if (found.hits.length > 1) {
+    throw new Error(
+      `addPlayer: "${spec.add}" is ambiguous in the free agent list (${found.hits
+        .map((h) => `${h.name} ${h.position}`)
+        .join(" | ")}); refusing to guess`,
+    );
+  }
+
+  await page.locator(".player-list-item a.player-action-button.add").nth(found.idx).click({ timeout: 8000 });
+  await page.waitForTimeout(2000);
+
+  const modal = page.locator(".modal-item").filter({ hasText: /Add Player/i }).first();
+  await modal.waitFor({ state: "visible", timeout: 10_000 });
+  const modalText = (await modal.innerText().catch(() => "")) ?? "";
+  const rosterFull = /roster is full/i.test(modalText);
+
+  if (rosterFull) {
+    if (!spec.drop) {
+      throw new Error(`addPlayer: roster is full and no drop was specified for "${spec.add}"`);
+    }
+    // The drop table uses full names, so this match is exact.
+    const dropRow = modal.getByText(new RegExp(`^\\s*${spec.drop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i")).first();
+    const n = await dropRow.count().catch(() => 0);
+    if (n === 0) throw new Error(`addPlayer: "${spec.drop}" is not in the drop list; refusing to drop anyone else`);
+    await dropRow.click({ timeout: 8000 });
+    await page.waitForTimeout(800);
+  } else if (spec.drop) {
+    throw new Error(`addPlayer: a drop of "${spec.drop}" was requested but the roster is not full; refusing`);
+  }
+
+  await modal.locator(".form-elements.button").filter({ hasText: /Add Player/i }).first().click({ timeout: 8000 });
+  await page.waitForTimeout(3500);
+
+  // Read back from the DOM. The rosters API served a stale `starters` array more
+  // than five minutes after a confirmed change on 2026-08-30, so it cannot be
+  // used to confirm a write.
+  await openTeamPage(page, league);
+  const after = await readRoster(page);
+  const names = after.map((r) => r.name.toLowerCase());
+  const addedOk = names.some((n) => abbrevMatcher(spec.add).test(n) || n.includes(surname.toLowerCase()));
+  if (!addedOk) {
+    throw new Error(`addPlayer: "${spec.add}" is not on the roster after the add. Roster: ${after.map((r) => r.name).join(", ")}`);
+  }
+  if (spec.drop) {
+    const dropSurname = spec.drop.trim().split(/\s+/).slice(-1)[0]?.toLowerCase() ?? "";
+    if (names.some((n) => n.includes(dropSurname))) {
+      throw new Error(`addPlayer: "${spec.drop}" is STILL on the roster after the add; state is now unknown, stopping`);
+    }
+  }
+}
+// #endregion
+
 // Accept or reject a pending trade by its Sleeper transaction id.
 export async function respondTrade(page: Page, transactionId: string, decision: "accept" | "reject"): Promise<void> {
   await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });

@@ -8,7 +8,7 @@
 import { launchContext, firstPage } from "./browser.ts";
 import {
   leagueUrl, isLoggedIn, authState, isOnClock, liveAvailable, draftedCells, domFacts, screenshot,
-  makePick, setQueue, reactToPick, setLineup, readRoster, respondTrade, sendTrade, importSession,
+  makePick, setQueue, reactToPick, setLineup, readRoster, addPlayer, respondTrade, sendTrade, importSession,
 } from "./sleeper.ts";
 
 const PORT = Number(process.env.BROWSER_API_PORT ?? 9223);
@@ -114,6 +114,19 @@ Bun.serve({
           await run(() => setQueue(page, (b.players as string[]) ?? [])); return Response.json({ ok: true });
         case "/react":
           return Response.json({ ok: await run(() => reactToPick(page, str(b.player), str(b.emoji, "crying"))) });
+        case "/add": {
+          // Waiver / free-agent add, with an optional drop. leagueId is explicit
+          // for the same reason as /lineup: a write path must never resolve its
+          // own target from ambient config.
+          await run(() =>
+            addPlayer(page, {
+              add: str(b.add),
+              drop: b.drop ? str(b.drop) : undefined,
+              leagueId: b.leagueId ? str(b.leagueId) : undefined,
+            }),
+          );
+          return Response.json({ ok: true });
+        }
         case "/lineup":
           // leagueId is optional and defaults to the configured league; pass it
           // explicitly to drive the staging league without restarting this server.
