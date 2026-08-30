@@ -31,7 +31,11 @@ const MAX_SEGMENT_MS = Number(process.env.LISTENER_MAX_SEGMENT_MS ?? 15_000);
 // Ignore blips shorter than this (ms): coughs, keyboard clicks, "mm".
 const MIN_SEGMENT_MS = Number(process.env.LISTENER_MIN_SEGMENT_MS ?? 400);
 // At most one comeback per this window (ms), to avoid chatter.
-const COOLDOWN_MS = Number(process.env.LISTENER_COOLDOWN_MS ?? 0);
+// Addressed-only is itself the throttle, so this only needs to stop a follow-up
+// window from double-firing on overlapping segments. An explicit name always
+// bypasses it: being unable to ask it two questions in a row is worse than the
+// occasional extra line.
+const COOLDOWN_MS = Number(process.env.LISTENER_COOLDOWN_MS ?? 10_000);
 // Rolling window of recent transcribed segments, so a heckle split across two
 // silence-separated segments (e.g. "coach claude" ... "you suck") is detected as
 // one line. We run detection on the JOINED recent text and clear it after a hit.
@@ -69,12 +73,21 @@ const QUESTION_SHAPE_RE = /\?|^\s*(what|why|how|who|when|where|which|do|does|did
 function looksLikeAQuestionToUs(text: string): boolean {
   return SECOND_PERSON_RE.test(text) && QUESTION_SHAPE_RE.test(text);
 }
-// Broad on purpose: in a live draft room people heckle with profanity and
-// phrasing that a narrow list misses. Better to over-react (with cooldown 0 the
-// banter flows) than to sit silent through obvious trash-talk.
-const INSULT_RE =
-  /\b(sucks?|sucked|stupid|dumb|trash|dogshit|garbage|loser|terrible|awful|horrible|horrendous|idiots?|worst|overrated|overhyped|cheat|cheater|cheating|rigged|pathetic|useless|worthless|clown|lame|boring|scared|afraid|weak|shit|shitty|crap|crappy|ass|asshole|fuck|fucking|fucked|damn|hell|bum|choke|choked|broken|broke|joke|bust|busted|wack|whack|washed|bricked|blows|blow|mid|bad|boo|shut up|goddamn|clanker|clankers|clunker|clinker|planker|flanker|clank|clanka|hoe|hoes)\b/i;
-// Multi-word heckles the single-word list can't catch.
+// Two tiers, because one broad list made it chatty in a real room. On a
+// 56-utterance sample the STRONG words never misfired once, and every false
+// trigger came from the mild tier: it fired back at "it was so kind of a hell of
+// a story" because "hell" was in the list.
+//
+// Strong words are unambiguous heckling and fire on their own.
+const STRONG_INSULT_RE =
+  /\b(sucks?|sucked|stupid|trash|dogshit|garbage|loser|terrible|awful|horrible|horrendous|idiots?|overrated|overhyped|cheat|cheater|cheating|rigged|pathetic|useless|worthless|clown|shitty|crappy|asshole|fucking|fucked|goddamn|washed|bricked|dumbass|clanker|clankers|clunker|clinker|planker|flanker|clank|clanka|shut up)\b/i;
+// Mild words are ordinary speech as often as they are insults ("a hell of a
+// story", "he was good but bad in the red zone"), so they only count when the
+// line is actually pointed at US.
+const MILD_INSULT_RE =
+  /\b(dumb|worst|lame|boring|scared|afraid|weak|shit|crap|ass|fuck|damn|hell|bum|choke|choked|broken|broke|joke|bust|busted|wack|whack|blows|blow|mid|bad|boo|hoe|hoes)\b/i;
+// Multi-word heckles the single-word lists can't catch. These are already
+// directed by construction, so they count as strong.
 const INSULT_PHRASE_RE = /(half the time|does\s?n'?t work|do\s?n'?t work|barely work|so bad|bad pick|garbage pick|piece of|pieces of)/i;
 // Praise, so it can graciously (smugly) accept a compliment too.
 const PRAISE_RE =
@@ -87,12 +100,17 @@ interface Detection {
 }
 
 function detect(text: string, inFollowUp = false): Detection {
-  const addressed = ADDRESS_RE.test(text) || (inFollowUp && looksLikeAQuestionToUs(text));
-  const insulted = INSULT_RE.test(text) || INSULT_PHRASE_RE.test(text);
+  const named = ADDRESS_RE.test(text);
+  const addressed = named || (inFollowUp && looksLikeAQuestionToUs(text));
+
+  // IT ONLY SPEAKS WHEN SPOKEN TO. Overheard trash talk used to trigger it on
+  // its own, and in a real room that made it interject constantly: an eight
+  // person draft is wall to wall profanity and complaining that has nothing to
+  // do with the bot. The insult and praise lists survive only to pick the TONE
+  // and the face for a reply we were already going to make.
+  const insulted = STRONG_INSULT_RE.test(text) || INSULT_PHRASE_RE.test(text) || MILD_INSULT_RE.test(text);
   const praised = !insulted && PRAISE_RE.test(text);
-  // React to being addressed, insulted, OR praised. Cooldown, the never-while-
-  // speaking gate, and the off-by-default flag keep it from becoming chatter.
-  return { react: addressed || insulted || praised, insulted, praised };
+  return { react: addressed, insulted, praised };
 }
 // #endregion
 
@@ -189,9 +207,13 @@ export function startListener(opts: ListenerOptions): () => void {
       // A reply opens the follow-up window; see FOLLOWUP_MS above.
       const inFollowUp = lastComebackAt > 0 && now - lastComebackAt < FOLLOWUP_MS;
       const { react, insulted, praised } = detect(combined, inFollowUp);
+      // An explicit name always gets an answer. Everything else is rate limited,
+      // which is the difference between a bot you can talk to and one that
+      // interjects.
+      const bypassCooldown = ADDRESS_RE.test(combined);
       console.log(`[announcer] heard ${userId}: "${text}"${react ? (inFollowUp && !ADDRESS_RE.test(combined) ? " (reacting: follow-up)" : " (reacting)") : ""}`);
       if (!react) return;
-      if (now - lastComebackAt < COOLDOWN_MS) {
+      if (!bypassCooldown && now - lastComebackAt < COOLDOWN_MS) {
         console.log("[announcer] comeback on cooldown; skipping.");
         return;
       }
