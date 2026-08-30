@@ -88,10 +88,24 @@
   .dv-sec h3 { margin: 10px 8px 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
   .dv-cap { margin: 0 8px 6px; color: var(--muted); font-size: 11.5px; }
   .age { margin: 6px 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); display: flex; align-items: baseline; gap: 10px; }
+  .age .state { font-weight: 700; text-transform: uppercase; letter-spacing: .05em; font-size: 11px; padding: 3px 8px; border-radius: 6px; align-self: center; }
   .age .n { font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1; }
   .age .u { color: var(--muted); font-size: 12px; }
-  .age.fresh .n { color: var(--good); } .age.aging .n { color: var(--warn); } .age.stale .n { color: var(--bad); }
-  .age .note { margin-left: auto; text-align: right; color: var(--muted); font-size: 11px; max-width: 55%; }
+  .age .note { margin-left: auto; text-align: right; color: var(--muted); font-size: 11px; max-width: 52%; }
+  /* State past 45s must read at a glance: a 116s stale plan caused the one bad
+     pick on 30 Aug and was invisible as a bare number. Tint the whole box and
+     pulse when stale, not just the digits. */
+  .age.fresh { border-color: var(--good); }
+  .age.fresh .n { color: var(--good); }
+  .age.fresh .state { color: #0b0c10; background: var(--good); }
+  .age.aging { border-color: var(--warn); }
+  .age.aging .n { color: var(--warn); }
+  .age.aging .state { color: #0b0c10; background: var(--warn); }
+  .age.stale { border-color: var(--bad); background: rgba(229,103,95,.12); animation: stalepulse 1.1s ease-in-out infinite; }
+  .age.stale .n { color: var(--bad); }
+  .age.stale .state { color: #0b0c10; background: var(--bad); }
+  @keyframes stalepulse { 0%,100% { box-shadow: 0 0 0 0 rgba(229,103,95,0); } 50% { box-shadow: 0 0 0 3px rgba(229,103,95,.28); } }
+  @media (prefers-reduced-motion: reduce) { .age.stale { animation: none; } }
   .banner { margin: 6px 8px; padding: 8px 11px; border-radius: 8px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
   .banner.live { border-color: var(--good); color: var(--good); }
   td.gone { color: var(--muted); text-decoration: line-through; }
@@ -383,15 +397,19 @@ function fmt(n, d = 1) { return (n === null || n === undefined) ? "–" : Number
 function newsTag(n) { return n ? ` <span class="ntag ${n.status}" title="${escapeHtml(n.note)}">${n.status}</span>` : ""; }
 function renderAge() {
   const box = $("#ageBox"); if (!box) return;
-  if (planTs === null) { box.className = "age"; box.innerHTML = `<span class="n">–</span><span class="u">no plan logged yet</span>`; return; }
+  if (planTs === null) { box.className = "age";
+    box.innerHTML = `<span class="state" style="color:var(--muted);background:var(--panel)">no plan</span><span class="n">–</span><span class="u">nothing logged yet</span>`; return; }
   const s = Math.max(0, Math.round((Date.now() - planTs) / 1000));
   // 45s is the postmortem's "treat as absent" threshold; the bad pick's plan was 116s old.
   const cls = s < 30 ? "fresh" : s < 45 ? "aging" : "stale";
+  const word = s < 30 ? "fresh" : s < 45 ? "ageing" : "stale";
   const disp = s < 600 ? `${s}` : `${Math.round(s/60)}`;
   const unit = s < 600 ? "seconds old" : "minutes old";
+  const note = cls === "stale"
+    ? "Past 45s the engine treats the plan as absent and picks off the raw value board, where your guidance has no effect. The bad pick on 30 Aug ran on a 116s plan."
+    : "Plans refresh about every 20s off the clock. At 45s the plan is treated as stale and the engine falls back to the raw value board.";
   box.className = "age " + cls;
-  box.innerHTML = `<span class="n">${disp}</span><span class="u">${unit}</span>`
-    + `<span class="note">Plans refresh ~20s off the clock. At 45s the engine treats the plan as absent and falls back to the raw value board; the pick it botched on 30 Aug ran on a 116s plan.</span>`;
+  box.innerHTML = `<span class="state">${word}</span><span class="n">${disp}</span><span class="u">${unit}</span><span class="note">${note}</span>`;
 }
 setInterval(renderAge, 1000);
 
@@ -432,7 +450,10 @@ async function renderDraftView() {
 
   // Backstop queue
   const q = d.queue || [];
-  let queueHtml = `<div class="dv-cap">The engine does not log the queue it pushes, so this is rebuilt with its exact algorithm from current availability. Never K/DEF: Sleeper autopicks down the queue and would surface a defence too early.</div>`;
+  const qCap = d.queueSource === "logged"
+    ? `The exact queue the engine last pushed to Sleeper${d.queueTs ? `, at ${new Date(d.queueTs).toLocaleTimeString()}` : ""}. Never K/DEF: Sleeper autopicks down the queue and would surface a defence too early.`
+    : "The engine has not logged a pushed queue yet, so this is rebuilt with its exact algorithm from current availability. Never K/DEF: Sleeper autopicks down the queue and would surface a defence too early.";
+  let queueHtml = `<div class="dv-cap">${qCap}</div>`;
   queueHtml += q.length
     ? q.map(p => `<span class="chip">${escapeHtml(p.name)}<span class="p">${escapeHtml(p.pos)}${p.bye?` · bye ${p.bye}`:""}</span></span>`).join("")
     : `<p style='color:var(--muted);padding:8px'>Queue empty (no live availability).</p>`;
@@ -464,7 +485,7 @@ async function renderDraftView() {
 
   el.innerHTML = banner
     + `<div class="dv-sec">${planHtml}</div>`
-    + `<div class="dv-sec"><h3>Backstop queue (reconstructed)</h3>${queueHtml}</div>`
+    + `<div class="dv-sec"><h3>Backstop queue ${d.queueSource === "logged" ? "(live)" : "(reconstructed)"}</h3>${queueHtml}</div>`
     + `<div class="dv-sec"><h3>Roster bye load</h3>${byeHtml}</div>`
     + `<div class="dv-sec"><h3>Recent agent overrides</h3>${ovHtml}</div>`;
   renderAge();
