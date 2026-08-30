@@ -282,6 +282,31 @@ function logBoard(globalPick: number, round: number, available: { name: string; 
 // The agent adjusts the PLAN (a ranked shortlist) reacting to the live draft. It
 // never blocks a pick. On any agent error we log it, fall back to the value
 // board, and back off so we don't hammer a failing agent.
+// Live guidance from the manager, re-read on EVERY plan refresh so an edit lands
+// within one cycle (~20s). Deliberately uncached for that reason. It is injected
+// as the last and most salient part of the prompt, and it can override the
+// generic strategy advice above it, but it cannot touch the deterministic rails
+// (positionCap, must-fill, the bye veto) which are enforced in code after the
+// agent has spoken. Any read failure is silently ignored: a missing or unreadable
+// hint file must never be able to stop a draft.
+const GUIDANCE_PATH = process.env.GUIDANCE_PATH ?? "/data/sleeper-coach/guidance.txt";
+let lastGuidance = "";
+async function readGuidance(): Promise<string> {
+  try {
+    const f = Bun.file(GUIDANCE_PATH);
+    if (!(await f.exists())) return "";
+    const t = (await f.text()).trim();
+    if (t && t !== lastGuidance) {
+      console.log(`[draft-run] manager guidance in effect: ${t.replace(/\s+/g, " ").slice(0, 200)}`);
+      logEvent("coach", "guidance", `Manager guidance: ${t.replace(/\s+/g, " ").slice(0, 200)}`, { guidance: t });
+    }
+    lastGuidance = t;
+    return t;
+  } catch {
+    return "";
+  }
+}
+
 async function refreshPlan(available: { name: string; pos: string }[], recent: { round: number; slot: number; name: string; pos: string }[]): Promise<void> {
   await resolveSlot();
   const roster = myDrafted.map((d) => `${d.name} (${d.position})`);
@@ -336,6 +361,7 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
     .slice(-10)
     .map((p) => `R${p.round} team ${p.slot}${p.slot === myDraftSlot ? " [YOU]" : ""}: ${p.name} (${p.pos})`)
     .join("\n") || "(no picks yet)";
+  const guidance = await readGuidance();
   const res = await runAgent({
     partial: false, // whole assistant messages → clean full reasoning in the console
     onEvent: (ev) => {
@@ -368,6 +394,9 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
       (heavyByes.length
         ? `You already have three or more players on the week ${heavyByes.join(" and ")} bye. Break the tie AWAY from that bye unless the player is clearly the best pick.\n\n`
         : "\n") +
+      (guidance
+        ? `\n=== GUIDANCE FROM YOUR MANAGER, written during this draft. This OVERRIDES the general strategy advice below wherever they conflict. Follow it unless it would leave a mandatory starting slot unfilled: ===\n${guidance}\n===\n\n`
+        : "") +
       `Build the strongest STARTING lineup. Prioritise RB and WR heavily early (you start 2 RB, 2 WR, and 2 FLEX). ` +
       `Because RB is scarcer and fills your FLEX, build real RB depth — aim for about five RBs by the end — and don't ` +
       `stack more than about five WRs unless a WR is clearly the best value. You need only ONE tight end: do NOT reach ` +

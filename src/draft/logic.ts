@@ -35,8 +35,13 @@ export function positionCap(pos: string, round: number): number {
   switch (pos) {
     case "QB": return round < 6 ? 0 : round >= 15 ? 2 : 1;
     case "TE": return round < 5 ? 0 : round < 13 ? 1 : 2;
-    case "K": return round >= 14 ? 1 : 0;
-    case "DEF": return round >= 13 ? 1 : 0;
+    // Round gates, env-overridable because the right round depends on the room.
+    // On draft night 2026-08-30 this league took a DEF at pick 57 (ADP 88) and a
+    // K at pick 69 (ADP 135, a 66-pick jump), so a hard round-13 gate would have
+    // guaranteed a replacement-level defence. K stays late: the entire spread
+    // between the best remaining kicker and a replacement is about 4 points.
+    case "K": return round >= Number(process.env.K_MIN_ROUND ?? 14) ? 1 : 0;
+    case "DEF": return round >= Number(process.env.DEF_MIN_ROUND ?? 13) ? 1 : 0;
     case "RB": return 7;
     case "WR": return 7;
     default: return 6;
