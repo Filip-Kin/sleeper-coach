@@ -89,14 +89,29 @@ async function handlePendingTrade(tx: TransactionLike): Promise<void> {
   if (!TRADES_ENABLED) {
     // Shadow mode. Do NOT spawn the agent: it holds the act CLI, and a run whose
     // only possible outcome is a thrown stub is noise, not a decision.
+    //
+    // We DO run the deterministic evaluation, because that is pure and writes
+    // nothing, and an alert that says "reject, this costs 18 starting-lineup
+    // points" is worth reading at 11pm whereas a list of names is not. It is
+    // wrapped separately from the description so a failed projection fetch
+    // degrades the alert rather than losing it.
     const what = await describeTrade(tx).catch(() => "could not read the offer");
+    let verdict = "";
+    try {
+      const { evaluateTransactionForUs } = await import("./analysis/trade-live.ts");
+      const res = await evaluateTransactionForUs(tx);
+      verdict = res.summary;
+    } catch (err) {
+      verdict = `(could not evaluate: ${err instanceof Error ? err.message : String(err)})`;
+    }
     logEvent("coach", "trade-shadow", `Pending trade ${tx.transaction_id} involves us; SHADOW MODE, acting on nothing. ${what}`, {
       transaction_id: tx.transaction_id,
       shadow: true,
+      verdict,
     });
     await sendAlert(
       "Trade offer pending (coach is in shadow mode)",
-      `${what}. The coach will NOT respond. Handle it in Sleeper, or set TRADES_ENABLED=1 once respondTrade is implemented.`,
+      `${what}\n\n${verdict}\n\nThe coach will NOT respond. Handle it in Sleeper, or arm it once respondTrade's selectors are verified against a real offer.`,
     ).catch(() => {});
     markSeen(tx.transaction_id, "shadow");
     return;
