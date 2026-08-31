@@ -128,8 +128,13 @@ export function safePick(game: GameLine): Decision | null {
 }
 
 /** How close to kickoff before we commit the real pick. Games lock individually,
- *  so this is measured per game, not per week. */
-export const FINAL_WINDOW_HOURS = Number(process.env.PICKEM_FINAL_WINDOW_HOURS ?? "3");
+ *  so this is measured per game, not per week.
+ *
+ *  Four hours, not three: the scheduled passes are up to 3.5h apart (12:00 to
+ *  15:30), so a three-hour window could let a game kick off having never been
+ *  inside the window of any pass. Four hours guarantees overlap. It is still
+ *  very late relative to the rivals, who submitted week 1 nine days early. */
+export const FINAL_WINDOW_HOURS = Number(process.env.PICKEM_FINAL_WINDOW_HOURS ?? "4");
 
 export function inFinalWindow(game: GameLine, now: number): boolean {
   return game.startTime - now <= FINAL_WINDOW_HOURS * 3_600_000;

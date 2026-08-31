@@ -302,11 +302,10 @@ const JOB_COMMAND: Record<string, string[]> = {
   // The pick'em pool. One command for every occurrence: run.ts decides for
   // itself whether each game is inside its own final window, so the daily
   // backstop and the pre-kickoff passes are the same code with different timing.
-  "pickem-slate": ["bun", "run", "src/pickem/run.ts"],
-  "pickem-final-thu": ["bun", "run", "src/pickem/run.ts"],
-  "pickem-final-sun": ["bun", "run", "src/pickem/run.ts"],
-  "pickem-final-sun-night": ["bun", "run", "src/pickem/run.ts"],
-  "pickem-final-mon": ["bun", "run", "src/pickem/run.ts"],
+  "pickem-0900": ["bun", "run", "src/pickem/run.ts"],
+  "pickem-1200": ["bun", "run", "src/pickem/run.ts"],
+  "pickem-1530": ["bun", "run", "src/pickem/run.ts"],
+  "pickem-1830": ["bun", "run", "src/pickem/run.ts"],
   "waiver-compute": ["bun", "run", "src/act/waiver-run.ts"],
   "waiver-submit": waiversLive
     ? ["bun", "run", "src/act/waiver-run.ts", "--live"]

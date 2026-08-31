@@ -80,5 +80,35 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
   t("every scheduled job has a command in the daemon", missing.length === 0, missing.join(", "));
 }
 
+// 9. Every real NFL kickoff slot must fall inside the pick'em final window of at
+//    least one scheduled pass. The first cut of this schedule used day-specific
+//    jobs and left the Sunday 16:25 ET slate uncovered: the 11:30 pass was 4.9h
+//    before it and the next pass came after it had locked, so those games would
+//    have kept provisional favourites all season. This asserts the gap is shut,
+//    for midweek and Saturday games too.
+{
+  const WINDOW_H = Number(process.env.PICKEM_FINAL_WINDOW_HOURS ?? "4");
+  const passes = JOBS.filter((j) => j.name.startsWith("pickem-")).map((j) => j.hour + j.minute / 60);
+  t("there is at least one daily pick'em pass", passes.length > 0);
+  t("every pick'em pass is daily, so no day of the week is uncovered",
+    JOBS.filter((j) => j.name.startsWith("pickem-")).every((j) => j.dow === -1));
+
+  // Every kickoff time the NFL actually uses, in ET.
+  const slots: [string, number][] = [
+    ["London 09:30", 9.5], ["Sunday early 13:00", 13], ["Sunday 16:05", 16 + 5 / 60],
+    ["Sunday late 16:25", 16 + 25 / 60], ["Sunday night 20:20", 20 + 20 / 60],
+    ["Monday night 20:15", 20.25], ["Thursday night 20:15", 20.25], ["Thursday 20:35", 20 + 35 / 60],
+    ["Thanksgiving 12:30", 12.5], ["Thanksgiving 16:30", 16.5],
+    ["Black Friday 15:00", 15], ["Christmas 13:00", 13], ["Saturday 20:15", 20.25],
+  ];
+  for (const [label, kickoff] of slots) {
+    // A pass helps only if it runs BEFORE kickoff and within the final window.
+    const covered = passes.some((p) => p <= kickoff && kickoff - p <= WINDOW_H);
+    const nearest = Math.min(...passes.filter((p) => p <= kickoff).map((p) => kickoff - p));
+    t(`${label} ET is inside the final window of a pass`, covered,
+      `nearest pass is ${Number.isFinite(nearest) ? nearest.toFixed(2) : "?"}h before, window is ${WINDOW_H}h`);
+  }
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

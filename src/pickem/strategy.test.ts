@@ -176,9 +176,9 @@ test("the provisional pick is unavailable without a graded line", () => {
 test("the final window is measured per game against its own kickoff", () => {
   const now = 1_000_000_000_000;
   const hour = 3_600_000;
-  expect(FINAL_WINDOW_HOURS).toBe(3);
-  expect(inFinalWindow(game({ startTime: now + 2 * hour }), now)).toBe(true);
-  expect(inFinalWindow(game({ startTime: now + 4 * hour }), now)).toBe(false);
+  expect(FINAL_WINDOW_HOURS).toBe(4);
+  expect(inFinalWindow(game({ startTime: now + 3 * hour }), now)).toBe(true);
+  expect(inFinalWindow(game({ startTime: now + 5 * hour }), now)).toBe(false);
 });
 
 // --- grading ----------------------------------------------------------------
