@@ -657,11 +657,14 @@ function renderPickem(p) {
 
   const rows = p.games.map((g) => {
     const ko = new Date(g.kickoff).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
-    const line = g.gradedSpreadAway === null ? "no line"
-      : `${g.away} ${g.gradedSpreadAway > 0 ? "+" : ""}${g.gradedSpreadAway.toFixed(1)}`;
+    const sp = (n) => `${n > 0 ? "+" : ""}${n.toFixed(1)}`;
+    // The graded line is what Sleeper scores us on and it tracks the OPENING
+    // line. The market figure is the live book. Their disagreement is the edge,
+    // so both are shown side by side rather than only the one we are scored on.
+    const line = g.gradedSpreadAway === null ? "no line" : `graded ${g.away} ${sp(g.gradedSpreadAway)}`;
     const mkt = (g.marketSpreadAway !== null && g.gradedSpreadAway !== null
       && Math.abs(g.marketSpreadAway - g.gradedSpreadAway) > 0.001)
-      ? ` · market ${g.marketSpreadAway > 0 ? "+" : ""}${g.marketSpreadAway.toFixed(1)}` : "";
+      ? ` · now ${sp(g.marketSpreadAway)}` : "";
 
     // Our pick, graded once Sleeper settles it.
     let pick = `<span class="muted">not set</span>`;
@@ -698,6 +701,7 @@ function renderPickem(p) {
   const tb = p.tiebreaker;
   const tbLine = tb.label
     ? `${esc(tb.label)} total: ours ${tb.ours === null ? "not set" : tb.ours}, recommended ${tb.recommended}`
+      + (tb.marketTotal !== null ? ` · market total ${tb.marketTotal}` : "")
       + (tb.rivals.length ? ` · rivals ${tb.rivals.map((r) => `${esc(r.name)} ${r.value}`).join(", ")}` : "")
     : "not designated yet";
 
@@ -707,7 +711,8 @@ function renderPickem(p) {
     <div class="kv"><span class="k">Submitted</span><span class="v num">${p.summary.picksHeld} of ${p.summary.games}</span></div>
     <div class="kv"><span class="k">Still open</span><span class="v num">${p.summary.pickable}</span></div>
     <div class="kv"><span class="k">Edges held</span><span class="v num">${p.summary.edgesHeld}</span></div>
-    <div class="note">${esc(p.format)} Final picks go in ${p.summary.finalWindowMinutes} minutes before each kickoff, because rivals can read our picks exactly as we read theirs. Until then we hold favourites, which leak nothing.</div>
+    <div class="kv"><span class="k">Live book</span><span class="v">${p.summary.marketSource ? esc(p.summary.marketSource) + " &middot; " + p.summary.liveLines + " games (reference)" : "unavailable"}</span></div>
+    <div class="note">${esc(p.format)} The edge is where Sleeper's own market line has moved away from the frozen line it grades us on. Measured 56.3% over 529 games against 52.6% for picking favourites. A live book line was tested and is worse, because two books disagreeing adds more noise than freshness gains, so it is shown here only for reference and used for the tiebreaker total. Final picks go in ${p.summary.finalWindowMinutes} minutes before each kickoff, because rivals can read our picks exactly as we read theirs. Until then we hold favourites, which leak nothing.</div>
   </div>
 
   <div class="card wide">

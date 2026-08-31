@@ -10,21 +10,41 @@
 // That is arbitrage against a stale number, not a forecast.
 //
 // MEASURED on 529 completed 2024+2025 games where the market line was provably
-// last updated BEFORE kickoff (src/pickem/backtest.ts regenerates all of this):
+// last updated BEFORE kickoff (src/pickem/backtest.ts regenerates this):
 //
-//   gap 0.5 only ......  44/ 90 = 48.9%   p=0.62   <- NO edge. Ignored on purpose.
-//   gap 1.0 only ......  89/148 = 60.1%   p=0.008
-//   gap 1.5 only ......   8/ 16 = 50.0%   p=0.60   (n too small to mean anything)
-//   gap 2.0-3.0 .......  31/ 48 = 64.6%   p=0.03
-//   gap >= 3.5 ........  17/ 27 = 63.0%   p=0.12
-//   gap 0, take fav ... 102/200 = 51.0%
-//   FULL SLATE, gap>=1.0 rule else favourite: 298/529 = 56.3%  p=0.002
-//   FULL SLATE, favourite every time:         278/529 = 52.6%  p=0.13
+//   FULL SLATE, gap>=1.0 rule else favourite: 298/529 = 56.33%  p=0.002
+//     out of sample: 2024 56.82%, 2025 55.85%   <- stable across both seasons
+//   FULL SLATE, favourite every time:         278/529 = 52.55%  p=0.13
+//   inverted control:                          94/239 = 39.33%  (mirrors cleanly)
 //
-// The 0.5 bucket is the interesting negative result. Those are exactly the games
-// where a whole-number market line is hooked out to .5, handing the underdog a
-// free half point on the most common NFL margins (3 and 7 are 14.3% and 8.5% of
-// all games). Theory says take the dog. Ninety games say 48.9%. So we don't.
+// The look-ahead filter is not optional. The 15 games whose market line carries
+// a timestamp AFTER kickoff go 14/15 = 93.3% (p=0.0005), which is not skill, it
+// is the result leaking into the line. Excluding them is what makes the rest
+// trustworthy. The edge also survives demanding much earlier stamps, which is
+// the real proof it is not contamination: restricted to lines frozen more than
+// 24h before kickoff (395 games) it is still 55.95%, p=0.01.
+//
+// A GENUINELY LIVE BOOK LINE WAS TESTED AND IS WORSE. Full ESPN/DraftKings
+// open+close history for the same 544 games (src/pickem/odds.ts fetches it):
+//
+//   Sleeper's own field, gap>=1.0 ... 56.33%   2024 56.82% / 2025 55.85%
+//   hybrid, live when Sleeper stale . 55.58%   2024 57.95% / 2025 53.21%
+//   live closing line alone ......... 53.88%
+//
+// Cause: `pickem_spread` and `spread` come from the SAME feed, so their
+// difference is a clean measure of how that feed moved. Graded-minus-other-book
+// mixes real movement with two books simply disagreeing, and the two books sit a
+// mean 0.74 points apart, comparable to the signal itself. Same-source beats
+// fresher-but-different. Also worth recording: the theory that the graded line
+// is simply the opening line is FALSE, it matches an opening line only 40.6% of
+// the time.
+//
+// The 0.5 bucket is the useful negative result. Those are games where a
+// whole-number market line is hooked out to .5, handing the underdog a free half
+// point on the margins NFL games actually land on (3 is 14.3% of games, 7 is
+// 8.5%). Theory says take the dog; 90 games say 48.9%, and the live-book version
+// of the same bucket says 33.3%. So the threshold is a full point and the hook is
+// ignored.
 
 export interface GameLine {
   gameId: string;
@@ -247,15 +267,21 @@ function normalPdf(x: number, mu: number, sd: number): number {
  *  likely totals for which WE are closest, rather than the most likely total.
  *  With rivals clustered at 47 and 50, sitting on 45 wins a wider band than
  *  guessing the mode would. */
-export function bestTiebreaker(rivalGuesses: number[], lo = 20, hi = 75): number {
+export function bestTiebreaker(
+  rivalGuesses: number[], marketTotal?: number, lo = 20, hi = 75,
+): number {
   const rivals = rivalGuesses.filter((v) => Number.isFinite(v));
-  let best = Math.round(TOTAL_POINTS_MEAN);
+  // Centre on the market total for THIS game when we have one. The global prior
+  // treats a 38.5 game and a 51.5 game identically, which is a poor centre to
+  // position around even though positioning is what decides the final answer.
+  const centre = Number.isFinite(marketTotal as number) ? (marketTotal as number) : TOTAL_POINTS_MEAN;
+  let best = Math.round(centre);
   let bestScore = -Infinity;
   for (let guess = lo; guess <= hi; guess++) {
     let mass = 0;
     let absErr = 0;
     for (let total = 0; total <= 120; total++) {
-      const pdf = normalPdf(total, TOTAL_POINTS_MEAN, TOTAL_POINTS_SD);
+      const pdf = normalPdf(total, centre, TOTAL_POINTS_SD);
       absErr += pdf * Math.abs(total - guess);
       const ourDist = Math.abs(total - guess);
       // Ties on the tiebreaker go to nobody in particular, so count a shared

@@ -7,6 +7,7 @@
 import { config } from "../config.ts";
 import { browserGql, fetchWeek, fetchMyLegs, fetchLeaguePicks, currentLegId, type PickemGame, type Gql } from "../pickem/client.ts";
 import { decide, safePick, isPickable, inFinalWindow, bestTiebreaker, gradePick, scorePicks, FINAL_WINDOW_MIN } from "../pickem/strategy.ts";
+import { fetchMarketLines } from "../pickem/odds.ts";
 
 export interface PickemGameView {
   gameId: string;
@@ -17,6 +18,9 @@ export interface PickemGameView {
   /** The line we are graded against, from the away team's view. */
   gradedSpreadAway: number | null;
   marketSpreadAway: number | null;
+  /** The opening line. Sleeper's graded line tracks it, so this is what our
+   *  disagreement is measured FROM. */
+  openSpreadAway: number | null;
   locked: boolean;
   pickable: boolean;
   inFinalWindow: boolean;
@@ -54,11 +58,15 @@ export interface PickemView {
     edgesHeld: number;
     pickable: number;
     finalWindowMinutes: number;
+    /** Which book the live line came from, or null if we fell back to Sleeper. */
+    marketSource: string | null;
+    liveLines: number;
   };
   tiebreaker: {
     label: string | null;
     ours: number | null;
     recommended: number;
+    marketTotal: number | null;
     rivals: { name: string; value: number }[];
   };
   standings: PickemStandingRow[];
@@ -89,12 +97,25 @@ export async function pickemView(weekArg?: number): Promise<PickemView> {
   if (cache && cache.week === week && Date.now() - cache.at < TTL_MS) return cache.view;
 
   const gql: Gql = browserGql();
-  const [games, myLegs, leaguePicks, nameOf] = await Promise.all([
+  const [sleeperGames, myLegs, leaguePicks, nameOf, market] = await Promise.all([
     fetchWeek(gql, week),
     fetchMyLegs(gql, leagueId, rosterId),
     fetchLeaguePicks(gql, leagueId, legId),
     names(leagueId),
+    fetchMarketLines(config.season, week),
   ]);
+
+  // Same precedence the runner uses: Sleeper's own line decides (measured best
+  // over 529 games), the live book only fills a gap. See the long note in
+  // src/pickem/run.ts for why fresher-but-different loses to same-source.
+  const games = sleeperGames.map((g) => {
+    const m = market.get(`${g.away}@${g.home}`);
+    return g.marketSpreadAway !== null || m?.spreadAway === null || m?.spreadAway === undefined
+      ? g
+      : { ...g, marketSpreadAway: m.spreadAway };
+  });
+  const marketProvider = [...market.values()].find((m) => m.provider)?.provider ?? null;
+  const liveCount = market.size;
 
   const mine = myLegs.find((l) => l.legId === legId) ?? { legId, status: "unknown", picks: {}, tiebreaker: null };
   const now = Date.now();
@@ -118,6 +139,7 @@ export async function pickemView(weekArg?: number): Promise<PickemView> {
         status: g.status,
         gradedSpreadAway: g.gradedSpreadAway,
         marketSpreadAway: g.marketSpreadAway,
+        openSpreadAway: market.get(`${g.away}@${g.home}`)?.openAway ?? null,
         locked: g.gradedLocked || !pickable,
         pickable,
         inFinalWindow: final,
@@ -186,11 +208,17 @@ export async function pickemView(weekArg?: number): Promise<PickemView> {
       edgesHeld: gameViews.filter((g) => g.edge > 0 && g.ourPick === g.wants).length,
       pickable: gameViews.filter((g) => g.pickable).length,
       finalWindowMinutes: FINAL_WINDOW_MIN,
+    marketSource: marketProvider,
+    liveLines: liveCount,
     },
     tiebreaker: {
       label: tbGame ? `${tbGame.away} at ${tbGame.home}` : null,
       ours: mine.tiebreaker?.value ?? null,
-      recommended: bestTiebreaker(rivalTbs.map((r) => r.value)),
+      recommended: bestTiebreaker(
+      rivalTbs.map((r) => r.value),
+      tbGame ? market.get(`${tbGame.away}@${tbGame.home}`)?.total ?? undefined : undefined,
+    ),
+    marketTotal: tbGame ? market.get(`${tbGame.away}@${tbGame.home}`)?.total ?? null : null,
       rivals: rivalTbs,
     },
     standings,

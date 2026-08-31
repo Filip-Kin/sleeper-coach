@@ -273,3 +273,26 @@ test("a full unplayed slate scores zero, so field mode cannot be fooled", () => 
   const picks = Object.fromEntries(games.map((g) => [g.gameId, { team: "CHI" }]));
   expect(scorePicks(games, picks)).toEqual({ correct: 0, graded: 0 });
 });
+
+// --- tiebreaker centred on the market total ---------------------------------
+
+test("the tiebreaker centres on the market total when we have one", () => {
+  // A 38.5 game and a 51.5 game must not get the same answer. With no rivals,
+  // the guess should track the market total, not the league-wide prior.
+  const low = bestTiebreaker([], 38.5);
+  const high = bestTiebreaker([], 51.5);
+  expect(low).toBeLessThan(high);
+  expect(Math.abs(low - 38.5)).toBeLessThanOrEqual(2);
+  expect(Math.abs(high - 51.5)).toBeLessThanOrEqual(2);
+});
+
+test("the tiebreaker still avoids rivals when centred on a market total", () => {
+  const t = bestTiebreaker([44, 45, 46], 45);
+  expect([44, 45, 46]).not.toContain(t);
+});
+
+test("without a market total the tiebreaker falls back to the global prior", () => {
+  const t = bestTiebreaker([]);
+  expect(t).toBeGreaterThanOrEqual(43);
+  expect(t).toBeLessThanOrEqual(47);
+});

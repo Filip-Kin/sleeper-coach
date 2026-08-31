@@ -24,6 +24,7 @@ import {
   decideSlate, isPickable, bestTiebreaker, fieldMode, applyFieldMode, safePick, inFinalWindow,
   scorePicks, FINAL_WINDOW_MIN, type Decision,
 } from "./strategy.ts";
+import { fetchMarketLines } from "./odds.ts";
 
 const args = process.argv.slice(2);
 const DRY = args.includes("--dry");
@@ -56,11 +57,67 @@ async function main(): Promise<void> {
   const week = legWeek(legId);
   if (!week) throw new Error(`cannot read a week out of leg ${legId}`);
 
-  const [games, myLegs, leaguePicks] = await Promise.all([
+  const [sleeperGames, myLegs, leaguePicks, market] = await Promise.all([
     fetchWeek(gql, week),
     fetchMyLegs(gql, leagueId, rosterId),
     fetchLeaguePicks(gql, leagueId, legId),
+    // A genuinely live line. Sleeper's own `spread` stops moving days out, and
+    // `pickem_spread` (what we are graded on) tracks the OPENING line, so the
+    // fresher this comparison is the bigger the disagreement we can trade on.
+    fetchMarketLines(config.season, week),
   ]);
+
+  // WHICH MARKET LINE WE DECIDE AGAINST, and why it is not the live book.
+  //
+  // I assumed a live book line would beat Sleeper's own (staler) `spread` field
+  // and measured it over 529 completed games. It does not:
+  //
+  //   Sleeper's own field, gap >= 1.0 ... 56.33%   2024 56.82% / 2025 55.85%
+  //   hybrid, ESPN when Sleeper stale ... 55.58%   2024 57.95% / 2025 53.21%
+  //   ESPN closing line alone .......... 53.88%
+  //   favourites baseline .............. 52.55%
+  //
+  // Sleeper's field wins and is the only candidate stable across both seasons.
+  // The reason is book-to-book noise: `pickem_spread` and `spread` come from the
+  // same feed, so their difference is a clean measure of how that feed moved,
+  // whereas graded-minus-ESPN mixes real movement with two books simply
+  // disagreeing (mean absolute difference between the two books is 0.74 points,
+  // comparable to the signal itself). Same-source beats fresher-but-different.
+  //
+  // So the live feed is used for what it IS better at: filling a missing Sleeper
+  // line, supplying the tiebreaker total, and being logged so that by mid-season
+  // we can re-check this against real decision-time data instead of a backtest.
+  let liveFallbacks = 0;
+  const games = sleeperGames.map((g) => {
+    const m = market.get(`${g.away}@${g.home}`);
+    if (g.marketSpreadAway !== null || m?.spreadAway === null || m?.spreadAway === undefined) return g;
+    liveFallbacks++;
+    return { ...g, marketSpreadAway: m.spreadAway };
+  });
+  const marketTotals = new Map(
+    [...market.entries()].filter(([, m]) => m.total !== null).map(([k, m]) => [k, m.total as number]),
+  );
+  const provider = [...market.values()].find((m) => m.provider)?.provider ?? "none";
+  console.log(`[pickem] market: Sleeper's own line (measured best); live book ${provider}` +
+    ` covers ${market.size} games, used as fallback on ${liveFallbacks}, and for the tiebreaker total`);
+
+  // Log both lines every pass. The backtest could only read Sleeper's `spread`
+  // as it stands TODAY for a past game, which may be its settled value rather
+  // than what we would have seen at decision time. Recording both as we actually
+  // see them is the only way to check the live edge honestly later.
+  logEvent("coach", "pickem-lines", `week ${week}: line snapshot`, {
+    week,
+    provider,
+    games: sleeperGames.map((g) => {
+      const m = market.get(`${g.away}@${g.home}`);
+      return {
+        g: `${g.away}@${g.home}`, graded: g.gradedSpreadAway,
+        sleeper: g.marketSpreadAway, live: m?.spreadAway ?? null,
+        liveOpen: m?.openAway ?? null, total: m?.total ?? null,
+        hoursToKickoff: Math.round((g.startTime - now) / 360_000) / 10,
+      };
+    }),
+  });
 
   const mine = myLegs.find((l) => l.legId === legId) ?? { legId, status: "?", picks: {}, tiebreaker: null };
   const now = Date.now();
@@ -146,11 +203,16 @@ async function main(): Promise<void> {
   // decided by where the rivals sat, which is already fixed.
   const rivalTbs = rivalIds.map((r) => leaguePicks[r]?.tiebreaker).filter((t) => t);
   const tbGame = tiebreakerGame(games, rivalTbs.map((t) => t!.gameId));
-  const wantTb = bestTiebreaker(rivalTbs.map((t) => t!.value));
+  // The market total for THAT game beats a global prior by a mile: a 38.5 game
+  // and a 51.5 game are both "44.8" to the prior. Positioning still decides the
+  // final answer, but it should position around the right centre.
+  const tbTotal = tbGame ? marketTotals.get(`${tbGame.away}@${tbGame.home}`) ?? null : null;
+  const wantTb = bestTiebreaker(rivalTbs.map((t) => t!.value), tbTotal ?? undefined);
   const tbNeedsWrite = tbGame !== null && mine.tiebreaker?.value !== wantTb;
   if (tbGame) {
     console.log(`[pickem] tiebreaker ${tbGame.away}@${tbGame.home}: want ${wantTb}` +
-      ` (held ${mine.tiebreaker?.value ?? "none"}; rivals ${rivalTbs.map((t) => t!.value).join(", ") || "none"})`);
+      ` (market total ${tbTotal ?? "unknown"}; held ${mine.tiebreaker?.value ?? "none"};` +
+      ` rivals ${rivalTbs.map((t) => t!.value).join(", ") || "none"})`);
   }
 
   if (DRY) {
