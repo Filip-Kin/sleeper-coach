@@ -62,10 +62,34 @@ export interface FairnessConfig extends TradeConfig {
   // modest: a bye hits one week of seventeen, so it breaks ties between similar
   // trades rather than justifying a bad one.
   byeReliefPts: number;
-  // How much better for us than for them the trade must be, in rest-of-season
-  // points. 0 implements Filip's rule exactly: equal value is acceptable, them
-  // gaining more is not. Positive values demand we win the trade outright.
+  // DEPRECATED as a veto, kept so callers do not break. It is no longer a reject
+  // rail. A trade that helps them more than us can still be clearly correct to
+  // take, and refusing those costs real points. See opponentWeight below.
   requireOurEdgePts: number;
+  // Their gain is real but DILUTED by the schedule: our gain applies in every
+  // remaining week, theirs only hurts us head to head. With seven rivals over
+  // fifteen regular weeks that is about 2/15. Passed per evaluation because it
+  // changes through the season, and rises exactly when protecting a lead matters.
+  remainingWeeks: number;
+  headToHeadRemaining: number;
+  // A rival contending for the same playoff place costs more than the raw
+  // schedule says, because their seeding is our seeding. 1 = no extra weight.
+  rivalThreatMultiplier: number;
+  // The edge must beat projection NOISE, not merely be positive. Required edge is
+  // max(flatMarginPts, valueMoved * errorFraction): a +6 edge on a blockbuster is
+  // inside the error bars and is a coin flip with transaction risk attached,
+  // while the same +6 on two fringe players is real.
+  flatMarginPts: number;
+  errorFraction: number;
+  // Every trade is irreversible and priced on noisy projections, so volume
+  // multiplies model error rather than averaging it out.
+  maxTradesPerWeek: number;
+  // Our own lineup must not get WORSE, whatever the trade does to them. This is
+  // the floor that stops a trade being accepted purely because it hurts a rival.
+  // 0 means "must not lose ground"; a positive value demands we actually improve.
+  minOwnGainPts: number;
+  // Cost of a bench slot consumed when a trade grows our roster.
+  rosterSlotCostPts: number;
 }
 
 export const DEFAULT_FAIRNESS: FairnessConfig = {
@@ -73,7 +97,32 @@ export const DEFAULT_FAIRNESS: FairnessConfig = {
   requireOurEdgePts: 0,
   crowdedByeAt: 3,
   byeReliefPts: 4,
+  remainingWeeks: 15,
+  headToHeadRemaining: 2,
+  rivalThreatMultiplier: 1,
+  flatMarginPts: 12, // about 0.7 pts/week of real edge before it is worth the churn
+  errorFraction: 0.08, // 8% of the value changing hands
+  maxTradesPerWeek: 2,
+  minOwnGainPts: 0,
+  rosterSlotCostPts: 5,
 };
+
+// How much a rival's gain actually costs us. Rises as the season shortens.
+export function opponentWeight(cfg: FairnessConfig): number {
+  const weeks = Math.max(1, cfg.remainingWeeks);
+  const h2h = Math.max(0, Math.min(cfg.headToHeadRemaining, weeks));
+  return (h2h / weeks) * Math.max(1, cfg.rivalThreatMultiplier);
+}
+
+// Required edge, scaled by the BIGGEST single player involved rather than the
+// gross sum. Scaling by the sum was wrong: swapping two similar 230-point
+// receivers moves 460 gross and demanded a 37-point edge, which blocks every
+// sensible upgrade. What we are actually uncertain about is the NET, and the net
+// uncertainty tracks the size of the largest piece, not the total changing hands.
+export function requiredEdge(offer: TradeOffer, cfg: FairnessConfig): number {
+  const biggest = [...offer.receive, ...offer.give].reduce((m, p) => Math.max(m, Math.abs(p.points)), 0);
+  return Math.max(cfg.flatMarginPts, biggest * cfg.errorFraction);
+}
 
 // How many of our players sit on each bye week.
 export function byeLoad(roster: TradePlayer[]): Map<number, number> {
@@ -102,7 +151,9 @@ export function byeRelief(offer: TradeOffer, roster: TradePlayer[], cfg: Fairnes
 export interface TwoSidedEvaluation extends TradeEvaluation {
   ourGain: number; // our starting-lineup delta
   theirGain: number; // the counterparty's starting-lineup delta
-  edge: number; // ourGain - theirGain; must be >= requireOurEdgePts to accept
+  edge: number; // ourGain - theirGain, kept for reporting
+  netValue: number; // ourGain - theirGain * opponentWeight; the number that decides
+  requiredEdge: number; // the noise-scaled margin netValue had to beat
   fairnessBlocks: string[]; // non-empty forces a reject no matter how good ours looks
 }
 
@@ -115,8 +166,22 @@ export function evaluateTradeTwoSided(
   theirRoster: TradePlayer[],
   cfg: FairnessConfig = DEFAULT_FAIRNESS,
 ): TwoSidedEvaluation {
-  // Our side, with all the existing rails, exactly as before.
-  const ours = evaluateTrade(offer, ourRoster, cfg);
+  // A TRADE IS NOT A DROP, so it does not get the drop rails wholesale.
+  // protectTopN exists to stop us dropping a good player for a streamer, where we
+  // receive nothing. In a trade we receive value back, and the lineup delta plus
+  // the unfillable-slot check below already measure whether we come out ahead.
+  // Tested against our real roster shape, protectTopN=12 on a 16-man roster left
+  // only our worst four players tradeable, which is no trading at all.
+  //
+  // The rails that DO still apply: the never-drop list, and the injured stash due
+  // back before the playoffs, because a stash's low current projection makes the
+  // lineup delta undervalue him and that is exactly the player a rival will try
+  // to buy cheaply.
+  const tradeCfg: FairnessConfig = {
+    ...cfg,
+    rails: { ...cfg.rails, protectTopN: 0 },
+  };
+  const ours = evaluateTrade(offer, ourRoster, tradeCfg);
 
   // Their side is the mirror image of the same swap.
   const theirBefore = bestLineup(theirRoster).total;
@@ -129,27 +194,63 @@ export function evaluateTradeTwoSided(
   const ourGain = ours.lineupDelta;
   const edge = Math.round((ourGain - theirGain) * 10) / 10;
 
+  const w = opponentWeight(cfg);
+  // Taking on a player we do not need is not free: he occupies a bench slot that
+  // a waiver add might have wanted. Only charged when the trade grows our roster.
+  const slotCost = Math.max(0, offer.receive.length - offer.give.length) * cfg.rosterSlotCostPts;
+  // SYMMETRIC in their delta: their gain counts against us and their LOSS counts
+  // for us, both at the schedule weight. Filip pushed back on an earlier clamp
+  // that ignored their loss entirely, and he is right that "we lose nothing and
+  // they lose real points" is a good trade in a competition where their record
+  // affects our seeding and we meet them head to head.
+  //
+  // What the clamp was actually protecting against was a different failure: a
+  // swap of our worthless backup QB for a receiver we would never start scored
+  // +25 net purely because it cost them 190, and was accepted while doing nothing
+  // whatsoever for us. That is fixed properly below by a floor on OUR OWN gain,
+  // which is the real requirement, rather than by pretending their loss is worth
+  // nothing.
+  const netValue = Math.round((ourGain - theirGain * w - slotCost) * 10) / 10;
+  const need = Math.round(requiredEdge(offer, cfg) * 10) / 10;
+
   const fairnessBlocks: string[] = [];
-  if (edge < cfg.requireOurEdgePts) {
-    fairnessBlocks.push(
-      `they gain ${theirGain} and we gain ${ourGain} (edge ${edge}), which fails the equal-value rule` +
-        (cfg.requireOurEdgePts > 0 ? ` of +${cfg.requireOurEdgePts}` : ""),
-    );
-  }
-  // An acquisition we cannot trust the projection on.
   for (const p of offer.receive) {
     const why = refusedForInjury(p);
     if (why) fairnessBlocks.push(why);
   }
+  // Never accept a trade that leaves a mandatory slot unfillable. Points are
+  // recoverable; an empty starting slot every week is not.
+  const afterRoster = [
+    ...ourRoster.filter((p) => !offer.give.some((g) => g.name.toLowerCase() === p.name.toLowerCase())),
+    ...offer.receive,
+  ];
+  const unfilled = bestLineup(afterRoster).starters.filter((x) => x.player === null).map((x) => x.slot);
+  if (unfilled.length) fairnessBlocks.push(`would leave ${unfilled.join(", ")} unfillable`);
 
-  const reasons = [...ours.reasons, `their lineup ${theirBefore.toFixed(1)} -> ${theirAfter.toFixed(1)} (${theirGain >= 0 ? "+" : ""}${theirGain})`];
-  let verdict: TradeVerdict = ours.verdict;
-  if (fairnessBlocks.length) {
-    verdict = "reject";
-    reasons.unshift(...fairnessBlocks);
+  const reasons = [
+    ...ours.reasons,
+    `their lineup ${theirBefore.toFixed(1)} -> ${theirAfter.toFixed(1)} (${theirGain >= 0 ? "+" : ""}${theirGain})`,
+    `net of schedule: ${ourGain} - ${theirGain} x ${w.toFixed(2)} = ${netValue}, need ${need}`,
+  ];
+
+  // BINARY, because Claude is the manager. Filip wants no involvement in
+  // accepting or rejecting, so there is no surface-for-a-human band: a trade is
+  // taken when it clears the rails and beats the noise margin, refused otherwise.
+  //
+  // Deliberately NOT secret. A manager who probes until they find this boundary
+  // can only execute trades that are genuinely good for us, because the boundary
+  // sits at true indifference plus a noise margin. A CORRECT threshold is safe to
+  // leak, which is what makes probing pointless rather than merely difficult.
+  // Our own lineup must not go backwards, no matter how much it hurts them.
+  if (ourGain < cfg.minOwnGainPts) {
+    fairnessBlocks.push(`our own lineup gains only ${ourGain}, below the floor of ${cfg.minOwnGainPts}`);
   }
 
-  return { ...ours, verdict, reasons, ourGain, theirGain, edge, fairnessBlocks };
+  let verdict: TradeVerdict = "reject";
+  if (!ours.railBlocks.length && !fairnessBlocks.length && netValue >= need) verdict = "accept";
+  if (fairnessBlocks.length) reasons.unshift(...fairnessBlocks);
+
+  return { ...ours, verdict, reasons, ourGain, theirGain, edge, netValue, requiredEdge: need, fairnessBlocks };
 }
 // #endregion
 
