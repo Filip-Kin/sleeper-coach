@@ -244,6 +244,26 @@ export function scorePicks(
   return { correct, graded };
 }
 
+/** Games that kicked off WITHOUT the edge rule ever being applied to them.
+ *
+ *  The two-stage scheme is only worth anything if the pre-kickoff pass actually
+ *  runs. A single failed pass is fine and deliberately not alerted: the next
+ *  poll retries and we are never blank. But if the browser wedges for a week we
+ *  would quietly keep provisional favourites, which is the measured 52.5% rather
+ *  than 56.3%, and nothing would say so. This is the detector for that.
+ *
+ *  `finalised` maps gameId to when the rule was applied; any negative value means
+ *  "already reported", so an alert fires once rather than every pass. The lookback
+ *  stops us re-reporting the whole season on a fresh state file. */
+export function missedFinalPasses<T extends { gameId: string; startTime: number }>(
+  games: T[], finalised: Record<string, number>, now: number, lookbackMs = 36 * 3_600_000,
+): T[] {
+  return games.filter((g) =>
+    g.startTime <= now &&
+    now - g.startTime < lookbackMs &&
+    finalised[g.gameId] === undefined);
+}
+
 // ---------------------------------------------------------------------------
 // Tiebreaker
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@
 
 import { config } from "../config.ts";
 import { logEvent } from "../log.ts";
+import { sendAlert } from "../alert.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import {
   browserGql, fetchWeek, fetchMyLegs, fetchLeaguePicks, submitPick, setTiebreaker,
@@ -22,7 +23,7 @@ import {
 } from "./client.ts";
 import {
   decideSlate, isPickable, bestTiebreaker, fieldMode, applyFieldMode, safePick, inFinalWindow,
-  scorePicks, FINAL_WINDOW_MIN, type Decision,
+  scorePicks, missedFinalPasses, FINAL_WINDOW_MIN, type Decision,
 } from "./strategy.ts";
 import { fetchMarketLines } from "./odds.ts";
 import { probeLiquidity } from "./kalshi.ts";
@@ -155,6 +156,36 @@ async function main(): Promise<void> {
   console.log(`[pickem] ${games.length} games, ${pickable.length} still pickable, we hold ${Object.keys(mine.picks).length} picks`);
   console.log(`[pickem] score: us ${ourScore}, best rival ${bestRival}`);
 
+  // DID WE ACTUALLY GET A FINAL PASS IN? The two-stage scheme is only worth
+  // anything if the pre-kickoff pass really runs. If the browser wedges for a
+  // week we would quietly keep the provisional favourites, which is the measured
+  // 52.5% instead of 56.3%, and nothing would say so. Individual failed passes
+  // are deliberately not alerted (the next poll retries, and we are never blank),
+  // but a game kicking off having NEVER been finalised is a real degradation and
+  // has to be noticed.
+  const FINALISED = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-finalised.json`;
+  let finalised: Record<string, number> = {};
+  try {
+    const f = Bun.file(FINALISED);
+    if (await f.exists()) finalised = (await f.json()) as Record<string, number>;
+  } catch { /* a corrupt state file must not stop us picking */ }
+
+  const missed = missedFinalPasses(games, finalised, now);
+  if (missed.length) {
+    const list = missed.map((g) => `${g.away}@${g.home}`).join(", ");
+    console.log(`[pickem] DEGRADED: ${missed.length} game(s) kicked off without a final pass: ${list}`);
+    logEvent("coach", "pickem-degraded", `${missed.length} game(s) kicked off holding only a provisional pick`, {
+      week, games: missed.map((g) => `${g.away}@${g.home}`),
+    });
+    for (const g of missed) finalised[g.gameId] = -1; // mark so we alert once, not every pass
+    await sendAlert("Pick'em degraded",
+      `${missed.length} game(s) kicked off with only the provisional favourite: ${list}. ` +
+      `The pre-kickoff pass did not run, so the edge rule was not applied to them.`).catch(() => {});
+    // Persist here, not just at the end: the dry and frozen paths return early,
+    // and without this the same alert would fire on every pass.
+    await Bun.write(FINALISED, JSON.stringify(finalised)).catch(() => {});
+  }
+
   // TWO-STAGE SUBMISSION. Rivals can read our picks through the same endpoint we
   // read theirs, so anything submitted days early is copyable. Far from kickoff
   // we therefore only fill BLANK games, and only with the favourite, which leaks
@@ -211,6 +242,7 @@ async function main(): Promise<void> {
     const edge = d.edge > 0 ? ` EDGE ${d.edge.toFixed(1)}pt` : "";
     if (held === d.team) {
       console.log(`  = ${label.padEnd(11)} ${d.team.padEnd(4)} already final${edge}`);
+      finalised[d.gameId] = now; // the edge rule has been applied to this game
       continue;
     }
     console.log(`  ${held ? "~" : "+"} ${label.padEnd(11)} ${d.team.padEnd(4)}${edge}  ${d.reason}`);
@@ -245,6 +277,7 @@ async function main(): Promise<void> {
   }
   if (!writes.length && !tbNeedsWrite) {
     console.log("[pickem] nothing to change");
+    await Bun.write(FINALISED, JSON.stringify(finalised)).catch(() => {});
     return;
   }
 
@@ -271,6 +304,9 @@ async function main(): Promise<void> {
     }
   }
   console.log(`[pickem] wrote ${ok}/${writes.length} picks`);
+  // Persist which games have had the real rule applied, so a kickoff without one
+  // is detectable next pass rather than invisible.
+  await Bun.write(FINALISED, JSON.stringify(finalised)).catch(() => {});
   logEvent("coach", "pickem-picks", `week ${week}: set ${ok} pick${ok === 1 ? "" : "s"} (mode ${mode})`, {
     legId, week, mode, ourScore, bestRival,
     picks: writes.map((w) => ({ game: w.gameId, team: w.team, was: w.was, why: w.reason })),

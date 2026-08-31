@@ -296,3 +296,36 @@ test("without a market total the tiebreaker falls back to the global prior", () 
   expect(t).toBeGreaterThanOrEqual(43);
   expect(t).toBeLessThanOrEqual(47);
 });
+
+// --- degradation detection --------------------------------------------------
+
+import { missedFinalPasses } from "./strategy.ts";
+
+const gk = (gameId: string, startTime: number) => ({ gameId, startTime });
+
+test("flags a game that kicked off with no final pass applied", () => {
+  const now = 1_000_000_000_000;
+  const hour = 3_600_000;
+  const games = [gk("a", now - 2 * hour), gk("b", now + 2 * hour)];
+  expect(missedFinalPasses(games, {}, now).map((g) => g.gameId)).toEqual(["a"]);
+});
+
+test("does not flag a game the rule was applied to", () => {
+  const now = 1_000_000_000_000;
+  const games = [gk("a", now - 2 * 3_600_000)];
+  expect(missedFinalPasses(games, { a: now - 3_600_000 }, now)).toEqual([]);
+});
+
+test("reports once, not every pass", () => {
+  // A negative marker means already reported. Without this the alert repeats.
+  const now = 1_000_000_000_000;
+  const games = [gk("a", now - 2 * 3_600_000)];
+  expect(missedFinalPasses(games, { a: -1 }, now)).toEqual([]);
+});
+
+test("does not re-report the whole season from a fresh state file", () => {
+  const now = 1_000_000_000_000;
+  const day = 86_400_000;
+  const games = [gk("old", now - 30 * day), gk("recent", now - 2 * 3_600_000)];
+  expect(missedFinalPasses(games, {}, now).map((g) => g.gameId)).toEqual(["recent"]);
+});
