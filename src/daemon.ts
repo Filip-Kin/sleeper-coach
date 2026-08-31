@@ -6,6 +6,8 @@ import { sleeper } from "./sleeper/client.ts";
 import { runAgent } from "./agent/runner.ts";
 import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
+import { JOBS, isDue, type Job } from "./schedule.ts";
+import { freezeState } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
 // shape: an infinite poll loop with durable SQLite state, each cycle wrapped so
@@ -32,6 +34,13 @@ db.run(`CREATE TABLE IF NOT EXISTS seen_transactions (
   transaction_id TEXT PRIMARY KEY,
   status TEXT,
   first_seen INTEGER
+)`);
+// Which scheduled occurrence of each job we have already handled. Durable on
+// purpose: "have I run this week's Sunday lock" must survive a container restart,
+// which is the whole reason this can replace host systemd timers.
+db.run(`CREATE TABLE IF NOT EXISTS scheduled_runs (
+  job TEXT PRIMARY KEY,
+  last_run INTEGER
 )`);
 db.run(`CREATE TABLE IF NOT EXISTS agent_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,6 +182,86 @@ async function checkAuth(): Promise<void> {
 }
 // #endregion
 
+// #region in-container scheduling
+// Replaces the host systemd timers. Filip: "I want this to run containerized so
+// it's not using my systemd timer." Every daemon poll asks each job whether its
+// most recent occurrence has passed unhandled; the answer is durable in SQLite so
+// a restart cannot double-fire or silently skip a week.
+function lastRunOf(job: string): number {
+  const row = db.query("SELECT last_run FROM scheduled_runs WHERE job = ?").get(job) as { last_run?: number } | null;
+  return row?.last_run ?? 0;
+}
+function markRun(job: string, occurrence: number): void {
+  db.run("INSERT OR REPLACE INTO scheduled_runs (job, last_run) VALUES (?, ?)", [job, occurrence]);
+}
+
+// Each job maps to a script already exercised by hand. Running them as separate
+// processes rather than in-process is deliberate: a job that hangs or throws
+// cannot take the daemon down with it, and each run's output lands in the
+// container log where it can be read after the fact.
+const JOB_COMMAND: Record<string, string[]> = {
+  "lineup-thursday": ["bun", "run", "src/act/lineup-run.ts", "--live"],
+  "lineup-sunday": ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"],
+  "inactive-sunday": ["bun", "run", "src/act/lineup-run.ts", "--live"],
+  "inactive-monday": ["bun", "run", "src/act/lineup-run.ts", "--live"],
+  "waiver-compute": ["bun", "run", "src/act/waiver-run.ts"],
+  "waiver-submit": ["bun", "run", "src/act/waiver-run.ts"],
+};
+
+async function runJob(job: Job, occurrence: number): Promise<void> {
+  const cmd = JOB_COMMAND[job.name];
+  if (!cmd) {
+    console.error(`[schedule] ${job.name} has no command; skipping`);
+    return;
+  }
+  const frozen = freezeState();
+  if (frozen.frozen) {
+    // Mark it handled anyway: the freeze is a deliberate human decision, and we
+    // do not want a queue of missed locks all firing the moment it is lifted.
+    console.log(`[schedule] ${job.name} skipped, ${frozen.reason}`);
+    logEvent("coach", "schedule-frozen", `${job.name} skipped: ${frozen.reason}`, { job: job.name });
+    markRun(job.name, occurrence);
+    return;
+  }
+  console.log(`[schedule] running ${job.name}: ${cmd.join(" ")}`);
+  logEvent("coach", "schedule-run", `Running ${job.name}.`, { job: job.name, occurrence });
+  const t0 = Date.now();
+  const proc = Bun.spawn(cmd, { cwd: "/app", stdout: "pipe", stderr: "pipe" });
+  const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  const secs = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(out.trim().split("\n").slice(-25).join("\n"));
+  if (code !== 0) {
+    console.error(`[schedule] ${job.name} exited ${code} after ${secs}s: ${err.trim().slice(0, 400)}`);
+    logEvent("coach", "schedule-failed", `${job.name} exited ${code}.`, { job: job.name, code, stderr: err.trim().slice(0, 600) });
+    await sendAlert(`Scheduled job failed: ${job.name}`, `Exited ${code} after ${secs}s. ${err.trim().slice(0, 300)}`).catch(() => {});
+    // Mark it handled regardless. Retrying a half-applied roster write on the
+    // next 90s poll is more dangerous than missing the lock, and the alert has
+    // already gone out.
+    markRun(job.name, occurrence);
+    return;
+  }
+  console.log(`[schedule] ${job.name} finished in ${secs}s`);
+  logEvent("coach", "schedule-done", `${job.name} finished in ${secs}s.`, { job: job.name });
+  markRun(job.name, occurrence);
+}
+
+async function runDueJobs(): Promise<void> {
+  if (draftActive()) return; // never fight a draft for the shared browser
+  const now = Date.now();
+  for (const job of JOBS) {
+    const v = isDue(job, now, lastRunOf(job.name));
+    if (v.due && v.occurrence !== null) {
+      await runJob(job, v.occurrence);
+    } else if (v.occurrence !== null && v.reason.includes("skipping")) {
+      // Record it so the skip is logged once rather than every 90 seconds.
+      console.log(`[schedule] ${job.name}: ${v.reason}`);
+      logEvent("coach", "schedule-skipped", `${job.name}: ${v.reason}`, { job: job.name });
+      markRun(job.name, v.occurrence);
+    }
+  }
+}
+// #endregion
+
 async function pollOnce(): Promise<void> {
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
@@ -190,11 +279,15 @@ async function pollOnce(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  logEvent("daemon", "online", "Daemon started; watching for trades and auth.");
+  logEvent("daemon", "online", "Daemon started; watching for trades, auth and the weekly schedule.");
   console.log(`[daemon] polling every ${POLL_INTERVAL_MS / 1000}s, db=${DB_PATH}`);
+  for (const j of JOBS) {
+    console.log(`[schedule] ${j.name.padEnd(18)} ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][j.dow]} ${String(j.hour).padStart(2, "0")}:${String(j.minute).padStart(2, "0")} ET, usable up to ${Math.round(j.maxLateMs / 3600000)}h late`);
+  }
   for (;;) {
     try {
       await pollOnce();
+      await runDueJobs();
       if (!draftActive() && Date.now() - lastAuthCheck > AUTH_CHECK_MS) await checkAuth();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
