@@ -1,0 +1,15 @@
+[Unit]
+# Before Wed 07:00 GMT clear. SHADOW by default; add --live after a reviewed cycle to perform costless free-agent adds (claims are always surfaced, never auto-submitted).
+Description=sleeper-coach: Tuesday-evening waiver submission
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# The coach container name changes on every Coolify rebuild, so it is always
+# looked up rather than hard-coded (same reason scripts/preflight.sh looks it up).
+# The runner reads its league, browser API and HA alert env from the container,
+# so with no override it targets the REAL league - which is correct in production.
+ExecStart=/bin/bash -lc 'set -euo pipefail; C=$(docker ps --format "{{.Names}}" | grep "^sleeper-coach" | head -1); if [ -z "$C" ]; then echo "no sleeper-coach container running"; exit 1; fi; exec docker exec "$C" bash -lc "cd /app && bun run src/act/waiver-run.ts"'
+# A lock is missed rather than dangerous if it runs late, but never let one hang.
+TimeoutStartSec=600

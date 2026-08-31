@@ -14,7 +14,8 @@
     "announcer": "bun run src/announcer/index.ts",
     "selftest": "bun run src/draft/selftest.ts",
     "web": "bun run src/web/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "for f in src/analysis/*.test.ts; do echo \"== $f ==\"; bun run \"$f\" || exit 1; done"
   },
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
