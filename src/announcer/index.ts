@@ -61,6 +61,10 @@ const activityLog = config.activityLog;
 // The voice encryption backend must be initialised before we join.
 await sodium.ready;
 
+// After the closing line, how long to stay connected before leaving. Discord
+// buffers audio, so destroying the voice connection the instant the player goes
+// idle can clip the last word or two.
+const DRAFT_COMPLETE_LINGER_MS = Number(process.env.DRAFT_COMPLETE_LINGER_MS ?? 3000);
 // How often a sniped pick gets a spoken grumble as well as a scowl.
 const SNIPE_SPEAK_CHANCE = Number(process.env.SNIPE_SPEAK_CHANCE ?? 0.35);
 // How often an insult actually gets under its skin. Leaning smug is the funnier
@@ -255,6 +259,18 @@ function handleEvent(ev: ActivityEvent): void {
     enqueue(async () => {
       const line = await announceCompleteLine(roster);
       await speak(line);
+      // THE DRAFT IS OVER, so stop being in the room. Previously it said its
+      // closing line and then sat in the voice channel for the whole
+      // IDLE_LEAVE_MINUTES window (three hours by default) still listening and
+      // still answering people about a draft that had finished, which on
+      // 2026-08-30 is exactly what happened until the container was stopped by
+      // hand. Leaving also stops the listener, since leaveCall tears it down.
+      //
+      // This is a leave, not a shutdown: the poll loop still watches the draft
+      // lock, so a later draft brings it straight back.
+      await Bun.sleep(DRAFT_COMPLETE_LINGER_MS);
+      publishState("pleased", "draft complete");
+      leaveCall("draft complete");
     });
     return;
   }
