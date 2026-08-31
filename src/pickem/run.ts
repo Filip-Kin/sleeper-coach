@@ -22,7 +22,7 @@ import {
 } from "./client.ts";
 import {
   decideSlate, isPickable, bestTiebreaker, fieldMode, applyFieldMode, safePick, inFinalWindow,
-  scorePicks, FINAL_WINDOW_HOURS, type Decision,
+  scorePicks, FINAL_WINDOW_MIN, type Decision,
 } from "./strategy.ts";
 
 const args = process.argv.slice(2);
@@ -99,6 +99,16 @@ async function main(): Promise<void> {
   // nothing because it is what everyone picks anyway. The picks that carry our
   // actual edge go in inside the final window, too late to be copied, and we
   // never sit blank in between.
+  // Cache every kickoff so the daemon can drive the final passes off real game
+  // times instead of a fixed timetable. Sourced from Sleeper here rather than a
+  // third party, so the trigger has no outside dependency, and refreshed on
+  // every run, which also picks up flex scheduling.
+  const KICKOFF_CACHE = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-kickoffs.json`;
+  await Bun.write(KICKOFF_CACHE, JSON.stringify({
+    week, updatedAt: Date.now(),
+    games: games.map((g) => ({ gameId: g.gameId, startTime: g.startTime, label: `${g.away}@${g.home}` })),
+  })).catch((e) => console.log(`[pickem] could not cache kickoffs: ${(e as Error).message}`));
+
   const frozen = freezeState();
   const byId = new Map(games.map((g) => [g.gameId, g]));
   const writes: { gameId: string; team: string; was: string | null; reason: string }[] = [];
@@ -112,7 +122,7 @@ async function main(): Promise<void> {
     if (!final) {
       // Provisional stage: hold the line, only cover a blank.
       if (held) {
-        console.log(`  = ${label.padEnd(11)} ${held.padEnd(4)} holding, ${hrs}h out (final pick at T-${FINAL_WINDOW_HOURS}h)`);
+        console.log(`  = ${label.padEnd(11)} ${held.padEnd(4)} holding, ${hrs}h out (final pick at T-${FINAL_WINDOW_MIN}min)`);
         continue;
       }
       const safe = safePick(g);

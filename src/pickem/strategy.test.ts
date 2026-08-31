@@ -157,7 +157,7 @@ test("mirroring joins the field when we are off it", () => {
 
 // --- two-stage submission ---------------------------------------------------
 
-import { safePick, inFinalWindow, FINAL_WINDOW_HOURS } from "./strategy.ts";
+import { safePick, inFinalWindow, pickemTriggerDue, FINAL_WINDOW_MIN } from "./strategy.ts";
 
 test("the provisional pick is always the favourite, never the edge side", () => {
   // A game with a 3-point market disagreement: the real decision is CHI, but the
@@ -175,10 +175,53 @@ test("the provisional pick is unavailable without a graded line", () => {
 
 test("the final window is measured per game against its own kickoff", () => {
   const now = 1_000_000_000_000;
-  const hour = 3_600_000;
-  expect(FINAL_WINDOW_HOURS).toBe(4);
-  expect(inFinalWindow(game({ startTime: now + 3 * hour }), now)).toBe(true);
-  expect(inFinalWindow(game({ startTime: now + 5 * hour }), now)).toBe(false);
+  const min = 60_000;
+  expect(FINAL_WINDOW_MIN).toBe(20);
+  expect(inFinalWindow(game({ startTime: now + 10 * min }), now)).toBe(true);
+  expect(inFinalWindow(game({ startTime: now + 19 * min }), now)).toBe(true);
+  expect(inFinalWindow(game({ startTime: now + 25 * min }), now)).toBe(false);
+  expect(inFinalWindow(game({ startTime: now + 4 * 60 * min }), now)).toBe(false);
+});
+
+// --- the kickoff-driven trigger --------------------------------------------
+
+test("the trigger fires only when a kickoff is inside the window", () => {
+  const now = 1_000_000_000_000;
+  const min = 60_000;
+  const long_ago = now - 60 * min;
+  expect(pickemTriggerDue([now + 10 * min], now, long_ago)).toBe(true);
+  expect(pickemTriggerDue([now + 45 * min], now, long_ago)).toBe(false);
+  expect(pickemTriggerDue([], now, long_ago)).toBe(false);
+});
+
+test("the trigger ignores a game that has already kicked off", () => {
+  const now = 1_000_000_000_000;
+  const min = 60_000;
+  expect(pickemTriggerDue([now - 5 * min], now, now - 60 * min)).toBe(false);
+});
+
+test("the trigger is rate-limited so a kickoff cluster does not spawn a pass every poll", () => {
+  const now = 1_000_000_000_000;
+  const min = 60_000;
+  const kicks = [now + 5 * min, now + 6 * min, now + 7 * min];
+  expect(pickemTriggerDue(kicks, now, now - 30_000)).toBe(false);  // ran 30s ago
+  expect(pickemTriggerDue(kicks, now, now - 3 * min)).toBe(true);  // ran 3min ago
+});
+
+test("a 20 minute window still gives seven attempts at the daemon's poll rate", () => {
+  // The point of a tight window: a missed pass must not be a single point of
+  // failure. Count the passes the daemon would actually spawn before kickoff.
+  // Polls land every 90s and the retry floor is 2min, so a run at t makes the
+  // next eligible poll t+180s, not t+120s: effective spacing is 3 minutes, so a
+  // 20 minute window is 7 attempts rather than the 10 the floor suggests.
+  const kickoff = 1_000_000_000_000;
+  const retryMs = 2 * 60_000;
+  let last = kickoff - 6 * 60 * 60_000; // last ran hours ago
+  let attempts = 0;
+  for (let t = kickoff - FINAL_WINDOW_MIN * 60_000; t < kickoff; t += 90_000) {
+    if (pickemTriggerDue([kickoff], t, last, retryMs)) { attempts++; last = t; }
+  }
+  expect(attempts).toBe(7);
 });
 
 // --- grading ----------------------------------------------------------------

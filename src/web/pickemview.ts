@@ -6,7 +6,7 @@
 
 import { config } from "../config.ts";
 import { browserGql, fetchWeek, fetchMyLegs, fetchLeaguePicks, currentLegId, type PickemGame, type Gql } from "../pickem/client.ts";
-import { decide, safePick, isPickable, inFinalWindow, bestTiebreaker, gradePick, scorePicks, FINAL_WINDOW_HOURS } from "../pickem/strategy.ts";
+import { decide, safePick, isPickable, inFinalWindow, bestTiebreaker, gradePick, scorePicks, FINAL_WINDOW_MIN } from "../pickem/strategy.ts";
 
 export interface PickemGameView {
   gameId: string;
@@ -53,7 +53,7 @@ export interface PickemView {
     picksHeld: number;
     edgesHeld: number;
     pickable: number;
-    finalWindowHours: number;
+    finalWindowMinutes: number;
   };
   tiebreaker: {
     label: string | null;
@@ -185,7 +185,7 @@ export async function pickemView(weekArg?: number): Promise<PickemView> {
       picksHeld: Object.keys(mine.picks).length,
       edgesHeld: gameViews.filter((g) => g.edge > 0 && g.ourPick === g.wants).length,
       pickable: gameViews.filter((g) => g.pickable).length,
-      finalWindowHours: FINAL_WINDOW_HOURS,
+      finalWindowMinutes: FINAL_WINDOW_MIN,
     },
     tiebreaker: {
       label: tbGame ? `${tbGame.away} at ${tbGame.home}` : null,

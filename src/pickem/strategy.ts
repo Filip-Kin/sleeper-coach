@@ -127,17 +127,45 @@ export function safePick(game: GameLine): Decision | null {
   };
 }
 
-/** How close to kickoff before we commit the real pick. Games lock individually,
- *  so this is measured per game, not per week.
+/** How close to kickoff before we commit the real pick, in MINUTES.
  *
- *  Four hours, not three: the scheduled passes are up to 3.5h apart (12:00 to
- *  15:30), so a three-hour window could let a game kick off having never been
- *  inside the window of any pass. Four hours guarantees overlap. It is still
- *  very late relative to the rivals, who submitted week 1 nine days early. */
-export const FINAL_WINDOW_HOURS = Number(process.env.PICKEM_FINAL_WINDOW_HOURS ?? "4");
+ *  Twenty, not four hours. Filip: "you can cut it closer than 4 hours if you
+ *  want, like 15 minutes". The downside of a missed final pass is small by
+ *  design: the two-stage scheme means we are still holding a provisional
+ *  favourite, so a miss costs the edge on that one game rather than leaving us
+ *  blank. And the daemon retries every couple of minutes right up to kickoff:
+ *  polls land every 90s against a 2min retry floor, so effective spacing is
+ *  3min and a twenty-minute window is seven attempts, not one.
+ *
+ *  Be clear about what tightening actually buys, though. It is mostly
+ *  copy-resistance, not information: Sleeper's own market line usually stops
+ *  moving days out (measured median last update 68h before kickoff, only about
+ *  a tenth of games update inside 5h), so the disagreement we trade on is
+ *  normally visible well in advance. Capturing genuinely late line movement
+ *  would need an external live odds feed, not a tighter window. */
+export const FINAL_WINDOW_MIN = Number(process.env.PICKEM_FINAL_WINDOW_MIN ?? "20");
 
 export function inFinalWindow(game: GameLine, now: number): boolean {
-  return game.startTime - now <= FINAL_WINDOW_HOURS * 3_600_000;
+  return game.startTime - now <= FINAL_WINDOW_MIN * 60_000;
+}
+
+/** Should the daemon spawn a pick'em pass right now?
+ *
+ *  This replaces a fixed timetable. Fixed passes could not support a tight
+ *  window at all: with passes 3.5h apart, a twenty-minute window would mean
+ *  almost no game ever got its final pick. Driving off the actual kickoffs gives
+ *  the daemon's 90-second poll granularity instead, so the window can be as
+ *  tight as we like.
+ *
+ *  Fires when any game is inside its own final window and still ahead of us,
+ *  rate-limited so a cluster of kickoffs does not spawn a pass every poll. The
+ *  job itself is idempotent, so an extra pass costs a couple of reads. */
+export function pickemTriggerDue(
+  kickoffs: number[], now: number, lastRunAt: number, retryMs = 2 * 60_000,
+): boolean {
+  if (now - lastRunAt < retryMs) return false;
+  const windowMs = FINAL_WINDOW_MIN * 60_000;
+  return kickoffs.some((k) => k > now && k - now <= windowMs);
 }
 
 export function decideSlate(games: GameLine[]): Decision[] {

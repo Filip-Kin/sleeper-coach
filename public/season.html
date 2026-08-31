@@ -707,7 +707,7 @@ function renderPickem(p) {
     <div class="kv"><span class="k">Submitted</span><span class="v num">${p.summary.picksHeld} of ${p.summary.games}</span></div>
     <div class="kv"><span class="k">Still open</span><span class="v num">${p.summary.pickable}</span></div>
     <div class="kv"><span class="k">Edges held</span><span class="v num">${p.summary.edgesHeld}</span></div>
-    <div class="note">${esc(p.format)} Final picks go in at T-${p.summary.finalWindowHours}h per game, because rivals can read our picks exactly as we read theirs. Until then we hold favourites, which leak nothing.</div>
+    <div class="note">${esc(p.format)} Final picks go in ${p.summary.finalWindowMinutes} minutes before each kickoff, because rivals can read our picks exactly as we read theirs. Until then we hold favourites, which leak nothing.</div>
   </div>
 
   <div class="card wide">

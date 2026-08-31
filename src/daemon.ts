@@ -7,6 +7,7 @@ import { runAgent } from "./agent/runner.ts";
 import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
+import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
 import { freezeState } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
@@ -302,10 +303,9 @@ const JOB_COMMAND: Record<string, string[]> = {
   // The pick'em pool. One command for every occurrence: run.ts decides for
   // itself whether each game is inside its own final window, so the daily
   // backstop and the pre-kickoff passes are the same code with different timing.
-  "pickem-0900": ["bun", "run", "src/pickem/run.ts"],
-  "pickem-1200": ["bun", "run", "src/pickem/run.ts"],
-  "pickem-1530": ["bun", "run", "src/pickem/run.ts"],
-  "pickem-1830": ["bun", "run", "src/pickem/run.ts"],
+  // Daily backstop only. The passes that actually carry our edge are spawned by
+  // pickemKickoffPass() below, off real kickoff times.
+  "pickem-slate": ["bun", "run", "src/pickem/run.ts"],
   "waiver-compute": ["bun", "run", "src/act/waiver-run.ts"],
   "waiver-submit": waiversLive
     ? ["bun", "run", "src/act/waiver-run.ts", "--live"]
@@ -348,6 +348,50 @@ async function runJob(job: Job, occurrence: number): Promise<void> {
   logEvent("coach", "schedule-done", `${job.name} finished in ${secs}s.`, { job: job.name });
   markRun(job.name, occurrence);
 }
+
+// #region pick'em pre-kickoff passes
+// Games in the pick'em pool lock individually, and we deliberately hold our real
+// picks until minutes before each kickoff so rivals cannot copy them (the
+// endpoint that shows us their picks shows them ours). A fixed timetable cannot
+// do that: passes hours apart would mean almost no game was ever inside a
+// twenty-minute window. So the daemon drives it off actual kickoff times, at its
+// own 90-second poll granularity.
+//
+// Kickoffs come from a cache written by the pick'em job itself, sourced from
+// Sleeper rather than a third party, and refreshed by the daily backstop pass
+// (which is also how flex scheduling gets picked up).
+const KICKOFF_CACHE = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-kickoffs.json`;
+let lastPickemPass = 0;
+
+async function cachedKickoffs(): Promise<number[]> {
+  try {
+    const f = Bun.file(KICKOFF_CACHE);
+    if (!(await f.exists())) return [];
+    const j = (await f.json()) as { games?: { startTime?: number }[] };
+    return (j.games ?? []).map((g) => Number(g.startTime)).filter((n) => Number.isFinite(n) && n > 0);
+  } catch {
+    return []; // a missing or half-written cache must never take the daemon down
+  }
+}
+
+async function pickemKickoffPass(): Promise<void> {
+  if (draftActive()) return;
+  const kickoffs = await cachedKickoffs();
+  if (!pickemTriggerDue(kickoffs, Date.now(), lastPickemPass)) return;
+  if (!(await browserReady())) return; // retried on the next poll, nothing burned
+  lastPickemPass = Date.now();
+  const next = Math.min(...kickoffs.filter((k) => k > Date.now()));
+  const mins = Math.round((next - Date.now()) / 60_000);
+  console.log(`[pickem] pre-kickoff pass: next game in ${mins} min (window ${FINAL_WINDOW_MIN} min)`);
+  const proc = Bun.spawn(["bun", "run", "src/pickem/run.ts"], { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" });
+  const code = await proc.exited;
+  if (code !== 0) {
+    // Not fatal and not alerted: we are still holding a provisional favourite,
+    // so a failed pass costs the edge on one game, and the next poll retries.
+    console.error(`[pickem] pre-kickoff pass exited ${code}; retrying on the next poll`);
+  }
+}
+// #endregion
 
 /** Is the shared browser up? Every scheduled job drives it, and the container
  *  starts the daemon and browser-server together, so at boot a job can be due
@@ -420,6 +464,7 @@ async function main(): Promise<void> {
     try {
       await pollOnce();
       await runDueJobs();
+      await pickemKickoffPass();
       if (!draftActive() && Date.now() - lastAuthCheck > AUTH_CHECK_MS) await checkAuth();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -140,34 +140,16 @@ export const JOBS: Job[] = [
     why: "Monday Night Football kicks off 20:15 ET.",
   },
   {
-    // The pick'em pool. Four passes a DAY rather than a handful of day-specific
-    // ones, because NFL kickoffs are not confined to Thursday/Sunday/Monday:
-    // there are London games at 09:30 ET, Thanksgiving at 12:30 and 16:30,
-    // Christmas and Black Friday midweek games, and Saturday games in December.
-    // A day-specific schedule left the Sunday 16:25 slate with no pass inside
-    // its window at all (11:30 is 4.9h before it, and the next pass was after it
-    // had already locked), so those games would have kept their provisional
-    // favourites all season. Daily passes at 09:00, 12:00, 15:30 and 18:30 sit
-    // within the final window of every real kickoff slot; see the coverage test
-    // in schedule.test.ts, which fails if a slot ever falls through again.
+    // The pick'em pool keeps only ONE scheduled pass. The passes that matter are
+    // driven off real kickoff times by the daemon (pickemTriggerDue), because a
+    // fixed timetable cannot support a tight window: with passes hours apart, a
+    // twenty-minute window would mean almost no game ever got its final pick.
     //
-    // Each pass is cheap and idempotent: it writes only what changed, and it
-    // only commits the picks carrying our edge once a game is inside its own
-    // final window, so running often costs nothing and leaks nothing.
-    name: "pickem-0900", dow: -1, hour: 9, minute: 0, maxLateMs: 2 * HOUR,
-    why: "Backstop that guarantees a full slate exists, and the final pass for London 09:30 ET kickoffs.",
-  },
-  {
-    name: "pickem-1200", dow: -1, hour: 12, minute: 0, maxLateMs: 45 * MIN,
-    why: "Final pass for 13:00 ET games and Thanksgiving 12:30 ET.",
-  },
-  {
-    name: "pickem-1530", dow: -1, hour: 15, minute: 30, maxLateMs: 30 * MIN,
-    why: "Final pass for the 16:05/16:25 ET slate and Thanksgiving 16:30 ET.",
-  },
-  {
-    name: "pickem-1830", dow: -1, hour: 18, minute: 30, maxLateMs: 90 * MIN,
-    why: "Final pass for every prime-time slot: 20:15, 20:20 and 20:35 ET, plus the Monday total that is the weekly tiebreaker.",
+    // This daily pass is the backstop that makes the tight window safe. It
+    // guarantees a full provisional slate exists, and it refreshes the kickoff
+    // cache the trigger reads, which is also how flex scheduling gets picked up.
+    name: "pickem-slate", dow: -1, hour: 9, minute: 0, maxLateMs: 14 * HOUR,
+    why: "Daily backstop: fills any blank game with a favourite (which leaks nothing) and refreshes the kickoff cache that drives the real pre-kickoff passes.",
   },
   {
     name: "waiver-compute", dow: 2, hour: 2, minute: 0, maxLateMs: 12 * HOUR,
