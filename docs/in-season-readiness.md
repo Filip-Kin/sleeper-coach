@@ -1,3 +1,23 @@
+> **SUPERSEDED, 31 August 2026.** Everything below about host systemd timers is
+> out of date. Filip asked for this to run containerized: "I want this to run
+> containerized so it's not using my systemd timer." The schedule now lives in
+> `src/schedule.ts`, driven by the daemon poll loop inside the coach container,
+> with "have I handled this occurrence" as a row in `coach.db`. There is nothing
+> to install on the host and `deploy/systemd/` has been deleted.
+>
+> Two behaviours changed with it, both deliberate:
+> - **Timezone is computed against the real IANA zone**, not a fixed offset. The
+>   container is UTC while the NFL schedule is Eastern, and the 2026 season crosses
+>   the DST boundary on 1 November, so a fixed offset would have fired every lock
+>   an hour early for the back half of the season.
+> - **A missed lock is SKIPPED, not caught up.** systemd's `Persistent=true` is the
+>   wrong semantic for a lineup: one set after kickoff can only shuffle players
+>   whose games have started, so it is worse than not setting one. Each job
+>   declares how late it may still usefully run.
+>
+> Arming is now just "the container is running", so the arm checklist below reduces
+> to the kill switch: `touch /data/sleeper-coach/FREEZE` stops every write.
+
 # In-season readiness
 
 Written 31 August 2026, nine days before the season opens (9 September). Audit of

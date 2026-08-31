@@ -107,9 +107,20 @@ async function handlePendingTrade(tx: TransactionLike): Promise<void> {
     const what = await describeTrade(tx).catch(() => "could not read the offer");
     let verdict = "";
     try {
-      const { evaluateTransactionForUs } = await import("./analysis/trade-live.ts");
-      const res = await evaluateTransactionForUs(tx);
-      verdict = res.summary;
+      // TWO-SIDED on purpose. trade-live.ts's evaluateTransactionForUs uses the
+      // one-sided evaluateTrade, which asks only "does this help us" and was the
+      // exact hole Filip identified: it never asked how much the OTHER side
+      // gains, so a trade gaining us 26 and them 90 read as good. trade-wire.ts
+      // fetches the counterparty roster and the real remaining head-to-head count
+      // and runs the schedule-diluted decision instead.
+      const { evaluateLiveOffer } = await import("./analysis/trade-wire.ts");
+      const { evaluation: ev, theirRosterId } = await evaluateLiveOffer(tx);
+      const blocked = ev.railBlocks[0] ?? ev.fairnessBlocks[0];
+      verdict =
+        `WOULD ${ev.verdict.toUpperCase()}. Our starting lineup ${ev.ourGain >= 0 ? "+" : ""}${ev.ourGain}, ` +
+        `roster ${theirRosterId ?? "?"} ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain}. ` +
+        `Net of schedule ${ev.netValue} against a ${ev.requiredEdge} noise margin.` +
+        (blocked ? ` Blocked: ${blocked}` : "");
     } catch (err) {
       verdict = `(could not evaluate: ${err instanceof Error ? err.message : String(err)})`;
     }
