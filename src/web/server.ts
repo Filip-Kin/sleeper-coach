@@ -164,7 +164,13 @@ Bun.serve({
     // Served at /season rather than / so the draft dashboard (and its tested
     // guidance box) keeps working untouched; the PWA manifest's start_url points
     // here, so the installed home-screen icon opens straight to it.
-    if (url.pathname === "/season" || url.pathname === "/season/") {
+    // THE SEASON VIEW IS THE HOME PAGE. Filip: "the main page is still not very
+    // mobile optimised", and he is right, because I scoped the season UI brief to
+    // /season and never mentioned the existing dashboard. In-season the season
+    // view IS what he opens on a phone, and the draft dashboard is a once-a-year
+    // tool, so the fix is the routing rather than retrofitting the old page.
+    // The draft dashboard stays reachable at /draft, unchanged.
+    if (url.pathname === "/" || url.pathname === "/season" || url.pathname === "/season/") {
       const file = Bun.file(`${PUBLIC_DIR}season.html`);
       if (await file.exists()) {
         return new Response(file, {
@@ -210,7 +216,13 @@ Bun.serve({
         .catch((e) => Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 }));
     if (url.pathname === "/api/chat" && req.method === "POST") return sseChat(req);
     // Static: index at root, else serve files from public/.
-    const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+    // /draft serves the draft-day dashboard that used to live at /.
+    const rel =
+      url.pathname === "/draft" || url.pathname === "/draft/"
+        ? "index.html"
+        : url.pathname === "/"
+          ? "index.html" // unreachable now, kept so a routing change cannot 404 the root
+          : url.pathname.slice(1);
     const file = Bun.file(`${PUBLIC_DIR}${rel}`);
     if (await file.exists()) {
       // A cached service worker is a stuck app: the browser keeps serving the old
