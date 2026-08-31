@@ -16,6 +16,11 @@ export interface RailPlayer {
   points: number; // rest-of-season projection
   injuryStatus?: string; // Sleeper injury_status, if any
   returnsBeforePlayoffs?: boolean; // hurt but expected back before week 16
+  // Bye week, when known. Optional because the rails themselves do not care, but
+  // trade and waiver scoring do: four of our starters share the week 8 bye, which
+  // costs about 10.7 points in that week and is the worst single-week hole in the
+  // league. A move that relieves it is worth more than its raw points suggest.
+  bye?: number;
 }
 
 export interface RailConfig {
