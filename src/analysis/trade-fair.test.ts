@@ -1,4 +1,4 @@
-import { evaluateTradeTwoSided, DEFAULT_FAIRNESS, opponentWeight, requiredEdge, byeRelief, proposeTrades, refusedForInjury, autoDecideAllowed, type FairnessConfig } from "./trade-fair.ts";
+import { evaluateTradeTwoSided, DEFAULT_FAIRNESS, opponentWeight, requiredEdge, byeRelief, proposeTrades, refusedForInjury, autoDecideAllowed, marginalLineupValue, giveEligibleForProposal, type FairnessConfig } from "./trade-fair.ts";
 import type { TradePlayer } from "./trade.ts";
 
 let pass = 0, fail = 0;
@@ -114,6 +114,18 @@ t("every proposal gains us something real", props.every((p) => p.ourGain >= DEFA
 t("every proposal gains THEM something, or they would never accept", props.every((p) => p.theirGain > 0));
 t("no proposal is blocked by the rails", props.length === 0 || props.every((p) => p.why.length > 0));
 // #endregion
+
+// #region marginal lineup value: raw projection is the wrong currency
+// Recovered from the tradesv2 agent, whose modelling was better than mine here.
+const dakMarginal = marginalLineupValue("Dak Prescott", ours);
+const walkerMarginal = marginalLineupValue("Kenneth Walker", ours);
+console.log(`\n  (Dak marginal ${dakMarginal}, Walker marginal ${walkerMarginal})`);
+t("our backup QB is worth ~nothing to the lineup despite a huge projection", dakMarginal < 5, String(dakMarginal));
+t("a real FLEX starter is worth a lot to the lineup", walkerMarginal > 10, String(walkerMarginal));
+t("so the backup QB is offerable", giveEligibleForProposal(P("Dak Prescott", "QB", 250, { bye: 10 }), ours, DEFAULT_FAIRNESS).ok);
+t("and the FLEX starter is not", !giveEligibleForProposal(P("Kenneth Walker", "RB", 244, { bye: 5 }), ours, DEFAULT_FAIRNESS).ok);
+console.log(`\n  ${pass} passed, ${fail} failed (marginal value)`);
+process.exit(fail ? 1 : 0);
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

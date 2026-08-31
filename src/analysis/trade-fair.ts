@@ -31,7 +31,11 @@
 // converts a bench player into a starter. Both deltas are genuinely positive.
 // That asymmetry, not generosity, is what makes a proposal acceptable.
 
-import { bestLineup, evaluateTrade, DEFAULT_TRADE_CONFIG, type TradeConfig, type TradeOffer, type TradePlayer, type TradeEvaluation, type TradeVerdict } from "./trade.ts";
+import { bestLineup, evaluateTrade, STARTING_SLOTS, DEFAULT_TRADE_CONFIG, type TradeConfig, type TradeOffer, type TradePlayer, type TradeEvaluation, type TradeVerdict } from "./trade.ts";
+
+function norm(n: string): string {
+  return n.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+}
 
 // #region live injury refusal
 // Trade value rests on projections plus the hand-curated news dossier, which was
@@ -90,6 +94,13 @@ export interface FairnessConfig extends TradeConfig {
   minOwnGainPts: number;
   // Cost of a bench slot consumed when a trade grows our roster.
   rosterSlotCostPts: number;
+  // A player is OFFERABLE when the lineup barely notices him going. Raw
+  // projection is the wrong currency for this and gets a deep roster exactly
+  // backwards: Dak Prescott is our #2 by projection and worth ZERO to a one-QB
+  // lineup, while our RB3 is mid-table by projection and a real FLEX starter.
+  // Credit for this idea goes to the tradesv2 agent, whose version of this module
+  // I clobbered by editing it while it worked. Its modelling was better than mine.
+  surplusMaxLineupPts: number;
 }
 
 export const DEFAULT_FAIRNESS: FairnessConfig = {
@@ -105,6 +116,7 @@ export const DEFAULT_FAIRNESS: FairnessConfig = {
   maxTradesPerWeek: 2,
   minOwnGainPts: 0,
   rosterSlotCostPts: 5,
+  surplusMaxLineupPts: 15,
 };
 
 // How much a rival's gain actually costs us. Rises as the season shortens.
@@ -295,6 +307,43 @@ export function autoDecideAllowed(
 // #endregion
 
 // #region outgoing proposals
+export function marginalLineupValue(name: string, roster: TradePlayer[], slots: readonly string[] = STARTING_SLOTS): number {
+  const withHim = bestLineup(roster, slots).total;
+  const withoutHim = bestLineup(roster.filter((p) => norm(p.name) !== norm(name)), slots).total;
+  return Math.round((withHim - withoutHim) * 10) / 10;
+}
+
+function dedicatedSlotsFor(position: string, slots: readonly string[] = STARTING_SLOTS): number {
+  return slots.filter((s) => s === position).length;
+}
+
+export function giveEligibleForProposal(
+  player: TradePlayer,
+  roster: TradePlayer[],
+  cfg: FairnessConfig = DEFAULT_FAIRNESS,
+  slots: readonly string[] = STARTING_SLOTS,
+): { ok: boolean; reason: string } {
+  const present = roster.find((p) => norm(p.name) === norm(player.name));
+  if (!present) return { ok: false, reason: `"${player.name}" is not on our roster as read back` };
+  if (cfg.rails.neverDrop.some((n) => norm(n) === norm(present.name))) {
+    return { ok: false, reason: `"${present.name}" is on the never-drop list` };
+  }
+  if (present.returnsBeforePlayoffs) {
+    return { ok: false, reason: `"${present.name}" is an injured stash due back before the playoffs; his depressed projection would undervalue him in a trade` };
+  }
+  const dedicated = dedicatedSlotsFor(present.position, slots);
+  const samePos = roster.filter((p) => p.position === present.position).sort((a, b) => b.points - a.points);
+  const rankAtPos = samePos.findIndex((p) => norm(p.name) === norm(present.name)) + 1;
+  if (rankAtPos > 0 && rankAtPos <= dedicated) {
+    return { ok: false, reason: `"${present.name}" is our #${rankAtPos} ${present.position}, a dedicated-slot starter; a proposal never ships one` };
+  }
+  const marg = marginalLineupValue(present.name, roster, slots);
+  if (marg > cfg.surplusMaxLineupPts) {
+    return { ok: false, reason: `"${present.name}" is worth ${marg} starting-lineup points to us, above the ${cfg.surplusMaxLineupPts}pt surplus line; he is core, not surplus` };
+  }
+  return { ok: true, reason: `"${present.name}" is surplus (our #${rankAtPos} ${present.position}, ${marg} lineup pts), so a fair return is a genuine upgrade` };
+}
+
 export interface RivalRoster {
   managerId: string;
   teamName: string;
@@ -327,8 +376,9 @@ export function proposeTrades(
   const out: Proposal[] = [];
   for (const rival of rivals) {
     for (const give of ourRoster) {
-      // Never offer a player the rails forbid dropping; the rails are the same
-      // whether the player leaves by drop or by trade.
+      // Only offer pieces our lineup can genuinely spare, measured by what it
+      // loses without them rather than by raw projection.
+      if (!giveEligibleForProposal(give, ourRoster, cfg).ok) continue;
       for (const receive of rival.roster) {
         if (refusedForInjury(receive)) continue;
         const offer: TradeOffer = { receive: [receive], give: [give] };
