@@ -2,6 +2,7 @@ import type { BrowserContext, Page } from "playwright";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.ts";
+import { assertWritesAllowed } from "../killswitch.ts";
 
 // Page-object layer over the Sleeper web app (https://sleeper.com). The action
 // selectors are finalised in Phase C by observing the live DOM via noVNC; until
@@ -323,6 +324,13 @@ async function openTeamPage(page: Page, leagueId?: string): Promise<RosterRow[]>
 // its own target from ambient config: that is how a staging test ends up
 // rearranging the real team. Callers say which league they mean.
 export async function setLineup(page: Page, starters: string[], leagueId?: string): Promise<void> {
+  // The kill switch is checked HERE, in the write function itself, not only in
+  // the scheduled orchestration above it. Guarding lineup-run and waiver-run
+  // alone left FREEZE bypassable by the agent calling the browser API directly,
+  // by a manual curl to /lineup or /add, and by anything else that reaches these
+  // functions without going through a timer. "Freeze everything" has to mean
+  // everything, so the check sits at the chokepoint every write passes through.
+  assertWritesAllowed("set the lineup");
   let rows = await openTeamPage(page, leagueId);
   await screenshot(page, "lineup-before");
 
@@ -400,6 +408,13 @@ function abbrevMatcher(full: string): RegExp {
 }
 
 export async function addPlayer(page: Page, spec: AddDropSpec): Promise<void> {
+  // The kill switch is checked HERE, in the write function itself, not only in
+  // the scheduled orchestration above it. Guarding lineup-run and waiver-run
+  // alone left FREEZE bypassable by the agent calling the browser API directly,
+  // by a manual curl to /lineup or /add, and by anything else that reaches these
+  // functions without going through a timer. "Freeze everything" has to mean
+  // everything, so the check sits at the chokepoint every write passes through.
+  assertWritesAllowed(`add ${spec.add}${spec.drop ? ` and drop ${spec.drop}` : ""}`);
   const league = spec.leagueId ?? config.leagueId;
   await page.goto(`${SLEEPER}/leagues/${league}/players`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(3000);
@@ -597,6 +612,8 @@ export async function respondTrade(
   decision: "accept" | "reject",
   leagueId?: string,
 ): Promise<void> {
+  // One FREEZE file must stop every write, including trades. See killswitch.ts.
+  assertWritesAllowed(`${decision} trade ${transactionId}`);
   await page.goto(tradesUrl(leagueId), { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(2500);
   await screenshot(page, `trade-${decision}-${transactionId}`);
@@ -662,6 +679,8 @@ export interface TradeSendSpec {
 // as respondTrade: the propose flow has never run against a real partner (the
 // staging league has none), so until it is verified this refuses to click.
 export async function sendTrade(page: Page, spec: TradeSendSpec): Promise<void> {
+  // One FREEZE file must stop every write, including trades. See killswitch.ts.
+  assertWritesAllowed("send a trade offer");
   if (!spec || !Array.isArray(spec.give) || !Array.isArray(spec.receive)) {
     throw new Error(`sendTrade: malformed spec ${JSON.stringify(spec).slice(0, 120)}`);
   }
