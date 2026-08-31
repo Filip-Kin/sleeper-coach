@@ -15,7 +15,9 @@
     "selftest": "bun run src/draft/selftest.ts",
     "web": "bun run src/web/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "./scripts/run-tests.sh"
+    "test": "./scripts/run-tests.sh",
+    "pickem": "bun run src/pickem/run.ts",
+    "pickem-backtest": "bun run src/pickem/backtest.ts"
   },
   "dependencies": {
     "@discordjs/voice": "^0.19.2",

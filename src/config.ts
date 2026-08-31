@@ -23,6 +23,13 @@ export const config = {
   draftId: process.env.SLEEPER_DRAFT_ID ?? "1389357604773322753",
   rosterId: Number(process.env.SLEEPER_ROSTER_ID ?? "3"), // Filip's roster ("--dangerously-skip-perms")
 
+  // The separate pick'em pool ("Da Pick Em"), a different Sleeper product with
+  // sport "pickem:nfl" and its own GraphQL-only API. 500-team capacity, 5 real
+  // members. Scored 1 point per correct pick against the spread, weeks 1-18,
+  // no confidence points and no bonuses. We are roster 5 there, not 3.
+  pickemLeagueId: process.env.PICKEM_LEAGUE_ID ?? "1399932549756674048",
+  pickemRosterId: Number(process.env.PICKEM_ROSTER_ID ?? "5"),
+
   // Last season's league, kept linked by Sleeper. Used to learn manager
   // tendencies and inform keeper analysis.
   previousLeagueId: "1267682977899364352",

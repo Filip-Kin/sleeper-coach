@@ -82,6 +82,26 @@ export async function authState(page: Page): Promise<"ok" | "logged_out" | "expi
 }
 
 // DOM discovery for Phase C: dump the facts needed to build reliable selectors.
+// Sleeper's own GraphQL API, called from inside the page so the session token
+// never leaves the browser profile and the request carries the site's origin.
+// The pick'em game is GraphQL-only (no REST at all), so this is the only way to
+// read the week's lines, read every rival's picks, or submit our own.
+export async function graphql(page: Page, query: string): Promise<unknown> {
+  if (!page.url().includes("sleeper.com")) {
+    await page.goto(leagueUrl(), { waitUntil: "domcontentloaded" });
+  }
+  return await page.evaluate(async (q) => {
+    const token = window.localStorage.getItem("token");
+    if (!token) return { errors: [{ code: "no_token", message: "no session token in localStorage" }] };
+    const res = await fetch("https://sleeper.app/graphql", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: token },
+      body: JSON.stringify({ query: q }),
+    });
+    return await res.json();
+  }, query);
+}
+
 export async function domFacts(page: Page): Promise<unknown> {
   return page.evaluate(() => {
     const inputs = Array.from(document.querySelectorAll("input")).map((el) => ({

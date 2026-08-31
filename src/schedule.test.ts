@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { zonedInstant, lastOccurrence, isDue, dayLabel, JOBS, type Job } from "./schedule.ts";
 
 let pass = 0, fail = 0;
@@ -68,6 +69,16 @@ for (const j of JOBS) {
   t(`${j.name} renders a non-empty day label`, typeof label === "string" && label.length > 0 && label !== "undefined", label);
 }
 t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).every((j) => dayLabel(j) === "daily"));
+
+// 8. Every job must have a command wired in the daemon. A job with no command logs
+// "has no command; skipping" and silently never runs, so a job can look
+// scheduled while doing nothing at all. Checked against the daemon source
+// because JOB_COMMAND lives next to a module with start-up side effects.
+{
+  const daemon = readFileSync(new URL("./daemon.ts", import.meta.url), "utf8");
+  const missing = JOBS.filter((j) => !daemon.includes(`"${j.name}":`)).map((j) => j.name);
+  t("every scheduled job has a command in the daemon", missing.length === 0, missing.join(", "));
+}
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

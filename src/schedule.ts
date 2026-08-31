@@ -140,6 +140,31 @@ export const JOBS: Job[] = [
     why: "Monday Night Football kicks off 20:15 ET.",
   },
   {
+    // The pick'em pool. Runs often on purpose: the line we are graded against is
+    // frozen while the betting market keeps moving, so the disagreement we trade
+    // on is widest close to kickoff. This daily pass exists mainly as the safety
+    // net that guarantees we are never sitting blank; it only fills empty games,
+    // and only with favourites, because rivals can read our picks too.
+    name: "pickem-slate", dow: -1, hour: 9, minute: 0, maxLateMs: 12 * HOUR,
+    why: "Daily backstop so a full slate is always in place. Fills blanks with favourites only, which leaks nothing.",
+  },
+  {
+    name: "pickem-final-thu", dow: 4, hour: 18, minute: 30, maxLateMs: 90 * MIN,
+    why: "Thursday Night Football kicks off 20:15-20:35 ET. Commits the real picks for it inside the final window.",
+  },
+  {
+    name: "pickem-final-sun", dow: 0, hour: 11, minute: 30, maxLateMs: 80 * MIN,
+    why: "Sunday 13:00 ET games, and the 16:25 ET slate falls inside the same three-hour final window.",
+  },
+  {
+    name: "pickem-final-sun-night", dow: 0, hour: 18, minute: 45, maxLateMs: 80 * MIN,
+    why: "Sunday Night Football kicks off 20:20 ET, the last chance to use Sunday injury news.",
+  },
+  {
+    name: "pickem-final-mon", dow: 1, hour: 18, minute: 30, maxLateMs: 90 * MIN,
+    why: "Monday Night Football kicks off 20:15 ET, and its total is the weekly tiebreaker.",
+  },
+  {
     name: "waiver-compute", dow: 2, hour: 2, minute: 0, maxLateMs: 12 * HOUR,
     why: "Read-only planning, so being late costs nothing; it just needs to precede the submit.",
   },

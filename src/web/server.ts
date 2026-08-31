@@ -1,3 +1,4 @@
+import { pickemView } from "./pickemview.ts";
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
@@ -194,6 +195,14 @@ Bun.serve({
     if (url.pathname === "/api/season/intent") {
       const w = Number(url.searchParams.get("w"));
       return seasonIntent(Number.isFinite(w) && w > 0 ? w : undefined)
+        .then((v) => Response.json(v, { headers: { "Cache-Control": "no-store" } }))
+        .catch((e) => Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 }));
+    }
+    // The pick'em pool. Separate league, separate product, separate API, so it
+    // gets its own endpoint rather than being bolted onto the season view.
+    if (url.pathname === "/api/pickem") {
+      const w = Number(url.searchParams.get("w"));
+      return pickemView(Number.isFinite(w) && w > 0 ? w : undefined)
         .then((v) => Response.json(v, { headers: { "Cache-Control": "no-store" } }))
         .catch((e) => Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 }));
     }

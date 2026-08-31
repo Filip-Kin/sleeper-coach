@@ -9,6 +9,7 @@ import { launchContext, firstPage } from "./browser.ts";
 import {
   leagueUrl, isLoggedIn, authState, isOnClock, liveAvailable, draftedCells, domFacts, screenshot,
   makePick, setQueue, reactToPick, setLineup, readRoster, addPlayer, respondTrade, sendTrade, captureTradeDom, importSession,
+  graphql,
 } from "./sleeper.ts";
 import type { TradeSendSpec } from "./sleeper.ts";
 
@@ -98,6 +99,10 @@ Bun.serve({
         }
         case "/shot":
           return Response.json({ path: await run(() => screenshot(page, str(b.name, "current"))) });
+        case "/graphql":
+          // Read/write surface for the pick'em game, which has no REST API.
+          // Serialised onto the same chain as every other browser op.
+          return Response.json({ result: await run(() => graphql(page, str(b.query))) } as Record<string, unknown>);
         case "/eval":
           // Dev/authoring tool: evaluate an expression in the page. Internal only.
           return Response.json({ result: await run(() => page.evaluate(str(b.expr))) });

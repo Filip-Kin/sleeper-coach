@@ -214,6 +214,30 @@
   .cutnote { padding: 9px 14px; font-size: 11.5px; color: var(--muted); }
   /* #endregion */
 
+  /* #region pick'em tab */
+  .pkfmt { color:var(--muted); font-size:12px; margin-top:2px; }
+  .pkrow { display:grid; grid-template-columns:1fr auto; gap:6px 10px; padding:10px 14px; border-top:1px solid var(--line); }
+  .pkrow:first-of-type { border-top:0; }
+  .pkmatch { min-width:0; }
+  .pkteams { font-weight:600; }
+  .pkmeta { color:var(--muted); font-size:12px; margin-top:2px; }
+  .pkpick { text-align:right; white-space:nowrap; }
+  .pkteam { font-weight:700; font-size:15px; }
+  /* An edge is the only thing on this page worth a colour: it marks the games
+     where the frozen graded line disagrees with the live market. */
+  .pkedge { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:4px;
+            background:rgba(57,135,229,.16); color:var(--us); font-size:11px; font-weight:700; }
+  .pkwant { color:var(--warn); font-size:11px; margin-top:2px; }
+  .pkwhy { color:var(--muted); font-size:11px; margin-top:3px; }
+  .pkrivals { display:flex; flex-wrap:wrap; gap:4px; margin-top:5px; }
+  .pkchip { font-size:11px; padding:1px 6px; border-radius:999px; background:var(--panel2); color:var(--ink2); }
+  .pkchip.w { color:var(--good); }
+  .pkchip.l { color:var(--muted); text-decoration:line-through; }
+  .pklock { color:var(--muted); font-size:11px; }
+  .pkwin { color:var(--good); font-weight:700; }
+  .pkloss { color:var(--muted); text-decoration:line-through; }
+  /* #endregion */
+
   /* #region bottom tab bar: the thumb zone */
   .tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
@@ -252,12 +276,14 @@
   <div id="tab-matchup"></div>
   <div id="tab-coach" class="hide"></div>
   <div id="tab-league" class="hide"></div>
+  <div id="tab-pickem" class="hide"></div>
 </main>
 
 <nav class="tabbar" role="tablist">
   <button data-tab="matchup" class="on"><span class="g">&#9636;</span>Matchup</button>
   <button data-tab="coach"><span class="g">&#9998;</span>Coach</button>
   <button data-tab="league"><span class="g">&#9776;</span>League</button>
+  <button data-tab="pickem"><span class="g">&#9878;</span>Pick'em</button>
 </nav>
 
 <script>
@@ -303,6 +329,8 @@ const state = {
   view: null,
   intent: null,
   intentWeek: null,
+  pickem: null,
+  pickemWeek: null,
   timer: null,
   loading: false,
 };
@@ -609,6 +637,111 @@ function renderLeague(v) {
 }
 // #endregion
 
+// #region pick'em tab
+// A separate pool on a separate Sleeper product: pick every game against the
+// spread, one point each. The interesting column is the edge, which marks the
+// games where the line we are GRADED against disagrees with the live betting
+// market, because that disagreement is the only reason we beat a coin flip.
+function renderPickem(p) {
+  if (!p) return `<div class="card"><div class="muted">Loading pick&rsquo;em…</div></div>`;
+  if (p.error) return `<div class="card"><div class="err">${esc(p.error)}</div></div>`;
+
+  const stand = p.standings.map((r, i) => `
+    <tr class="${r.isUs ? "us" : ""}">
+      <td class="num">${i + 1}</td>
+      <td class="tm">${esc(r.name)}</td>
+      <td class="r num">${r.season}</td>
+      <td class="r num">${r.week}</td>
+      <td class="r num">${r.submitted}/${p.summary.games}</td>
+    </tr>`).join("");
+
+  const rows = p.games.map((g) => {
+    const ko = new Date(g.kickoff).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
+    const line = g.gradedSpreadAway === null ? "no line"
+      : `${g.away} ${g.gradedSpreadAway > 0 ? "+" : ""}${g.gradedSpreadAway.toFixed(1)}`;
+    const mkt = (g.marketSpreadAway !== null && g.gradedSpreadAway !== null
+      && Math.abs(g.marketSpreadAway - g.gradedSpreadAway) > 0.001)
+      ? ` · market ${g.marketSpreadAway > 0 ? "+" : ""}${g.marketSpreadAway.toFixed(1)}` : "";
+
+    // Our pick, graded once Sleeper settles it.
+    let pick = `<span class="muted">not set</span>`;
+    if (g.ourPick) {
+      const cls = g.ourOutcome === "win" ? "pkwin" : (g.ourOutcome && g.ourOutcome !== "win" ? "pkloss" : "");
+      pick = `<span class="pkteam ${cls}">${esc(g.ourPick)}</span>`;
+    }
+    const edge = g.edge > 0 ? `<span class="pkedge">+${g.edge.toFixed(1)}</span>` : "";
+
+    // Only flag a disagreement between what we hold and what the coach wants
+    // when the pick can still change. After lock it is just noise.
+    const wants = (g.pickable && g.wants && g.ourPick !== g.wants)
+      ? `<div class="pkwant">wants ${esc(g.wants)}${g.inFinalWindow ? "" : " (provisional)"}</div>` : "";
+    const why = (g.pickable && g.edge > 0 && g.wantsWhy) ? `<div class="pkwhy">${esc(g.wantsWhy)}</div>` : "";
+
+    const rivals = g.rivals.length
+      ? `<div class="pkrivals">${g.rivals.map((r) => {
+          const c = r.outcome === "win" ? " w" : (r.outcome && r.outcome !== "win" ? " l" : "");
+          return `<span class="pkchip${c}">${esc(r.name)} ${esc(r.team)}</span>`;
+        }).join("")}</div>`
+      : "";
+
+    return `<div class="pkrow">
+      <div class="pkmatch">
+        <div class="pkteams">${esc(g.away)} at ${esc(g.home)}</div>
+        <div class="pkmeta">${esc(ko)} · ${esc(line)}${esc(mkt)}${g.locked ? " · locked" : ""}</div>
+        ${rivals}
+      </div>
+      <div class="pkpick">${pick}${edge}${wants}</div>
+      ${why ? `<div style="grid-column:1/-1">${why}</div>` : ""}
+    </div>`;
+  }).join("");
+
+  const tb = p.tiebreaker;
+  const tbLine = tb.label
+    ? `${esc(tb.label)} total: ours ${tb.ours === null ? "not set" : tb.ours}, recommended ${tb.recommended}`
+      + (tb.rivals.length ? ` · rivals ${tb.rivals.map((r) => `${esc(r.name)} ${r.value}`).join(", ")}` : "")
+    : "not designated yet";
+
+  return `
+  <div class="card wide">
+    <h2>${esc(p.leagueName)} &middot; week ${p.week}</h2>
+    <div class="kv"><span class="k">Submitted</span><span class="v num">${p.summary.picksHeld} of ${p.summary.games}</span></div>
+    <div class="kv"><span class="k">Still open</span><span class="v num">${p.summary.pickable}</span></div>
+    <div class="kv"><span class="k">Edges held</span><span class="v num">${p.summary.edgesHeld}</span></div>
+    <div class="note">${esc(p.format)} Final picks go in at T-${p.summary.finalWindowHours}h per game, because rivals can read our picks exactly as we read theirs. Until then we hold favourites, which leak nothing.</div>
+  </div>
+
+  <div class="card wide">
+    <h2>Standings</h2>
+    <table class="stand">
+      <thead><tr><th>#</th><th>Team</th><th class="r">Season</th><th class="r">Week</th><th class="r">In</th></tr></thead>
+      <tbody>${stand}</tbody>
+    </table>
+  </div>
+
+  <div class="card wide">
+    <h2>Tiebreaker</h2>
+    <div class="note">${tbLine}</div>
+  </div>
+
+  <div class="card wide">
+    <h2>Games</h2>
+    ${rows || `<div class="cutnote">No games for this week.</div>`}
+  </div>`;
+}
+
+async function loadPickem(week) {
+  try {
+    const p = await getJson(`/api/pickem${week ? "?w=" + week : ""}`);
+    state.pickem = p;
+    state.pickemWeek = p.week;
+    if (state.tab === "pickem") $("tab-pickem").innerHTML = renderPickem(p);
+  } catch (err) {
+    state.pickem = { error: err.message };
+    if (state.tab === "pickem") $("tab-pickem").innerHTML = renderPickem(state.pickem);
+  }
+}
+// #endregion
+
 // #region render + load
 function paint() {
   const v = state.view;
@@ -624,7 +757,10 @@ function paint() {
   $("tab-matchup").innerHTML = renderMatchup(v);
   $("tab-coach").innerHTML = renderCoach(v, state.intentWeek === v.week ? state.intent : null);
   $("tab-league").innerHTML = renderLeague(v);
-  for (const t of ["matchup", "coach", "league"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
+  // The pick'em pool is a different league on a different Sleeper product, so it
+  // is fetched on its own and only repainted from its own cache here.
+  $("tab-pickem").innerHTML = renderPickem(state.pickem);
+  for (const t of ["matchup", "coach", "league", "pickem"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
 }
 
 async function load(week, opts) {
@@ -691,11 +827,19 @@ document.querySelector(".tabbar").addEventListener("click", (e) => {
   if (!b) return;
   state.tab = b.dataset.tab;
   for (const btn of document.querySelectorAll(".tabbar button")) btn.classList.toggle("on", btn === b);
-  for (const t of ["matchup", "coach", "league"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
+  for (const t of ["matchup", "coach", "league", "pickem"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
+  // Fetched only when the tab is first opened, so the scoreboard never waits on
+  // it and a phone on cell data does not pay for a pool it is not looking at.
+  if (state.tab === "pickem" && !state.pickem) loadPickem();
   window.scrollTo({ top: 0 });
 });
 
-$("refreshBtn").addEventListener("click", () => load(state.week));
+$("refreshBtn").addEventListener("click", () => {
+  load(state.week);
+  // The pick'em pool is fetched on its own, so a manual refresh has to ask for it
+  // explicitly or the tab would keep showing whatever it first loaded.
+  if (state.tab === "pickem") loadPickem(state.pickemWeek);
+});
 
 // Re-opening the installed app should show current data, not whatever was on
 // screen when it was last backgrounded.
