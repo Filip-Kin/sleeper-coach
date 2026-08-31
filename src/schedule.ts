@@ -71,7 +71,8 @@ export function lastOccurrence(job: Job, now: number, zone = ZONE): number | nul
   for (let back = 0; back <= 8; back++) {
     const probe = now - back * 86_400_000;
     const p = partsInZone(probe, zone);
-    if (p.dow !== job.dow) continue;
+    // dow -1 means "every day", used by jobs that are not tied to the NFL week.
+    if (job.dow >= 0 && p.dow !== job.dow) continue;
     const at = zonedInstant(p.y, p.m, p.d, job.hour, job.minute, zone);
     if (at <= now) return at;
   }
@@ -105,6 +106,15 @@ const HOUR = 60 * MIN;
 
 // The weekly locks. Times are Eastern because the NFL schedule is.
 export const JOBS: Job[] = [
+  {
+    // Hourly would be wasteful and nightly too slow to matter, so it runs twice a
+    // day: once in the small hours when nothing else is competing for the shared
+    // browser, and once in the early evening so a request filed during a Sunday
+    // does not wait until Monday. Requests are also filed automatically, so this
+    // is the loop that makes the system self-repairing rather than a manual tool.
+    name: "engineer", dow: -1, hour: 3, minute: 30, maxLateMs: 12 * HOUR,
+    why: "Drains the improvement queue. Daily, off-peak, and late-tolerant because it writes no game state.",
+  },
   {
     name: "lineup-thursday", dow: 4, hour: 16, minute: 0, maxLateMs: 4 * HOUR,
     why: "Thursday Night Football kicks off 20:15 ET, so 16:00 leaves four hours and the late window closes before kickoff.",

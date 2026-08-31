@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { config } from "./config.ts";
 import { sleeper } from "./sleeper/client.ts";
@@ -16,6 +16,7 @@ import { freezeState } from "./killswitch.ts";
 // handle it. Scheduled deadline wakeups (lineups, waivers) are systemd timers
 // (Phase E), not this loop.
 
+const STATE_DIR = process.env.COACH_STATE ?? "/data/sleeper-coach";
 const DB_PATH = process.env.COACH_DB ?? "/data/sleeper-coach/coach.db";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 90_000);
 // While the draft orchestrator owns the shared browser, the daemon must not
@@ -133,6 +134,16 @@ async function handlePendingTrade(tx: TransactionLike): Promise<void> {
       "Trade offer pending (coach is in shadow mode)",
       `${what}\n\n${verdict}\n\nThe coach will NOT respond. Handle it in Sleeper, or arm it once respondTrade's selectors are verified against a real offer.`,
     ).catch(() => {});
+    // SELF-REPAIR. The coach cannot action a trade because respondTrade's
+    // selectors have never met a real offer, and they never can until one exists.
+    // So the arrival of an offer is exactly the moment to file the engineering
+    // work, with the live DOM captured as the artefact that makes it possible.
+    // Filip: "I want to be hands off after today. The engineer should handle all
+    // engineering." Latched to once per capability, not once per offer, so a
+    // flurry of offers cannot queue a flurry of identical requests.
+    await fileTradeCaptureRequest(tx.transaction_id).catch((e) =>
+      console.error(`[daemon] could not file the engineering request: ${e instanceof Error ? e.message : String(e)}`),
+    );
     markSeen(tx.transaction_id, "shadow");
     return;
   }
@@ -193,6 +204,63 @@ async function checkAuth(): Promise<void> {
 }
 // #endregion
 
+
+// #region self-repair: file engineering work the coach cannot do itself
+const CAPABILITY_LATCH = `${STATE_DIR}/engineering-filed.json`;
+
+function alreadyFiled(capability: string): boolean {
+  try {
+    const j = JSON.parse(readFileSync(CAPABILITY_LATCH, "utf8")) as Record<string, string>;
+    return typeof j[capability] === "string";
+  } catch {
+    return false;
+  }
+}
+function markFiled(capability: string): void {
+  let j: Record<string, string> = {};
+  try { j = JSON.parse(readFileSync(CAPABILITY_LATCH, "utf8")) as Record<string, string>; } catch { /* first time */ }
+  j[capability] = new Date().toISOString();
+  writeFileSync(CAPABILITY_LATCH, JSON.stringify(j, null, 2));
+}
+
+async function fileTradeCaptureRequest(txId: string): Promise<void> {
+  if (process.env.TRADE_WRITE_ARMED) return; // already built
+  if (alreadyFiled("respondTrade")) return;
+
+  // Capture the live DOM while the offer is actually on screen. Read-only.
+  const shot = `${STATE_DIR}/capture-trade-${txId}.json`;
+  try {
+    const res = await fetch(`${BROWSER_API}/dom`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: `https://sleeper.com/leagues/${config.leagueId}/trades` }),
+    });
+    writeFileSync(shot, await res.text());
+    console.log(`[daemon] captured the pending-offer DOM to ${shot}`);
+  } catch (err) {
+    console.error(`[daemon] DOM capture failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const req = {
+    id: `respondTrade-${Date.now().toString(36)}`,
+    ts: new Date().toISOString(),
+    status: "open",
+    artefacts: [shot],
+    request:
+      "Finish respondTrade and sendTrade in src/act/sleeper.ts against a REAL pending offer.\n\n" +
+      "Until now these were stubs because the staging league cannot test trades: all seven other staging teams are orphans with owner_id null, so Sleeper offers no trade partner and the propose-trade modal renders a single column (scrollWidth equals clientWidth, no hidden columns). A real offer has now arrived in the real league, and its DOM is captured in the artefact above.\n\n" +
+      "Do: identify the accept and reject controls for a pending offer, implement both paths, and verify by re-reading the pending-offer count from the DOM afterwards (never the rosters API, which serves stale data for minutes). Refuse rather than guess when more than one pending offer is present, and when a player match is ambiguous. Keep TRADE_WRITE_ARMED gating in place so the path ships tested but disarmed; note in the commit what still needs a human to arm it.\n\n" +
+      "The decision layer is already done and tested (src/analysis/trade-fair.ts, 28 tests): two-sided valuation with schedule dilution, a floor on our own lineup, marginal-lineup-value for what we may offer, injury refusal, and a probing budget. You are building the actuator only. Do not change the decision rules.",
+  };
+  const line = JSON.stringify(req) + "\n";
+  const path = process.env.IMPROVE_QUEUE ?? `${STATE_DIR}/improvement-requests.jsonl`;
+  writeFileSync(path, (existsSync(path) ? readFileSync(path, "utf8") : "") + line);
+  markFiled("respondTrade");
+  logEvent("coach", "engineering-filed", `Filed ${req.id}: finish respondTrade using the live offer DOM.`, { id: req.id, artefact: shot });
+  await sendAlert("Coach filed engineering work", `A real trade offer arrived, so the coach captured its DOM and asked the engineer to finish respondTrade. ${req.id}`).catch(() => {});
+}
+// #endregion
+
 // #region in-container scheduling
 // Replaces the host systemd timers. Filip: "I want this to run containerized so
 // it's not using my systemd timer." Every daemon poll asks each job whether its
@@ -223,6 +291,10 @@ function markRun(job: string, occurrence: number): void {
 // the submit job without a code change, once a shadow cycle has been reviewed.
 const waiversLive = /^(1|true|yes|on)$/i.test(process.env.WAIVERS_LIVE ?? "");
 const JOB_COMMAND: Record<string, string[]> = {
+  // The engineer runs on the same containerized schedule as the coaching. Filip:
+  // "I want to be hands off after today. The engineer should handle all
+  // engineering. The bot should handle all coaching."
+  "engineer": ["bun", "run", "src/engineer/engineer-run.ts"],
   "lineup-thursday": ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"],
   "lineup-sunday": ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"],
   "inactive-sunday": ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"],

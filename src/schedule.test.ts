@@ -44,7 +44,20 @@ t("a read-only job tolerates being hours late", isDue(compute, cOcc + 5 * 60 * 6
 
 // 6. Every job is self-documenting and internally sane.
 for (const j of JOBS) {
-  t(`${j.name} declares why and a sane window`, j.why.length > 20 && j.maxLateMs > 0 && j.dow >= 0 && j.dow <= 6 && j.hour < 24);
+  // dow -1 is legal and means "every day", used by jobs not tied to the NFL week.
+  t(`${j.name} declares why and a sane window`, j.why.length > 20 && j.maxLateMs > 0 && j.dow >= -1 && j.dow <= 6 && j.hour < 24);
+}
+
+// A daily job (dow -1) must fire every day, not only on one weekday.
+const daily = JOBS.find((j) => j.dow === -1);
+if (daily) {
+  const days = new Set<string>();
+  for (let d = 0; d < 7; d++) {
+    const now = zonedInstant(2026, 10, 5 + d, 23, 0);
+    const occ = lastOccurrence(daily, now);
+    if (occ !== null) days.add(new Date(occ).toISOString().slice(0, 10));
+  }
+  t(`${daily.name} has a distinct occurrence on each of 7 consecutive days`, days.size === 7, `${days.size}`);
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
