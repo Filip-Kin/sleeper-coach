@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="en-NZ">
+<head>
+<meta charset="utf-8" />
+<!-- viewport-fit=cover so the safe-area insets below actually have room to work
+     against on a notched phone; without it iOS letterboxes the page. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Coach</title>
+<meta name="theme-color" content="#141518" />
+<meta name="colour-scheme" content="dark" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="icon" href="/icons/icon-32.png" sizes="32x32" />
+<link rel="apple-touch-icon" href="/icons/icon-180.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Coach" />
+<style>
+  /* Mobile first, and it stays that way: the only breakpoint widens the grid on a
+     tablet. Everything is sized for one thumb on a 360px screen. */
+  :root {
+    --bg: #141518; --panel: #191b1f; --panel2: #212429; --line: #2a2e35;
+    --ink: #e7e9ee; --ink2: #c3c2b7; --muted: #898781;
+    /* Validated categorical pair for the dark surface #191b1f (dataviz skill,
+       scripts/validate_palette.js): CVD dE 26.8, normal dE 31.8, both >= 3:1.
+       Blue is always us, orange is always the opponent, in every week. */
+    --us: #3987e5; --them: #d95926;
+    /* Status tokens are reserved for state and never used as a series colour. */
+    --good: #0ca30c; --warn: #fab219; --serious: #ec835a; --crit: #d03b3b;
+    --tabbar-h: 56px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html { background: var(--bg); }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    /* Stop the whole page rubber-banding behind the fixed chrome on iOS. */
+    overscroll-behavior-y: contain;
+    padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 8px);
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; touch-action: manipulation; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* #region header + week strip */
+  header {
+    position: sticky; top: 0; z-index: 20; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding-top: env(safe-area-inset-top);
+  }
+  .idrow { display: flex; align-items: center; gap: 10px; padding: 10px 14px 8px; }
+  .idrow .name { font-weight: 650; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .idrow .rec { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .idrow .sp { margin-left: auto; }
+  .iconbtn {
+    min-width: 44px; min-height: 44px; display: grid; place-items: center;
+    border-radius: 10px; color: var(--muted); font-size: 18px;
+  }
+  .iconbtn:active { background: var(--panel2); }
+  .weeks {
+    display: flex; gap: 6px; overflow-x: auto; padding: 0 12px 10px;
+    scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .weeks::-webkit-scrollbar { display: none; }
+  .wk {
+    flex: 0 0 auto; scroll-snap-align: center;
+    min-width: 46px; min-height: 40px; padding: 0 10px;
+    border-radius: 10px; background: var(--panel2); border: 1px solid var(--line);
+    color: var(--muted); font-size: 13px; font-weight: 600;
+    display: grid; place-items: center;
+  }
+  .wk.on { color: #06070a; background: var(--us); border-color: var(--us); }
+  .wk.po { border-style: dashed; }
+  .wk.now::after {
+    content: ""; width: 4px; height: 4px; border-radius: 50%;
+    background: var(--good); position: absolute; transform: translate(0, 14px);
+  }
+  .wk { position: relative; }
+  /* #endregion */
+
+  main { padding: 12px 12px 4px; display: grid; gap: 12px; max-width: 720px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .card > h2 {
+    margin: 0; padding: 11px 14px 9px; font-size: 11.5px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid var(--line);
+  }
+  .pad { padding: 13px 14px; }
+  .hide { display: none !important; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .xs { font-size: 11.5px; }
+
+  /* #region scoreboard */
+  .score { display: grid; grid-template-columns: 1fr auto 1fr; align-items: start; gap: 8px; padding: 14px 14px 10px; }
+  .side { min-width: 0; }
+  .side.r { text-align: right; }
+  .side .tname { font-size: 12.5px; color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side .rule { height: 3px; border-radius: 2px; margin: 5px 0 7px; }
+  .side.l .rule { background: var(--us); }
+  .side.r .rule { background: var(--them); }
+  .side .tot { font-size: 30px; font-weight: 700; line-height: 1.05; letter-spacing: -.01em; }
+  .side .rec { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .vs { color: var(--muted); font-size: 12px; padding-top: 22px; }
+
+  /* #region the earned / still-to-come chart
+     Two horizontal stacked bars on ONE shared scale so the lengths compare
+     directly. Solid = already earned, hatched-light = still to come. A 2px
+     surface gap separates the segments (never a border), and the far end of each
+     bar is rounded 4px with the baseline end square. */
+  .bars { padding: 4px 14px 12px; display: grid; gap: 9px; }
+  .barrow { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 9px; }
+  .barrow .lab { font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+  .track { height: 14px; background: var(--panel2); border-radius: 4px; display: flex; overflow: hidden; }
+  .seg { height: 100%; }
+  .seg.earned { border-radius: 0 4px 4px 0; }
+  .seg.tocome { border-radius: 0 4px 4px 0; margin-left: 2px; }
+  .barrow.us .seg.earned { background: var(--us); }
+  .barrow.us .seg.tocome { background: color-mix(in srgb, var(--us) 40%, var(--panel2)); }
+  .barrow.them .seg.earned { background: var(--them); }
+  .barrow.them .seg.tocome { background: color-mix(in srgb, var(--them) 40%, var(--panel2)); }
+  .barrow .val { font-size: 13px; font-weight: 650; min-width: 48px; text-align: right; }
+  .legend { display: flex; gap: 14px; padding: 0 14px 12px; font-size: 11.5px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .sw { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .sw.a { background: var(--us); }
+  .sw.b { background: color-mix(in srgb, var(--us) 40%, var(--panel2)); }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 14px 14px; }
+  .split .box { background: var(--panel2); border-radius: 10px; padding: 9px 11px; }
+  .split .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .split .v { font-size: 19px; font-weight: 700; margin-top: 1px; }
+  .split .sub { font-size: 11px; color: var(--muted); }
+  /* #endregion */
+
+  /* #region win probability: a hero number, not a chart */
+  .wp { padding: 14px; border-top: 1px solid var(--line); }
+  .wp .big { font-size: 44px; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
+  .wp .basis { color: var(--ink2); font-size: 13px; margin-top: 6px; }
+  .meter { height: 8px; border-radius: 4px; background: var(--them); margin-top: 11px; overflow: hidden; display: flex; }
+  .meter i { display: block; background: var(--us); border-radius: 4px 0 0 4px; }
+  .meterlab { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 5px; }
+  details.assume { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  details.assume summary {
+    font-size: 12.5px; color: var(--muted); cursor: pointer; min-height: 36px;
+    display: flex; align-items: center; gap: 7px; list-style: none;
+  }
+  details.assume summary::-webkit-details-marker { display: none; }
+  details.assume summary::before {
+    content: "\203A"; font-size: 16px; line-height: 1; transform: rotate(90deg);
+    transition: transform .15s ease; display: inline-block; width: 12px; text-align: center;
+  }
+  details.assume[open] summary::before { transform: rotate(270deg); }
+  details.assume ul { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--muted); }
+  details.assume li { margin: 5px 0; }
+  /* #endregion */
+
+  /* #region slot rows: the matchup table view */
+  .slots { display: grid; }
+  .slot {
+    display: grid; grid-template-columns: 1fr 40px 1fr; gap: 6px; align-items: center;
+    padding: 8px 12px; border-top: 1px solid var(--line);
+  }
+  .slot:first-child { border-top: 0; }
+  .slotlab { text-align: center; font-size: 10px; font-weight: 700; color: var(--muted); letter-spacing: .04em; }
+  .pl { min-width: 0; }
+  .pl.r { text-align: right; }
+  .pl .n { font-size: 13.5px; line-height: 1.25; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pl .m { font-size: 11px; line-height: 1.35; color: var(--muted); margin-top: 2px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  .pl.r .m { justify-content: flex-end; }
+  .pl .pts { font-size: 15px; font-weight: 700; }
+  .pl .proj { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .pl.dim .n, .pl.dim .pts { color: var(--muted); }
+  /* Status chips. Every one carries a WORD, never colour alone. */
+  .chip { font-size: 9.5px; font-weight: 700; letter-spacing: .04em; padding: 1px 5px; border-radius: 4px; text-transform: uppercase; white-space: nowrap; }
+  .chip.final { background: var(--panel2); color: var(--muted); }
+  .chip.live  { background: var(--good); color: #06070a; }
+  .chip.soon  { background: var(--panel2); color: var(--ink2); }
+  .chip.bye   { background: var(--warn); color: #06070a; }
+  .chip.out   { background: var(--crit); color: #fff; }
+  .chip.q     { background: transparent; color: var(--warn); border: 1px solid var(--warn); }
+  /* #endregion */
+
+  /* #region coach tab */
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 8px 14px; border-top: 1px solid var(--line); font-size: 13.5px; }
+  .kv:first-child { border-top: 0; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-weight: 650; text-align: right; }
+  .move { display: grid; grid-template-columns: 22px 1fr auto; gap: 9px; align-items: center; padding: 9px 14px; border-top: 1px solid var(--line); }
+  .move .ic { font-size: 15px; font-weight: 700; text-align: center; }
+  .move.in .ic { color: var(--good); }
+  .move.out .ic { color: var(--crit); }
+  .move .n { font-size: 14px; font-weight: 600; }
+  .move .m { font-size: 11.5px; color: var(--muted); }
+  .move .p { font-size: 13px; font-weight: 650; }
+  .note { padding: 11px 14px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); }
+  .banner { margin: 0; padding: 11px 14px; font-size: 12.5px; border-bottom: 1px solid var(--line); }
+  .banner.warn { background: rgba(250,178,25,.10); color: var(--warn); }
+  .banner.crit { background: rgba(208,59,59,.12); color: #f0a2a2; }
+  .banner.ok { background: rgba(12,163,12,.10); color: #7fd47f; }
+  .pill { display: inline-block; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; text-transform: uppercase; letter-spacing: .04em; }
+  .pill.accept { background: var(--good); color: #06070a; }
+  .pill.reject { background: var(--crit); color: #fff; }
+  .pill.surface { background: var(--warn); color: #06070a; }
+  /* #endregion */
+
+  /* #region standings */
+  .stand { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .stand th { text-align: left; font-weight: 500; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  .stand td { padding: 9px 6px; border-bottom: 1px solid var(--line); }
+  .stand td:first-child, .stand th:first-child { padding-left: 14px; }
+  .stand td:last-child, .stand th:last-child { padding-right: 14px; }
+  .stand .tm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
+  .stand tr.us td { background: rgba(57,135,229,.10); font-weight: 650; }
+  .stand tr.cut td { border-bottom: 2px solid var(--us); }
+  .stand .r { text-align: right; }
+  .cutnote { padding: 9px 14px; font-size: 11.5px; color: var(--muted); }
+  /* #endregion */
+
+  /* #region bottom tab bar: the thumb zone */
+  .tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    background: var(--panel); border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .tabbar button {
+    height: var(--tabbar-h); display: grid; place-items: center; gap: 2px;
+    font-size: 11px; font-weight: 600; color: var(--muted);
+  }
+  .tabbar button .g { font-size: 17px; line-height: 1; }
+  .tabbar button.on { color: var(--us); }
+  /* #endregion */
+
+  .stale { padding: 8px 14px; font-size: 11.5px; color: var(--warn); text-align: center; }
+  .err { padding: 14px; color: #f0a2a2; font-size: 13.5px; }
+  .skel { padding: 28px 14px; text-align: center; color: var(--muted); font-size: 13.5px; }
+  @media (min-width: 700px) { main { grid-template-columns: 1fr 1fr; align-items: start; } .wide { grid-column: 1 / -1; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="idrow">
+    <div style="min-width:0">
+      <div class="name" id="teamName">Coach</div>
+      <div class="rec" id="teamSub">loading…</div>
+    </div>
+    <button class="iconbtn sp" id="refreshBtn" aria-label="Refresh">&#8635;</button>
+  </div>
+  <nav class="weeks" id="weeks" aria-label="Week"></nav>
+</header>
+
+<main>
+  <div id="tab-matchup"></div>
+  <div id="tab-coach" class="hide"></div>
+  <div id="tab-league" class="hide"></div>
+</main>
+
+<nav class="tabbar" role="tablist">
+  <button data-tab="matchup" class="on"><span class="g">&#9636;</span>Matchup</button>
+  <button data-tab="coach"><span class="g">&#9998;</span>Coach</button>
+  <button data-tab="league"><span class="g">&#9776;</span>League</button>
+</nav>
+
+<script>
+"use strict";
+// #region small helpers
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const n1 = (v) => (Math.round((Number(v) || 0) * 10) / 10).toFixed(1);
+
+// Kickoff times come over the wire as epoch ms and are formatted HERE, in the
+// phone's own timezone. ESPN's own text is US Eastern, which is useless in
+// Auckland, so it is only ever a fallback.
+function kickLabel(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return d.toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
+}
+
+// One status chip per player. Every chip carries a word as well as a colour, so
+// nothing is encoded by colour alone.
+function chipFor(p) {
+  if (!p) return "";
+  if (p.status === "bye") return `<span class="chip bye">Bye</span>`;
+  if (p.status === "out") return `<span class="chip out">${esc(p.injury || "Out")}</span>`;
+  if (p.status === "live") return `<span class="chip live">${esc(p.gameDetail || "Live")}</span>`;
+  if (p.status === "banked") return `<span class="chip final">Final</span>`;
+  return `<span class="chip soon">${esc(kickLabel(p.kickoff) || "To play")}</span>`;
+}
+// A Questionable tag is worth seeing even on a player who is going to start,
+// because he cannot look it up anywhere else.
+function injChip(p) {
+  if (!p || !p.injury) return "";
+  if (p.status === "out") return "";
+  return `<span class="chip q">${esc(p.injury.slice(0, 4))}</span>`;
+}
+// #endregion
+
+// #region state
+const state = {
+  week: null,
+  currentWeek: null,
+  tab: "matchup",
+  view: null,
+  intent: null,
+  intentWeek: null,
+  timer: null,
+  loading: false,
+};
+
+async function getJson(url) {
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+// #endregion
+
+// #region week strip
+function renderWeeks(v) {
+  const el = $("weeks");
+  el.innerHTML = v.weeks
+    .map((w) => {
+      const cls = ["wk"];
+      if (w.week === v.week) cls.push("on");
+      if (w.playoff) cls.push("po");
+      if (w.week === v.currentWeek) cls.push("now");
+      return `<button class="${cls.join(" ")}" data-week="${w.week}" aria-label="Week ${w.week}">${esc(w.label)}</button>`;
+    })
+    .join("");
+  const on = el.querySelector(".wk.on");
+  if (on) on.scrollIntoView({ inline: "center", block: "nearest" });
+}
+// #endregion
+
+// #region matchup tab
+function playerCell(p, right, showPos) {
+  if (!p) return `<div class="pl ${right ? "r" : ""}"><div class="n muted">–</div></div>`;
+  const dead = p.status === "bye" || p.status === "out";
+  // Once a player has a real score, that number is the story and the projection
+  // is a footnote. Before kickoff there is nothing but the projection.
+  const scored = p.status === "banked" || p.status === "live";
+  const pts = scored ? `<span class="pts num">${n1(p.banked)}</span>` : "";
+  const proj = dead ? "" : `<span class="proj num">${scored ? "of " : ""}${n1(p.projection)} proj</span>`;
+  // The slot column already names the position on a matchup row, so it is only
+  // repeated on the bench where there is no slot column.
+  const where = [showPos ? esc(p.pos) : "", p.opponent ? "vs " + esc(p.opponent) : "", p.bye ? "bye " + p.bye : ""]
+    .filter(Boolean)
+    .join(" &middot; ");
+  return `<div class="pl ${right ? "r" : ""} ${dead ? "dim" : ""}">
+    <div class="n">${esc(p.name)}</div>
+    <div class="m">${pts}${proj}</div>
+    <div class="m">${chipFor(p)}${injChip(p)}<span class="xs muted">${where}</span></div>
+  </div>`;
+}
+
+function renderMatchup(v) {
+  const m = v.matchup, us = m.us, them = m.them, wp = m.winProb;
+  const scale = Math.max(us.outlook.expected, them ? them.outlook.expected : 0, 1);
+  const pct = (x) => Math.max(0, Math.min(100, (x / scale) * 100));
+
+  const bar = (side, o, cls) => `
+    <div class="barrow ${cls}">
+      <div class="lab">${side}</div>
+      <div class="track">
+        <div class="seg earned" style="width:${pct(o.banked)}%"></div>
+        <div class="seg tocome" style="width:${pct(o.toCome)}%"></div>
+      </div>
+      <div class="val num">${n1(o.expected)}</div>
+    </div>`;
+
+  const phaseNote =
+    v.phase === "future"
+      ? "Nothing has kicked off yet, so every number here is a projection."
+      : v.phase === "past"
+        ? "This week is final."
+        : `Live, refreshing every ${v.refreshSeconds}s.`;
+
+  const noOpp = m.noOpponent;
+
+  const head = `<div class="card wide">
+    <div class="score">
+      <div class="side l">
+        <div class="tname">${esc(us.teamName)}</div>
+        <div class="rule"></div>
+        <div class="tot num">${n1(us.outlook.expected)}</div>
+        <div class="rec">${esc(us.record)}${us.outlook.banked > 0 ? " &middot; " + n1(us.outlook.banked) + " so far" : ""}</div>
+      </div>
+      <div class="vs">vs</div>
+      <div class="side r">
+        <div class="tname">${them ? esc(them.teamName) : "no opponent"}</div>
+        <div class="rule"></div>
+        <div class="tot num">${them ? n1(them.outlook.expected) : "–"}</div>
+        <div class="rec">${them ? esc(them.record) + (them.outlook.banked > 0 ? " &middot; " + n1(them.outlook.banked) + " so far" : "") : ""}</div>
+      </div>
+    </div>
+    <div class="bars">
+      ${bar("US", us.outlook, "us")}
+      ${them ? bar("OPP", them.outlook, "them") : ""}
+    </div>
+    <div class="legend">
+      <span><i class="sw a"></i>earned</span>
+      <span><i class="sw b"></i>still to come</span>
+    </div>
+    <div class="legend" style="padding-top:0"><span>${esc(phaseNote)}</span></div>
+    <div class="split">
+      <div class="box">
+        <div class="k">Earned</div>
+        <div class="v num">${n1(us.outlook.banked)}</div>
+        <div class="sub">${us.outlook.played} of ${us.starters.length} starters done</div>
+      </div>
+      <div class="box">
+        <div class="k">Still to come</div>
+        <div class="v num">${n1(us.outlook.toCome)}</div>
+        <div class="sub">${us.outlook.yetToPlay} to play${us.outlook.inPlay ? ", " + us.outlook.inPlay + " live" : ""}</div>
+      </div>
+    </div>
+    <div class="wp">
+      <div class="big num">${noOpp ? "–" : wp.percent + "%"}</div>
+      <div class="basis">${noOpp ? "No opponent scheduled this week." : esc(wp.basis)}</div>
+      ${
+        noOpp
+          ? ""
+          : `<div class="meter"><i style="width:${wp.percent}%"></i></div>
+             <div class="meterlab"><span>us ${wp.percent}%</span><span>them ${100 - wp.percent}%</span></div>`
+      }
+      <details class="assume">
+        <summary>How this number is worked out</summary>
+        <ul>${wp.assumptions.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>
+        ${
+          wp.decided
+            ? ""
+            : `<ul><li>Expected margin ${n1(wp.meanDiff)} points, with a standard deviation of ${n1(wp.sd)}.</li></ul>`
+        }
+      </details>
+    </div>
+  </div>`;
+
+  const rows = m.rows
+    .map(
+      (r) => `<div class="slot">
+        ${playerCell(r.ours, false, false)}
+        <div class="slotlab">${esc(r.slot)}</div>
+        ${playerCell(r.theirs, true, false)}
+      </div>`,
+    )
+    .join("");
+
+  const benchRows = us.bench
+    .map((p) => `<div class="slot" style="grid-template-columns:1fr">${playerCell(p, false, true)}</div>`)
+    .join("");
+
+  const sbNote = v.scoreboard.ok ? "" : `<div class="banner warn">${esc(v.scoreboard.note)}</div>`;
+
+  return (
+    head +
+    `<div class="card wide">${sbNote}<h2>Starters</h2><div class="slots">${rows}</div></div>` +
+    `<div class="card wide"><h2>Our bench</h2><div class="slots">${benchRows || '<div class="note">No bench players.</div>'}</div></div>`
+  );
+}
+// #endregion
+
+// #region coach tab
+function renderCoach(v, intent) {
+  const L = v.lineup;
+  const gainCls = L.gain > 0.05 ? "warn" : "ok";
+  const lineupBanner = L.sameLineup
+    ? `<div class="banner ok">The lineup that is set IS the best lineup for this week.</div>`
+    : `<div class="banner ${gainCls}">${
+        L.retrospective
+          ? `We left ${n1(L.gain)} points on the bench in week ${v.week}.`
+          : `Changing the lineup is worth ${n1(L.gain)} projected points.`
+      }${L.locked && !L.retrospective ? " This week has already started, so some of it may be locked." : ""}</div>`;
+
+  const moves =
+    L.start.map((m) => `<div class="move in"><div class="ic">&uarr;</div><div><div class="n">${esc(m.name)}</div><div class="m">start at ${esc(m.slot)}${m.slot === m.pos ? "" : " &middot; " + esc(m.pos)}</div></div><div class="p num">${n1(m.projection)}</div></div>`).join("") +
+    L.sit.map((m) => `<div class="move out"><div class="ic">&darr;</div><div><div class="n">${esc(m.name)}</div><div class="m">sit from ${esc(m.slot)}${m.note ? " &middot; " + esc(m.note) : ""}</div></div><div class="p num">${n1(m.projection)}</div></div>`).join("");
+
+  const lineupCard = `<div class="card">
+    <h2>The lineup call &middot; week ${v.week}</h2>
+    ${lineupBanner}
+    <div class="kv"><span class="k">Best lineup projects</span><span class="v num">${n1(L.optimalTotal)}</span></div>
+    <div class="kv"><span class="k">Lineup as set projects</span><span class="v num">${n1(L.currentTotal)}</span></div>
+    ${moves}
+    ${L.unfilled.length ? `<div class="banner crit">Nothing available to fill: ${L.unfilled.map(esc).join(", ")}.</div>` : ""}
+    ${
+      L.benchedForCause.length
+        ? `<div class="note">Cannot play this week: ${L.benchedForCause.map((b) => esc(b.name) + " (" + esc(b.reason) + ")").join(", ")}.</div>`
+        : ""
+    }
+  </div>`;
+
+  // Byes
+  const B = v.byes;
+  const sel = B.selected;
+  const nx = B.next;
+  const byeCard = `<div class="card">
+    <h2>Bye trouble</h2>
+    ${
+      sel
+        ? `<div class="banner ${sel.heavy ? "warn" : ""}">Week ${sel.week}: ${sel.count} of our players are off${sel.heavy ? ", which is a crowded week" : ""}.</div>`
+        : `<div class="banner ok">Nobody on our roster is on a bye in week ${v.week}.</div>`
+    }
+    ${
+      nx
+        ? `<div class="kv"><span class="k">Next crowded bye</span><span class="v">Week ${nx.week} &middot; ${nx.count} players</span></div>
+           <div class="kv"><span class="k">What it costs</span><span class="v num">${n1(nx.costPts)} pts</span></div>
+           <div class="note">Best lineup that week projects ${n1(nx.withByes)}, against ${n1(nx.withoutByes)} if those players were available. The counterfactual values a player on bye at his season projection spread over 17 games, which is a typical week for him.</div>
+           <div class="note">Off in week ${nx.week}: ${nx.players.map((p) => esc(p.name) + " (" + esc(p.pos) + ")").join(", ")}.</div>`
+        : `<div class="note">No crowded bye weeks ahead.</div>`
+    }
+    <div class="note">Every bye: ${B.loads.map((l) => `week ${l.week}: ${l.count}${l.heavy ? " (crowded)" : ""}`).join(" &middot; ") || "none"}.</div>
+  </div>`;
+
+  // Trades and waivers come from the slower intent endpoint.
+  let tradeCard = `<div class="card"><h2>Trades</h2><div class="skel">Loading trade check…</div></div>`;
+  let waiverCard = `<div class="card"><h2>Waivers</h2><div class="skel">Loading waiver plan…</div></div>`;
+
+  if (intent) {
+    const T = intent.trades;
+    const offers = T.pending
+      .map((p) => {
+        const side = (arr) => arr.map((x) => `${esc(x.name)} (${esc(x.pos)}${x.bye ? ", bye " + x.bye : ""}${x.injury ? ", " + esc(x.injury) : ""})`).join(", ") || "nothing";
+        return `<div class="note" style="color:var(--ink)">
+          <div><span class="pill ${p.verdict}">${esc(p.verdict)}</span> &nbsp;from ${esc(p.partnerName)}</div>
+          <div class="small" style="margin-top:6px">We get: ${side(p.receive)}</div>
+          <div class="small">We give: ${side(p.give)}</div>
+          <div class="small muted" style="margin-top:6px">Our lineup ${p.ourGain >= 0 ? "+" : ""}${n1(p.ourGain)} rest-of-season, theirs ${p.theirGain >= 0 ? "+" : ""}${n1(p.theirGain)}. Edge ${n1(p.edge)}.</div>
+          ${p.fairnessBlocks.length ? `<div class="small" style="color:var(--warn);margin-top:5px">${p.fairnessBlocks.map(esc).join(" ")}</div>` : ""}
+          ${p.railBlocks.length ? `<div class="small" style="color:#f0a2a2;margin-top:5px">${p.railBlocks.map(esc).join(" ")}</div>` : ""}
+        </div>`;
+      })
+      .join("");
+    tradeCard = `<div class="card">
+      <h2>Trades</h2>
+      ${T.error ? `<div class="banner crit">Could not read the transactions feed (${esc(T.error)}), so a pending offer may not be shown.</div>` : ""}
+      ${
+        T.pending.length
+          ? offers
+          : `<div class="banner ok">No pending offers.</div>`
+      }
+      <div class="note">Trade deadline is week ${T.deadlineWeek}${T.deadlinePassed ? " (passed)" : ""}. A verdict weighs BOTH sides: we only accept a trade that is at least as good for us as it is for them.</div>
+    </div>`;
+
+    const W = intent.waivers;
+    const moveRows = W.moves
+      .slice(0, 6)
+      .map(
+        (m) => `<div class="move ${m.kind === "waiver-claim" ? "in" : ""}">
+          <div class="ic">${m.kind === "waiver-claim" ? "&#9733;" : "+"}</div>
+          <div><div class="n">${esc(m.add)} <span class="xs muted">${esc(m.pos)}${m.bye ? " &middot; bye " + m.bye : ""}${m.injury ? " &middot; " + esc(m.injury) : ""}</span></div>
+          <div class="m">${esc(m.reason)}</div></div>
+          <div class="p num">${m.gainPts >= 0 ? "+" : ""}${n1(m.gainPts)}</div>
+        </div>`,
+      )
+      .join("");
+    waiverCard = `<div class="card">
+      <h2>Waivers</h2>
+      <div class="kv"><span class="k">Our priority</span><span class="v">#${intent.waiver.position ?? "?"} of ${intent.waiver.teams}</span></div>
+      ${W.error ? `<div class="banner warn">Could not read recent transactions (${esc(W.error)}), so players still on waivers cannot be told apart from cleared free agents.</div>` : ""}
+      ${
+        W.moves.length
+          ? moveRows
+          : `<div class="banner ok">Nothing on the wire is worth a move.</div>${
+              W.nothingToDo
+                ? `<div class="note">Best available is ${esc(W.nothingToDo.candidate)} (${esc(W.nothingToDo.pos)}, ${n1(W.nothingToDo.rosPoints)} rest-of-season): ${esc(W.nothingToDo.reason)}.</div>`
+                : ""
+            }`
+      }
+      <div class="note">${esc(intent.waiver.note)}</div>
+      <div class="note">Checked the top ${W.considered} available players by rest-of-season projection.</div>
+    </div>`;
+  }
+
+  return lineupCard + byeCard + tradeCard + waiverCard;
+}
+// #endregion
+
+// #region league tab
+function renderLeague(v) {
+  const rows = v.standings
+    .map((s) => {
+      const cls = [s.isUs ? "us" : "", s.rank === v.league.playoffTeams ? "cut" : ""].filter(Boolean).join(" ");
+      return `<tr class="${cls}">
+        <td class="num">${s.rank}</td>
+        <td class="tm">${esc(s.teamName)}</td>
+        <td class="r num">${s.wins}-${s.losses}${s.ties ? "-" + s.ties : ""}</td>
+        <td class="r num">${n1(s.pointsFor)}</td>
+        <td class="r num">${s.waiverPosition ?? "–"}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const u = v.us;
+  return `<div class="card wide">
+    <h2>Standings</h2>
+    <table class="stand">
+      <thead><tr><th>#</th><th>Team</th><th class="r">W-L</th><th class="r">PF</th><th class="r">Wvr</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="cutnote">The line under ${v.league.playoffTeams} marks the playoff cut. Playoffs start week ${v.league.playoffWeekStart}, the final is week ${v.league.championshipWeek}. Seeding is wins first, then points for.</div>
+  </div>
+  <div class="card wide">
+    <h2>Where we sit</h2>
+    <div class="kv"><span class="k">Position</span><span class="v">${u.rank} of ${v.league.teams}${u.inPlayoffSpot ? " &middot; in a playoff spot" : " &middot; outside the cut"}</span></div>
+    <div class="kv"><span class="k">Record</span><span class="v num">${esc(u.record)}</span></div>
+    <div class="kv"><span class="k">Points for</span><span class="v num">${n1(u.pointsFor)}</span></div>
+    <div class="kv"><span class="k">Waiver priority</span><span class="v">#${u.waiverPosition ?? "?"} of ${v.league.teams}</span></div>
+    <div class="note">${esc(v.league.name)} &middot; ${esc(v.league.scoring.join(", "))} &middot; ${v.league.teams} teams &middot; rolling waiver priority, no FAAB budget.</div>
+  </div>`;
+}
+// #endregion
+
+// #region render + load
+function paint() {
+  const v = state.view;
+  if (!v) return;
+  $("teamName").textContent = v.matchup.us.teamName;
+  // Honesty about age. The service worker will happily serve a cached scoreboard
+  // when the phone is offline, and a stale score presented as live is exactly the
+  // wrong failure on a Sunday. Anything older than 90 seconds says when it is from.
+  const age = Math.round((Date.now() - v.generatedAt) / 1000);
+  const stamp = age > 90 ? ` · as of ${new Date(v.generatedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : "";
+  $("teamSub").textContent = `${v.us.record} · ${v.us.rank} of ${v.league.teams} · week ${v.week}${stamp}`;
+  renderWeeks(v);
+  $("tab-matchup").innerHTML = renderMatchup(v);
+  $("tab-coach").innerHTML = renderCoach(v, state.intentWeek === v.week ? state.intent : null);
+  $("tab-league").innerHTML = renderLeague(v);
+  for (const t of ["matchup", "coach", "league"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
+}
+
+async function load(week, opts) {
+  const quiet = opts && opts.quiet;
+  if (state.loading) return;
+  state.loading = true;
+  if (!quiet) $("teamSub").textContent = "loading…";
+  try {
+    const v = await getJson(`/api/season/week${week ? "?w=" + week : ""}`);
+    if (v.error) throw new Error(v.error);
+    state.view = v;
+    state.week = v.week;
+    state.currentWeek = v.currentWeek;
+    paint();
+    scheduleRefresh(v.refreshSeconds);
+    // The intent panel is slower, so it is fetched behind the scoreboard and
+    // painted in when it lands. The matchup never waits on it.
+    loadIntent(v.week);
+  } catch (err) {
+    if (!state.view) {
+      $("tab-matchup").innerHTML = `<div class="card"><div class="err">Could not load: ${esc(err.message)}</div></div>`;
+    } else {
+      $("teamSub").textContent = "offline, showing last known";
+    }
+  } finally {
+    state.loading = false;
+  }
+}
+
+async function loadIntent(week) {
+  try {
+    const i = await getJson(`/api/season/intent?w=${week}`);
+    if (i.error) return;
+    state.intent = i;
+    state.intentWeek = week;
+    if (state.view && state.view.week === week) $("tab-coach").innerHTML = renderCoach(state.view, i);
+  } catch {
+    /* the coach tab keeps its "loading" state rather than showing a false empty */
+  }
+}
+
+function scheduleRefresh(seconds) {
+  if (state.timer) clearInterval(state.timer);
+  // Only the live week polls. A finished or future week does not change minute to
+  // minute, and a phone on a cell connection should not be asking.
+  if (!seconds || state.week !== state.currentWeek) return;
+  state.timer = setInterval(() => load(state.week, { quiet: true }), Math.max(15, seconds) * 1000);
+}
+// #endregion
+
+// #region events
+$("weeks").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-week]");
+  if (!b) return;
+  const w = Number(b.dataset.week);
+  if (w === state.week) return;
+  state.intent = null;
+  state.intentWeek = null;
+  load(w);
+});
+
+document.querySelector(".tabbar").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-tab]");
+  if (!b) return;
+  state.tab = b.dataset.tab;
+  for (const btn of document.querySelectorAll(".tabbar button")) btn.classList.toggle("on", btn === b);
+  for (const t of ["matchup", "coach", "league"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
+  window.scrollTo({ top: 0 });
+});
+
+$("refreshBtn").addEventListener("click", () => load(state.week));
+
+// Re-opening the installed app should show current data, not whatever was on
+// screen when it was last backgrounded.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && state.view) load(state.week, { quiet: true });
+});
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+  // A new worker taking over means a new build; reload once so the shell and the
+  // code match. The flag stops the classic reload loop.
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloaded) return;
+    reloaded = true;
+    window.location.reload();
+  });
+}
+
+load();
+// #endregion
+</script>
+</body>
+</html>

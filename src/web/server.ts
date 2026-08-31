@@ -9,6 +9,7 @@ import { recentEvents } from "../log.ts";
 import { allPosts } from "../blog/store.ts";
 import { readGuidanceState, setGuidance } from "./guidance.ts";
 import { draftView } from "./draftview.ts";
+import { seasonWeek, seasonIntent } from "./seasonview.ts";
 import { statSync, openSync, readSync, closeSync } from "node:fs";
 
 const ACTIVITY_LOG = process.env.ACTIVITY_LOG ?? "/data/sleeper-coach/activity.jsonl";
@@ -159,6 +160,37 @@ Bun.serve({
       const file = Bun.file(`${PUBLIC_DIR}blog.html`);
       if (await file.exists()) return new Response(file, { headers: { "Content-Type": "text/html" } });
     }
+    // The IN-SEASON app: the replacement for the Sleeper app on Filip's phone.
+    // Served at /season rather than / so the draft dashboard (and its tested
+    // guidance box) keeps working untouched; the PWA manifest's start_url points
+    // here, so the installed home-screen icon opens straight to it.
+    if (url.pathname === "/season" || url.pathname === "/season/") {
+      const file = Bun.file(`${PUBLIC_DIR}season.html`);
+      if (await file.exists()) {
+        return new Response(file, {
+          // The service worker owns the offline copy, so the browser should always
+          // revalidate this shell rather than hold its own stale one.
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" },
+        });
+      }
+    }
+    // Read-only season endpoints. /week is the hot path during live scoring and is
+    // server-cached inside seasonview.ts, so any number of polling clients cannot
+    // rate-limit Sleeper. /intent is the slower trade and waiver analysis (it needs
+    // rest-of-season projections) and is fetched separately so the scoreboard never
+    // waits on it.
+    if (url.pathname === "/api/season/week") {
+      const w = Number(url.searchParams.get("w"));
+      return seasonWeek(Number.isFinite(w) && w > 0 ? w : undefined)
+        .then((v) => Response.json(v, { headers: { "Cache-Control": "no-store" } }))
+        .catch((e) => Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 }));
+    }
+    if (url.pathname === "/api/season/intent") {
+      const w = Number(url.searchParams.get("w"));
+      return seasonIntent(Number.isFinite(w) && w > 0 ? w : undefined)
+        .then((v) => Response.json(v, { headers: { "Cache-Control": "no-store" } }))
+        .catch((e) => Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 }));
+    }
     if (url.pathname === "/api/stream") return sseActivityStream();
     if (url.pathname === "/api/activity") return Response.json({ events: recentEvents(150) });
     if (url.pathname === "/api/state") return stateJson().catch((e) => Response.json({ error: String(e) }, { status: 500 }));
@@ -180,7 +212,16 @@ Bun.serve({
     // Static: index at root, else serve files from public/.
     const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     const file = Bun.file(`${PUBLIC_DIR}${rel}`);
-    if (await file.exists()) return new Response(file);
+    if (await file.exists()) {
+      // A cached service worker is a stuck app: the browser keeps serving the old
+      // one and a new build never lands. Always revalidate it.
+      if (url.pathname === "/sw.js") {
+        return new Response(file, {
+          headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" },
+        });
+      }
+      return new Response(file);
+    }
     return new Response("not found", { status: 404 });
   },
 });
