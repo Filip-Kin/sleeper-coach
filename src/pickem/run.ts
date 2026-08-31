@@ -25,6 +25,7 @@ import {
   scorePicks, FINAL_WINDOW_MIN, type Decision,
 } from "./strategy.ts";
 import { fetchMarketLines } from "./odds.ts";
+import { probeLiquidity } from "./kalshi.ts";
 
 const args = process.argv.slice(2);
 const DRY = args.includes("--dry");
@@ -156,6 +157,20 @@ async function main(): Promise<void> {
   // nothing because it is what everyone picks anyway. The picks that carry our
   // actual edge go in inside the final window, too late to be copied, and we
   // never sit blank in between.
+  // Watch for Kalshi's NFL spread ladder becoming tradeable. It is the best
+  // shaped input for this pool (probability of covering the EXACT graded number,
+  // no line comparison and so no book-to-book noise) but every settled market
+  // had zero volume when measured. This costs one request and never touches a
+  // pick; it just tells us the day it becomes worth validating.
+  const kalshi = await probeLiquidity();
+  if (kalshi.usable) {
+    console.log(`[pickem] KALSHI IS NOW LIQUID: ${kalshi.quoted} quoted rungs, volume ${kalshi.totalVolume}. Worth validating against the 56.3% baseline.`);
+    logEvent("coach", "pickem-kalshi-liquid", `Kalshi NFL spread ladder is now quoted (${kalshi.quoted} rungs, volume ${kalshi.totalVolume})`, kalshi);
+  } else {
+    console.log(`[pickem] kalshi: ${kalshi.markets} rungs, ${kalshi.quoted} quoted, volume ${kalshi.totalVolume}` +
+      `${kalshi.error ? ` (${kalshi.error})` : ""} — not usable, picks unaffected`);
+  }
+
   // Cache every kickoff so the daemon can drive the final passes off real game
   // times instead of a fixed timetable. Sourced from Sleeper here rather than a
   // third party, so the trigger has no outside dependency, and refreshed on
