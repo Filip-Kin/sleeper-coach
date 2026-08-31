@@ -210,13 +210,27 @@ function markRun(job: string, occurrence: number): void {
 // processes rather than in-process is deliberate: a job that hangs or throws
 // cannot take the daemon down with it, and each run's output lands in the
 // container log where it can be read after the fact.
+// --refresh forces loadPlayers and loadWeekProjections past their caches. EVERY
+// job that writes a lineup gets it: the whole value of the 18:45 and 19:00 checks
+// is catching injury news that broke in the last hour, and I originally wired
+// those two WITHOUT it while giving it to the 11:00 lock, which made the late
+// checks read stale data and quietly do nothing. A cache miss costs one API call.
+//
+// The two waiver jobs are genuinely different despite looking similar:
+// compute is read-only planning in the small hours, submit is the one that acts.
+// waiver-run.ts --live performs only costless free-agent adds and still SHADOWS
+// every claim, because the claim DOM flow is unverified. So WAIVERS_LIVE flips
+// the submit job without a code change, once a shadow cycle has been reviewed.
+const waiversLive = /^(1|true|yes|on)$/i.test(process.env.WAIVERS_LIVE ?? "");
 const JOB_COMMAND: Record<string, string[]> = {
-  "lineup-thursday": ["bun", "run", "src/act/lineup-run.ts", "--live"],
+  "lineup-thursday": ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"],
   "lineup-sunday": ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"],
-  "inactive-sunday": ["bun", "run", "src/act/lineup-run.ts", "--live"],
-  "inactive-monday": ["bun", "run", "src/act/lineup-run.ts", "--live"],
+  "inactive-sunday": ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"],
+  "inactive-monday": ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"],
   "waiver-compute": ["bun", "run", "src/act/waiver-run.ts"],
-  "waiver-submit": ["bun", "run", "src/act/waiver-run.ts"],
+  "waiver-submit": waiversLive
+    ? ["bun", "run", "src/act/waiver-run.ts", "--live"]
+    : ["bun", "run", "src/act/waiver-run.ts"],
 };
 
 async function runJob(job: Job, occurrence: number): Promise<void> {
@@ -293,7 +307,8 @@ async function main(): Promise<void> {
   logEvent("daemon", "online", "Daemon started; watching for trades, auth and the weekly schedule.");
   console.log(`[daemon] polling every ${POLL_INTERVAL_MS / 1000}s, db=${DB_PATH}`);
   for (const j of JOBS) {
-    console.log(`[schedule] ${j.name.padEnd(18)} ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][j.dow]} ${String(j.hour).padStart(2, "0")}:${String(j.minute).padStart(2, "0")} ET, usable up to ${Math.round(j.maxLateMs / 3600000)}h late`);
+    const cmd = JOB_COMMAND[j.name];
+    console.log(`[schedule] ${j.name.padEnd(18)} ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][j.dow]} ${String(j.hour).padStart(2, "0")}:${String(j.minute).padStart(2, "0")} ET, up to ${Math.round(j.maxLateMs / 3600000)}h late  ->  ${cmd ? cmd.slice(2).join(" ") : "NO COMMAND"}`);
   }
   for (;;) {
     try {
