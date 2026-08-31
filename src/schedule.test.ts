@@ -1,4 +1,4 @@
-import { zonedInstant, lastOccurrence, isDue, JOBS, type Job } from "./schedule.ts";
+import { zonedInstant, lastOccurrence, isDue, dayLabel, JOBS, type Job } from "./schedule.ts";
 
 let pass = 0, fail = 0;
 const t = (label: string, cond: boolean, detail = "") => {
@@ -59,6 +59,15 @@ if (daily) {
   }
   t(`${daily.name} has a distinct occurrence on each of 7 consecutive days`, days.size === 7, `${days.size}`);
 }
+
+// 7. Every job renders a readable day label in the boot banner. The banner used a
+//    bare ["Sun",...][dow] lookup, so the dow -1 daily job printed "undefined
+//    03:30 ET"; assert no job ever yields an empty or undefined label again.
+for (const j of JOBS) {
+  const label = dayLabel(j);
+  t(`${j.name} renders a non-empty day label`, typeof label === "string" && label.length > 0 && label !== "undefined", label);
+}
+t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).every((j) => dayLabel(j) === "daily"));
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

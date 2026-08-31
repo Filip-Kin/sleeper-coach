@@ -65,6 +65,14 @@ export interface Job {
   why: string;
 }
 
+// Human-readable day for a job's dow, for the boot banner and logs. dow -1 means
+// "every day" (see the engineer job), which the raw ["Sun",...][dow] lookup rendered
+// as "undefined 03:30 ET"; render it as "daily" and any weekday by name.
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+export function dayLabel(job: Job): string {
+  return job.dow === -1 ? "daily" : WEEKDAYS[job.dow] ?? "?";
+}
+
 // The most recent scheduled occurrence at or before `now`, or null if none in the
 // last 8 days (which cannot happen for a weekly job, but keeps the search bounded).
 export function lastOccurrence(job: Job, now: number, zone = ZONE): number | null {

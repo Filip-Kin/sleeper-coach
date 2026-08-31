@@ -6,7 +6,7 @@ import { sleeper } from "./sleeper/client.ts";
 import { runAgent } from "./agent/runner.ts";
 import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
-import { JOBS, isDue, type Job } from "./schedule.ts";
+import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { freezeState } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
@@ -380,7 +380,7 @@ async function main(): Promise<void> {
   console.log(`[daemon] polling every ${POLL_INTERVAL_MS / 1000}s, db=${DB_PATH}`);
   for (const j of JOBS) {
     const cmd = JOB_COMMAND[j.name];
-    console.log(`[schedule] ${j.name.padEnd(18)} ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][j.dow]} ${String(j.hour).padStart(2, "0")}:${String(j.minute).padStart(2, "0")} ET, up to ${Math.round(j.maxLateMs / 3600000)}h late  ->  ${cmd ? cmd.slice(2).join(" ") : "NO COMMAND"}`);
+    console.log(`[schedule] ${j.name.padEnd(18)} ${dayLabel(j)} ${String(j.hour).padStart(2, "0")}:${String(j.minute).padStart(2, "0")} ET, up to ${Math.round(j.maxLateMs / 3600000)}h late  ->  ${cmd ? cmd.slice(2).join(" ") : "NO COMMAND"}`);
   }
   for (;;) {
     try {
