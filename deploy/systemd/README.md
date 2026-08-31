@@ -9,9 +9,20 @@ up each run, because Coolify renames it on every rebuild). Install with
 
 All times are US Eastern. The host is on `America/New_York`, and this host's
 systemd (247) evaluates `OnCalendar` in the host timezone, so the times stay
-correct across the EDT/EST change on their own. Every timer is `Persistent=true`,
-so a lock missed because the box was rebooting fires on wake rather than skipping
-the week.
+correct across the EDT/EST change on their own.
+
+`Persistent=` differs by job on purpose:
+
+- **Lineup timers (Thursday, Sunday, both inactive re-checks): `Persistent=false`.**
+  A lineup is only valid before kickoff. The solver is blind to in-game locks and
+  `setLineup` cannot move a player whose game has started, so a catch-up fire
+  after the box was down would land after kickoff, fail its read-back check and
+  can leave a half-rearranged lineup, which is worse than leaving the already-set
+  one alone. A missed lock is skipped, not replayed late; Thursday sets a complete
+  lineup that stands, and any lock can be re-run by hand before its kickoff.
+- **Waiver timers (compute, submit): `Persistent=true`.** These are deadline-bound,
+  not kickoff-bound. A submit missed on Tuesday and replayed before the Wednesday
+  07:00 GMT clear is still useful, so a reboot-missed run should fire on wake.
 
 | Timer | When (ET) | Does |
 | --- | --- | --- |
