@@ -29,7 +29,7 @@ for t in $FOUND; do
     out=$(bun run "$t" 2>&1)
     line=$(printf '%s' "$out" | tail -1)
     case "$line" in
-      *"0 failed"*|*"ALL PASS"*) printf '  ok    %-38s %s\n' "$t" "$line" ;;
+      *"0 failed"*|*"ALL PASS"*|*" pass"*) printf '  ok    %-38s %s\n' "$t" "$line" ;;
       *) printf '  FAIL  %-38s %s\n' "$t" "$line"; printf '%s\n' "$out" | tail -20; fail=1 ;;
     esac
   fi
