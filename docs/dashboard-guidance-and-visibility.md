@@ -16,14 +16,27 @@ container; runAgent re-reads that file on every call and passes it as
 refresh (about 20s).
 
 - New src/web/guidance.ts writes through that same mechanism. It ALWAYS rebuilds
-  system-prompt.md from the pristine base at
-  /data/sleeper-coach/system-prompt.base.md, so repeated edits cannot stack. The
-  guidance block is byte-compatible with coach-say's, so coach-guidance still
-  reads dashboard edits and vice versa.
+  system-prompt.md from a pristine base, so repeated edits cannot stack. The
+  output is byte-identical to coach-say's, so coach-guidance still reads dashboard
+  edits and vice versa.
+- Base resolution self-heals without ever writing live state. Order: GUIDANCE_BASE
+  env (authoritative and exclusive), then /data/sleeper-coach/system-prompt.base.md
+  (what coach-say and the live box share), then a NEW system-prompt.base.md
+  committed in the repo. The committed base is the fix for the base previously
+  existing on one machine only by accident: it ships in the image, so a fresh
+  Coolify deploy has a working channel with no manual step. I did NOT seed a file
+  into /data (two reviewers asked): writing there is a hard rule, and seeding from
+  whatever system-prompt.md is live would invent a base rather than recover one.
+  Committing the base to git is the option one reviewer floated and is strictly
+  better.
+- It refuses a base that already carries the "## LIVE GUIDANCE" marker rather than
+  stripping it, because snapshotting an already-appended prompt as the base would
+  bake that stale guidance in permanently and invisibly. GuidanceState carries a
+  baseReadable flag and, when false, a human reason the UI shows verbatim.
 - It writes ONLY system-prompt.md (the file runAgent loads). It never writes into
-  /data/sleeper-coach, which is live state; the base there is read-only. Writes
-  are atomic (temp file then rename) so a mid-write read can never see a partial
-  prompt, and a failed base read aborts rather than blanking the prompt.
+  /data/sleeper-coach, which is live state. Writes are atomic (temp file then
+  rename) so a mid-write read can never see a partial prompt; on any failure the
+  temp file is removed (no .tmp litter) and the live prompt is left untouched.
 - The console input now has two honest modes. "Guide the draft" applies guidance
   and shows what is currently in effect. "Ask (off-draft)" keeps the old one-off
   chat, clearly labelled as not steering the live pick. The UI states plainly
@@ -67,14 +80,32 @@ plus the same analysis modules the engine uses. Endpoint: GET /api/draftview.
 ## Testing
 
 - tsc --noEmit clean.
-- guidance.ts: set / read round-trip, no stacking on repeated edits, clear
-  restores the exact base.
+- Unit tests in src/web/guidance.test.ts (bun:test), all against temp files via
+  the env overrides so nothing real is touched: set/get round-trips the exact
+  text; setting twice does not stack and is byte-identical to coach-say; clearing
+  removes the block and leaves the base unchanged; a missing base is refused and
+  never blanks the live prompt; a marker-bearing base is refused with a reason;
+  and no .tmp files are left behind on success or failure. Run with:
+    bun test src/web/guidance.test.ts
+  NOTE: bare `bun test` in this environment only discovers the one pre-existing
+  file (src/analysis/rails.test.ts) and ignores every other test file, including a
+  trivial probe, so run the guidance tests by path. This is a bun runner quirk
+  here, not a test problem: the file passes 6/6 when named, and rails still passes
+  10/10.
 - draftView(): ran against the STAGING league (read-only). Queue is K/DEF-free,
   byes flag 3+ weeks, override vorGaps match the postmortem table (45.5, 41.5,
   28.2, 13.4) and all flag capped. VONA/survival path exercised with a simulated
-  mid-draft state and returns finite numbers.
+  mid-draft state and returns finite numbers. Logged-queue and reconstruction
+  fallback both exercised with a synthetic activity log.
 - Full server on an alternate port: /api/guidance GET+POST and /api/draftview
   return correctly and index.html serves the new tab.
+
+## Files
+
+New system-prompt.base.md at the repo root is the committed pristine base (an
+exact copy of system-prompt.md, verified marker-free). It exists so the guidance
+channel works on any machine without a hand-made file on the state volume. Keep it
+in sync if system-prompt.md changes materially.
 
 Not run: docker restart/deploy, any write to /data or the real league. Changes
 go live only when merged and redeployed, which is Filip's call.
