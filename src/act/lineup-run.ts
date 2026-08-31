@@ -52,6 +52,22 @@ async function main(): Promise<void> {
   const live = flag("live");
   const refresh = flag("refresh");
   const leagueId = opt("league") ?? config.leagueId;
+  // A league override MUST carry a roster override. Our roster_id is 3 in the
+  // real league and 1 in the staging clone, so passing --league alone silently
+  // plans for whatever team happens to hold id 3 in the target league. In
+  // staging that is an orphan team, which is how this was found: a dry run
+  // produced a lineup of players we do not own. Half a guard is worse than none,
+  // because it reads as safe.
+  const rosterOverride = opt("roster");
+  if (opt("league") && !rosterOverride) {
+    throw new Error(
+      "--league requires --roster. Our roster_id differs per league (3 in the real " +
+        "league, 1 in the staging clone), so a league override without a roster " +
+        "override plans for a different team. Re-run with --roster <id>.",
+    );
+  }
+  const rosterId = rosterOverride ? Number(rosterOverride) : config.rosterId;
+  if (!Number.isFinite(rosterId) || rosterId <= 0) throw new Error(`--roster must be a positive number, got ${rosterOverride}`);
 
   const state = await sleeper.nflState();
   const week = Number(opt("week")) || state.week || 1;
@@ -64,9 +80,9 @@ async function main(): Promise<void> {
   // `players` array, which is safe - the stale-cache problem was specifically
   // the `starters` array, and the write is verified against the DOM regardless.
   const rosters = await sleeper.rosters(leagueId);
-  const mine = rosters.find((r) => r.roster_id === config.rosterId);
+  const mine = rosters.find((r) => r.roster_id === rosterId);
   if (!mine || !mine.players?.length) {
-    throw new Error(`no roster ${config.rosterId} in league ${leagueId}, or it is empty`);
+    throw new Error(`no roster ${rosterId} in league ${leagueId}, or it is empty`);
   }
 
   const [players, weekProj] = await Promise.all([
