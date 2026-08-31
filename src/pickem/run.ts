@@ -58,6 +58,11 @@ async function main(): Promise<void> {
   const week = legWeek(legId);
   if (!week) throw new Error(`cannot read a week out of leg ${legId}`);
 
+  // One clock for the whole pass. Every "is this game still pickable" and "is it
+  // inside its final window" decision must agree, and re-reading Date.now() per
+  // check invites a game flipping state mid-pass.
+  const now = Date.now();
+
   const [sleeperGames, myLegs, leaguePicks, market] = await Promise.all([
     fetchWeek(gql, week),
     fetchMyLegs(gql, leagueId, rosterId),
@@ -121,7 +126,6 @@ async function main(): Promise<void> {
   });
 
   const mine = myLegs.find((l) => l.legId === legId) ?? { legId, status: "?", picks: {}, tiebreaker: null };
-  const now = Date.now();
 
   // Where we stand. Grade from the scoreline, NOT from the stored pick's outcome
   // field: outcome:"win" is part of the pick input, so it is present on every
