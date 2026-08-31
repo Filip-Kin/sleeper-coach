@@ -350,11 +350,38 @@ async function runJob(job: Job, occurrence: number): Promise<void> {
   markRun(job.name, occurrence);
 }
 
+/** Is the shared browser up? Every scheduled job drives it, and the container
+ *  starts the daemon and browser-server together, so at boot a job can be due
+ *  before Brave has finished launching. That failed pickem-slate 0.2s into its
+ *  first deploy, and because a failed job is marked handled rather than retried,
+ *  the day's run was simply lost. Cheap ping, short timeout, no navigation. */
+let browserWaitLogged = false;
+async function browserReady(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BROWSER_API}/auth`, { signal: AbortSignal.timeout(5_000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function runDueJobs(): Promise<void> {
   if (draftActive()) return; // never fight a draft for the shared browser
   const now = Date.now();
-  for (const job of JOBS) {
-    const v = isDue(job, now, lastRunOf(job.name));
+  const due = JOBS.map((job) => ({ job, v: isDue(job, now, lastRunOf(job.name)) }));
+  // Only pay for the readiness check when something actually wants to run, and
+  // leave the occurrence UNMARKED so it is retried on the next poll instead of
+  // being burned by a startup race.
+  if (due.some((d) => d.v.due && d.v.occurrence !== null) && !(await browserReady())) {
+    if (!browserWaitLogged) {
+      const names = due.filter((d) => d.v.due).map((d) => d.job.name).join(", ");
+      console.log(`[schedule] browser not up yet; holding ${names} for the next poll`);
+      browserWaitLogged = true;
+    }
+    return;
+  }
+  browserWaitLogged = false;
+  for (const { job, v } of due) {
     if (v.due && v.occurrence !== null) {
       await runJob(job, v.occurrence);
     } else if (v.occurrence !== null && v.reason.includes("skipping")) {

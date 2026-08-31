@@ -148,6 +148,49 @@ export function isPickable(game: GameLine, now: number): boolean {
   return game.startTime > now;
 }
 
+/** Did a pick cover the graded line?
+ *
+ *  Do NOT read this off the stored pick's `outcome` field. `outcome: "win"` is
+ *  part of the pick INPUT (the API rejects a pick without it), so every stored
+ *  pick carries it from the moment it is made, played or not. Treating it as a
+ *  result made every rival look 16-for-16 before a ball was kicked, which in
+ *  turn flipped the field mode into "differentiate" in week 1. Grade from the
+ *  scoreline instead, which is self-sufficient and needs no undocumented field.
+ *
+ *  Returns null while the game is unplayed, or if the line would push. */
+export function gradePick(game: ScoredGame, team: string): "win" | "loss" | null {
+  const { awayScore, homeScore, gradedSpreadAway } = game;
+  if (awayScore === null || homeScore === null) return null;
+  if (game.status !== "complete") return null;
+  if (gradedSpreadAway === null) return null;
+  const margin = awayScore + gradedSpreadAway - homeScore;
+  if (margin === 0) return null; // a true push; the .5 hook normally prevents it
+  const winner = margin > 0 ? game.away : game.home;
+  if (team !== game.away && team !== game.home) return null;
+  return team === winner ? "win" : "loss";
+}
+
+export interface ScoredGame extends GameLine {
+  awayScore: number | null;
+  homeScore: number | null;
+}
+
+/** Correct picks out of a set, grading each against its game. */
+export function scorePicks(
+  games: ScoredGame[], picks: Record<string, { team: string }>,
+): { correct: number; graded: number } {
+  let correct = 0, graded = 0;
+  for (const g of games) {
+    const p = picks[g.gameId];
+    if (!p) continue;
+    const r = gradePick(g, p.team);
+    if (r === null) continue;
+    graded++;
+    if (r === "win") correct++;
+  }
+  return { correct, graded };
+}
+
 // ---------------------------------------------------------------------------
 // Tiebreaker
 // ---------------------------------------------------------------------------

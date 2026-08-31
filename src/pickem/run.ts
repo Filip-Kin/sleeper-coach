@@ -22,7 +22,7 @@ import {
 } from "./client.ts";
 import {
   decideSlate, isPickable, bestTiebreaker, fieldMode, applyFieldMode, safePick, inFinalWindow,
-  FINAL_WINDOW_HOURS, type Decision,
+  scorePicks, FINAL_WINDOW_HOURS, type Decision,
 } from "./strategy.ts";
 
 const args = process.argv.slice(2);
@@ -65,13 +65,13 @@ async function main(): Promise<void> {
   const mine = myLegs.find((l) => l.legId === legId) ?? { legId, status: "?", picks: {}, tiebreaker: null };
   const now = Date.now();
 
-  // Where we stand. Rivals' picks for finished games are graded by Sleeper, so
-  // the running score comes straight off their own outcomes.
-  const scoreOf = (picks: Record<string, { outcome: string | null }>) =>
-    Object.values(picks).filter((p) => p.outcome === "win").length;
+  // Where we stand. Grade from the scoreline, NOT from the stored pick's outcome
+  // field: outcome:"win" is part of the pick input, so it is present on every
+  // pick from the moment it is made. Reading it as a result showed rivals
+  // 16-for-16 before week 1 kicked off and flipped us into "differentiate".
   const rivalIds = Object.keys(leaguePicks).map(Number).filter((r) => r !== rosterId);
-  const ourScore = scoreOf(mine.picks);
-  const bestRival = Math.max(0, ...rivalIds.map((r) => scoreOf(leaguePicks[r]?.picks ?? {})));
+  const ourScore = scorePicks(games, mine.picks).correct;
+  const bestRival = Math.max(0, ...rivalIds.map((r) => scorePicks(games, leaguePicks[r]?.picks ?? {}).correct));
 
   const pickable = games.filter((g) => isPickable(g, now));
   const mode = fieldMode(ourScore - bestRival, pickable.length);

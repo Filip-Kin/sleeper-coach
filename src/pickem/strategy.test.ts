@@ -180,3 +180,53 @@ test("the final window is measured per game against its own kickoff", () => {
   expect(inFinalWindow(game({ startTime: now + 2 * hour }), now)).toBe(true);
   expect(inFinalWindow(game({ startTime: now + 4 * hour }), now)).toBe(false);
 });
+
+// --- grading ----------------------------------------------------------------
+
+import { gradePick, scorePicks, type ScoredGame } from "./strategy.ts";
+
+const scored = (over: Partial<ScoredGame> = {}): ScoredGame => ({
+  gameId: "1", away: "CHI", home: "CAR", startTime: 1, status: "complete",
+  gradedSpreadAway: 2.5, marketSpreadAway: 2.5, awayScore: 20, homeScore: 21, ...over,
+});
+
+test("a pick is graded off the scoreline, not the stored outcome field", () => {
+  // CHI +2.5 losing 20-21 still covers: 20 + 2.5 > 21.
+  expect(gradePick(scored(), "CHI")).toBe("win");
+  expect(gradePick(scored(), "CAR")).toBe("loss");
+});
+
+test("the favourite covering is graded correctly", () => {
+  // CAR by 10 comfortably covers -2.5.
+  const g = scored({ awayScore: 10, homeScore: 20 });
+  expect(gradePick(g, "CAR")).toBe("win");
+  expect(gradePick(g, "CHI")).toBe("loss");
+});
+
+test("an unplayed or in-progress game grades to nothing, never a win", () => {
+  expect(gradePick(scored({ status: "pre_game" }), "CHI")).toBeNull();
+  expect(gradePick(scored({ awayScore: null, homeScore: null }), "CHI")).toBeNull();
+});
+
+test("a team not in the game grades to nothing", () => {
+  expect(gradePick(scored(), "SEA")).toBeNull();
+});
+
+test("scorePicks counts only games that have actually been graded", () => {
+  const games = [
+    scored({ gameId: "a", awayScore: 20, homeScore: 21 }),                    // CHI covers
+    scored({ gameId: "b", awayScore: 10, homeScore: 20 }),                    // CAR covers
+    scored({ gameId: "c", status: "pre_game", awayScore: null, homeScore: null }),
+  ];
+  const picks = { a: { team: "CHI" }, b: { team: "CHI" }, c: { team: "CHI" } };
+  expect(scorePicks(games, picks)).toEqual({ correct: 1, graded: 2 });
+});
+
+test("a full unplayed slate scores zero, so field mode cannot be fooled", () => {
+  // This is the bug that mattered: every stored pick carries outcome:"win" from
+  // the moment it is made, so a naive read showed rivals 16-for-16 in week 1.
+  const games = Array.from({ length: 16 }, (_, i) =>
+    scored({ gameId: String(i), status: "pre_game", awayScore: null, homeScore: null }));
+  const picks = Object.fromEntries(games.map((g) => [g.gameId, { team: "CHI" }]));
+  expect(scorePicks(games, picks)).toEqual({ correct: 0, graded: 0 });
+});

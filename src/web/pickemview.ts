@@ -6,7 +6,7 @@
 
 import { config } from "../config.ts";
 import { browserGql, fetchWeek, fetchMyLegs, fetchLeaguePicks, currentLegId, type PickemGame, type Gql } from "../pickem/client.ts";
-import { decide, safePick, isPickable, inFinalWindow, bestTiebreaker, FINAL_WINDOW_HOURS } from "../pickem/strategy.ts";
+import { decide, safePick, isPickable, inFinalWindow, bestTiebreaker, gradePick, scorePicks, FINAL_WINDOW_HOURS } from "../pickem/strategy.ts";
 
 export interface PickemGameView {
   gameId: string;
@@ -122,16 +122,17 @@ export async function pickemView(weekArg?: number): Promise<PickemView> {
         pickable,
         inFinalWindow: final,
         ourPick: mine.picks[g.gameId]?.team ?? null,
-        ourOutcome: mine.picks[g.gameId]?.outcome ?? null,
+        // Graded from the scoreline. The stored outcome field is pick input, not
+        // a result, so it says "win" on every pick ever made.
+        ourOutcome: mine.picks[g.gameId] ? gradePick(g, mine.picks[g.gameId]!.team) : null,
         wants: d?.team ?? null,
         wantsRule: d?.rule ?? null,
         wantsWhy: d?.reason ?? null,
         edge: d?.edge ?? 0,
-        rivals: rivalIds.map((r) => ({
-          name: nameOf.get(r) ?? `roster ${r}`,
-          team: leaguePicks[r]?.picks?.[g.gameId]?.team ?? "",
-          outcome: leaguePicks[r]?.picks?.[g.gameId]?.outcome ?? null,
-        })).filter((x) => x.team),
+        rivals: rivalIds.map((r) => {
+          const team = leaguePicks[r]?.picks?.[g.gameId]?.team ?? "";
+          return { name: nameOf.get(r) ?? `roster ${r}`, team, outcome: team ? gradePick(g, team) : null };
+        }).filter((x) => x.team),
       };
     });
 
@@ -139,12 +140,15 @@ export async function pickemView(weekArg?: number): Promise<PickemView> {
   // is the only way to show the standing that actually decides the pool.
   const season = new Map<number, number>();
   for (let w = 1; w <= week; w++) {
-    const legPicks: Awaited<ReturnType<typeof fetchLeaguePicks>> = w === week
-      ? leaguePicks
-      : await fetchLeaguePicks(gql, leagueId, `v1:regular:${w}`).catch(() => ({}));
+    const [legPicks, legGames] = w === week
+      ? [leaguePicks, games]
+      : await Promise.all([
+          fetchLeaguePicks(gql, leagueId, `v1:regular:${w}`).catch(() => ({} as Awaited<ReturnType<typeof fetchLeaguePicks>>)),
+          fetchWeek(gql, w).catch(() => [] as PickemGame[]),
+        ]);
     for (const [rid, v] of Object.entries(legPicks)) {
-      const won = Object.values(v.picks ?? {}).filter((p) => p.outcome === "win").length;
-      season.set(Number(rid), (season.get(Number(rid)) ?? 0) + won);
+      const { correct } = scorePicks(legGames, v.picks ?? {});
+      season.set(Number(rid), (season.get(Number(rid)) ?? 0) + correct);
     }
   }
   const allIds = [...new Set([rosterId, ...Object.keys(leaguePicks).map(Number)])];
@@ -156,7 +160,7 @@ export async function pickemView(weekArg?: number): Promise<PickemView> {
         name: nameOf.get(rid) ?? `roster ${rid}`,
         isUs: rid === rosterId,
         season: season.get(rid) ?? 0,
-        week: Object.values(picks).filter((p) => p.outcome === "win").length,
+        week: scorePicks(games, picks).correct,
         submitted: Object.keys(picks).length,
       };
     })
