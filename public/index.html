@@ -273,7 +273,7 @@ async function loadGuidance() {
     const g = await (await fetch("/api/guidance")).json();
     if (g.error) { bar.className = "gbar dead"; bar.innerHTML = `<span class="lbl">guidance unavailable:</span> ${escapeHtml(g.error)}`; return; }
     if (!g.baseReadable) { bar.className = "gbar dead";
-      bar.innerHTML = `<span class="lbl">guidance channel unavailable</span><div class="cur none">The pristine base prompt was not found, so guidance cannot be applied safely.</div>`; return; }
+      bar.innerHTML = `<span class="lbl">guidance channel unavailable</span><div class="cur none">${escapeHtml(g.reason || "The pristine base prompt could not be resolved, so guidance cannot be applied safely.")}</div>`; return; }
     bar.className = "gbar";
     if (g.active) {
       bar.innerHTML = `<span class="clr" id="clrGuidance">clear</span><span class="lbl">guidance in effect (reaches the agent next refresh)</span>`
