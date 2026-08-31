@@ -8,8 +8,11 @@ Description=sleeper-coach: Monday-night review + waiver targets (shadow) (timer)
 # these shift with it - re-anchor them or upgrade to a systemd that supports a
 # timezone suffix in OnCalendar (>= 251).
 OnCalendar=Tue *-*-* 02:00:00
-# Persistent: a lock missed because the box was asleep/rebooting fires on wake
-# rather than silently skipping the week.
+# Persistent=true is correct here (unlike the lineup timers): a waiver run is
+# deadline-bound, not kickoff-bound. A submit missed on Tuesday evening and
+# replayed later that night, or early Wednesday before the 07:00 GMT clear, is
+# still useful, and a costless free-agent add is not locked by any game starting.
+# So a reboot-missed waiver run SHOULD fire on wake rather than skip the week.
 Persistent=true
 AccuracySec=1min
 

@@ -29,6 +29,23 @@ export interface LeagueSettings {
   waiver_budget: number;
   max_keepers: number;
   disable_trades: number;
+  // Rolling priority (0), NOT FAAB (2): confirmed 0 on both the real and staging
+  // leagues on 2026-08-31. The waiver_budget above is a Sleeper default that is
+  // never used at waiver_type 0.
+  waiver_type?: number;
+  // IR (reserve) slots. NOT present in roster_positions for our league (which has
+  // no "IR" entry); it lives ONLY here in settings, which is why reading IR
+  // capacity off roster_positions returned 0 and left the whole IR path dead.
+  reserve_slots?: number;
+  // Which Sleeper injury designations this league will accept onto an IR slot.
+  // Our league: OUT and SUS yes, NA/DNR/DOUBTFUL no. These decide IR-eligibility,
+  // so a fixed status set is wrong; read the flags.
+  reserve_allow_out?: number;
+  reserve_allow_doubtful?: number;
+  reserve_allow_sus?: number;
+  reserve_allow_cov?: number;
+  reserve_allow_na?: number;
+  reserve_allow_dnr?: number;
 }
 
 export interface League {

@@ -38,6 +38,22 @@ export interface WaiverConfig {
   // START for us. A bench/handcuff upgrade never justifies going last; wait and
   // free-add him once he clears. Set false to allow claiming bench depth too.
   claimMustStart: boolean;
+  // A bye week carrying this many of our STARTERS or more is "crowded" and worth
+  // relieving. Mirrors trade-fair.ts. Four of our starters share the week 8 bye,
+  // which costs about 10.7 points that week and is the worst single-week hole in
+  // the league. It could not be fixed on draft night, so the weekly cycle carries
+  // it forward as a standing objective (see the lookahead below).
+  crowdedByeAt: number;
+  // Points of tie-break credit for an add that helps a crowded bye (plays that
+  // week) and debit for one that deepens it (is on that bye). Deliberately
+  // modest and applied ONLY to the ranking score, never to the accept gates: a
+  // bye hits one week of seventeen, so it breaks ties between similar candidates
+  // and must never justify a move the lineup delta rejects. Same value as trades.
+  byeReliefPts: number;
+  // How many weeks ahead the weekly run scans for a crowded-starter bye so it can
+  // treat relieving it as an explicit objective while there is still time to act
+  // (the week-8 hole is a week-7 job). Default 2.
+  byeLookaheadWeeks: number;
 }
 
 export const DEFAULT_WAIVERS: WaiverConfig = {
@@ -45,6 +61,9 @@ export const DEFAULT_WAIVERS: WaiverConfig = {
   claimMarginPts: 15, // lineup ROS; a genuine multi-week difference, not a streamer
   freeAddMarginPts: 1, // any real lineup improvement justifies a costless swap
   claimMustStart: true,
+  crowdedByeAt: 3, // same threshold as the trade engine's byeRelief
+  byeReliefPts: 4, // same modest tie-break weight as trades
+  byeLookaheadWeeks: 2,
 };
 
 // A player available to add. `onWaivers` is the pricing switch: true means a
@@ -62,8 +81,13 @@ export interface AvailablePlayer extends RailPlayer {
 export interface RosterState {
   roster: RailPlayer[];
   openBenchSlots: number; // empty BN slots right now
-  openIrSlots: number; // empty IR slots right now
+  openIrSlots: number; // empty IR (reserve) slots right now
   startingSlots: string[]; // roster_positions with BN/IR removed, for the "would he start" test
+  // Whether a Sleeper injury status makes a player IR-eligible in THIS league.
+  // The eligible set is league-configured (reserve_allow_out/sus/cov/... flags),
+  // not universal: our league allows OUT and SUS onto IR but not NA or DNR, which
+  // the old fixed set got wrong both ways. Absent = the conservative default set.
+  irEligible?: (status?: string | null) => boolean;
 }
 
 export type MoveKind = "free-add" | "waiver-claim" | "wait" | "skip";
@@ -79,6 +103,11 @@ export interface WaiverMove {
   gainPts: number; // ROS points the add clears the player it replaces (or the worst starter, for a slot add)
   startsForUs: boolean; // would the add crack our optimal ROS starting lineup
   priorityWorthy: boolean; // clears the bar to burn a queue position
+  // Bye tie-break: + if this add plays through an upcoming crowded starter bye,
+  // - if it is itself on that bye. NEVER enters an accept gate; it only ranks
+  // moves that already passed the lineup-delta gates (mirrors trade-fair.ts).
+  byeCredit: number;
+  score: number; // gainPts + byeCredit; the ranking key, not a gate
   reason: string;
 }
 
@@ -136,8 +165,9 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   // An IR slot with a genuinely injured incumbent to stash frees a bench slot
   // without dropping anyone. The stash-worthy player is exactly the one the rails
   // protect, so he belongs on IR, never on the drop table.
+  const irEligible = state.irEligible ?? isReserveInjury;
   const irStashable = state.roster.find(
-    (p) => (p.returnsBeforePlayoffs || isReserveInjury(p.injuryStatus)) && !cfg.rails.neverDrop?.includes(p.name),
+    (p) => (p.returnsBeforePlayoffs || irEligible(p.injuryStatus)) && !cfg.rails.neverDrop?.includes(p.name),
   );
   if (state.openIrSlots > 0 && irStashable) {
     paths.push({ path: "ir-stash", drop: null, reason: `stash ${irStashable.name} (injured) on IR (no drop)` });
@@ -166,18 +196,51 @@ function isReserveInjury(status?: string | null): boolean {
   return s === "IR" || s === "PUP" || s === "NA" || s === "SUS" || s === "DNR" || s === "COV";
 }
 
-// Plan a single available player into a decisive move.
-export function planOne(incoming: AvailablePlayer, state: RosterState, cfg: WaiverConfig = DEFAULT_WAIVERS): WaiverMove {
+// Bye tie-break for one move, in the same spirit as trade-fair.ts byeRelief.
+// `crowdedByes` is the set of upcoming weeks where our STARTERS on bye are at or
+// over the crowded threshold (computed by upcomingByeCrunch from a lookahead).
+// The add earns a credit if it plays through a crowded week and a debit if it is
+// itself on one; a drop that thins a crowded week also earns a credit. This is a
+// RANKING nudge only and never a gate, so it can reorder two comparable moves but
+// can never turn a lineup-negative move into an accepted one (the week-8 lesson:
+// a bye relieves one week of seventeen, it is not worth a bad add).
+function byeCreditFor(
+  incoming: AvailablePlayer,
+  dropped: RailPlayer | null,
+  crowdedByes: Set<number>,
+  cfg: WaiverConfig,
+): number {
+  if (crowdedByes.size === 0) return 0;
+  let credit = 0;
+  if (incoming.bye != null && crowdedByes.has(incoming.bye)) credit -= cfg.byeReliefPts; // deepens the hole
+  else credit += cfg.byeReliefPts; // an available body through the crowded week
+  if (dropped?.bye != null && crowdedByes.has(dropped.bye)) credit += cfg.byeReliefPts; // thinning it out
+  return credit;
+}
+
+// Plan a single available player into a decisive move. `crowdedByes` is optional
+// and defaults to none, so the bye term is inert unless the caller supplies the
+// lookahead result; every existing gate is unchanged.
+export function planOne(
+  incoming: AvailablePlayer,
+  state: RosterState,
+  cfg: WaiverConfig = DEFAULT_WAIVERS,
+  crowdedByes: Set<number> = new Set(),
+): WaiverMove {
   const base = { add: incoming.name, position: incoming.position, onWaivers: incoming.onWaivers };
   const skip = (reason: string): WaiverMove =>
-    ({ ...base, kind: "skip", drop: null, dropPath: "none", gainPts: 0, startsForUs: false, priorityWorthy: false, reason });
+    ({ ...base, kind: "skip", drop: null, dropPath: "none", gainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, score: 0, reason });
 
   const best = evalPaths(incoming, state, cfg)[0];
   if (!best) return skip("no legal path: nothing on the roster may be dropped and no slot is open");
 
   const { gain, starts, path, drop } = best;
+  const droppedPlayer = drop ? state.roster.find((p) => p.name === drop) ?? null : null;
+  const byeCredit = byeCreditFor(incoming, droppedPlayer, crowdedByes, cfg);
+  const byeNote =
+    byeCredit > 0 ? " [plays through a crowded upcoming bye]" : byeCredit < 0 ? " [on a crowded upcoming bye]" : "";
   const move = (kind: MoveKind, priorityWorthy: boolean, reason: string): WaiverMove =>
-    ({ ...base, kind, drop, dropPath: path, gainPts: gain, startsForUs: starts, priorityWorthy, reason });
+    ({ ...base, kind, drop, dropPath: path, gainPts: gain, startsForUs: starts, priorityWorthy, byeCredit, score: Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
 
   // A move that would LOWER our starting lineup is never made, whatever the raw
   // point gap suggests. This is the guard against dropping a needed player (our
@@ -223,10 +286,14 @@ export function planWaivers(
   available: AvailablePlayer[],
   state: RosterState,
   cfg: WaiverConfig = DEFAULT_WAIVERS,
+  crowdedByes: Set<number> = new Set(),
 ): WaiverMove[] {
-  const moves = available.map((p) => planOne(p, state, cfg)).filter((m) => m.kind !== "skip");
+  const moves = available.map((p) => planOne(p, state, cfg, crowdedByes)).filter((m) => m.kind !== "skip");
   const rank: Record<MoveKind, number> = { "free-add": 0, "waiver-claim": 1, wait: 2, skip: 3 };
-  return moves.sort((a, b) => rank[a.kind] - rank[b.kind] || b.gainPts - a.gainPts);
+  // Rank on `score` (gain plus the bye tie-break), not raw gain, so a crowded-bye
+  // relief edges ahead of an equal-gain move that ignores the bye. The gates that
+  // decided each move were pure lineup delta, so this only reorders survivors.
+  return moves.sort((a, b) => rank[a.kind] - rank[b.kind] || b.score - a.score);
 }
 
 // The single most decisive move for this cycle. Because a successful claim sends
@@ -236,3 +303,102 @@ export function planWaivers(
 export function bestClaim(moves: WaiverMove[]): WaiverMove | null {
   return moves.find((m) => m.kind === "waiver-claim") ?? null;
 }
+
+// #region upcoming-bye lookahead
+//
+// The week-8 hole (four starters: McCaffrey, Nico Collins, Etienne, Evans; about
+// 10.7 points, the worst single-week hole in the league) could NOT be fixed on
+// draft night: every free agent off that bye was worse than our worst week-8
+// starter, and IR cannot park a healthy player. So it is a week-7 job, and the
+// system has to remember it rather than rely on a human noticing. Each weekly run
+// scans a lookahead and treats relieving a crowded STARTER bye as an objective.
+//
+// It counts STARTERS on the bye, not roster bodies: four bench players sharing a
+// bye costs nothing, so a raw roster count would fire on weeks that do not hurt.
+// The starters are our optimal ROS lineup, which is the honest proxy for "who we
+// would field" that far out.
+
+export interface ByeWeekLoad {
+  week: number;
+  count: number; // our optimal-lineup STARTERS on bye that week
+  names: string[]; // those starters, for the report
+}
+
+// Our optimal-ROS starters that sit on `week`'s bye.
+export function startersOnByeAt(roster: RailPlayer[], startingSlots: string[], week: number): ByeWeekLoad {
+  const starters = solveLineup(roster.map(asLineup), startingSlots).starters;
+  // asLineup carries name as playerId, so map back to the roster to read bye.
+  const byeByName = new Map(roster.map((p) => [p.name, p.bye]));
+  const names = starters.filter((s) => byeByName.get(s.name) === week).map((s) => s.name);
+  return { week, count: names.length, names };
+}
+
+// Scan the next `byeLookaheadWeeks` for weeks where our starters-on-bye reaches
+// the crowded threshold. Nearest crowded week first, because it is the one there
+// is least time left to fix.
+export function upcomingByeCrunch(
+  roster: RailPlayer[],
+  startingSlots: string[],
+  fromWeek: number,
+  cfg: WaiverConfig = DEFAULT_WAIVERS,
+): ByeWeekLoad[] {
+  const out: ByeWeekLoad[] = [];
+  for (let w = fromWeek + 1; w <= fromWeek + cfg.byeLookaheadWeeks; w++) {
+    const load = startersOnByeAt(roster, startingSlots, w);
+    if (load.count >= cfg.crowdedByeAt) out.push(load);
+  }
+  return out.sort((a, b) => a.week - b.week);
+}
+
+// The set of crowded upcoming weeks, for the per-move bye tie-break.
+export function crowdedByeWeeks(crunch: ByeWeekLoad[]): Set<number> {
+  return new Set(crunch.map((c) => c.week));
+}
+// #endregion
+
+// #region IR opportunity detection
+//
+// An IR slot is a costless roster expansion: when a rostered player picks up an
+// IR-eligible designation we can park him on reserve and carry an extra active
+// body for free. This is the one mechanism that can genuinely help a crowded bye
+// if someone gets hurt in the weeks before it. It also protects the stash: an
+// injured player projected back before the playoffs belongs on IR, kept cheaply,
+// never dropped.
+//
+// IR-eligibility is LEAGUE-CONFIGURED. Our league sets reserve_slots: 2 (which is
+// NOT visible in roster_positions, only in settings.reserve_slots, a live-API
+// discovery on 2026-08-31) and allows OUT and SUS onto IR but not NA/DNR/DOUBTFUL
+// via the reserve_allow_* flags. So the caller passes the real eligibility test
+// rather than assuming a fixed status set.
+
+export interface IrOpportunity {
+  name: string;
+  position: string;
+  injuryStatus: string | undefined;
+  isStash: boolean; // projected back before the playoffs: the rails keep him regardless
+  reason: string;
+}
+
+// Rostered players who could move to a free IR slot right now, best stash first.
+// Empty when there are no free IR slots (nothing to gain) or nobody is eligible.
+export function irOpportunities(
+  roster: RailPlayer[],
+  openIrSlots: number,
+  irEligible: (status?: string | null) => boolean = isReserveInjury,
+): IrOpportunity[] {
+  if (openIrSlots <= 0) return [];
+  const eligible = roster.filter((p) => p.returnsBeforePlayoffs || irEligible(p.injuryStatus));
+  // Stashes first (highest value to protect), then by ROS so a genuine asset is
+  // parked before a fringe body when slots are scarce.
+  eligible.sort((a, b) => Number(b.returnsBeforePlayoffs ?? false) - Number(a.returnsBeforePlayoffs ?? false) || b.points - a.points);
+  return eligible.slice(0, openIrSlots).map((p) => ({
+    name: p.name,
+    position: p.position,
+    injuryStatus: p.injuryStatus,
+    isStash: !!p.returnsBeforePlayoffs,
+    reason: p.returnsBeforePlayoffs
+      ? `${p.name} is a playoff-return stash (${p.injuryStatus ?? "injured"}); IR keeps him and frees an active slot for a costless add`
+      : `${p.name} is ${p.injuryStatus ?? "injured"} and IR-eligible; moving him to IR frees an active slot for a costless add`,
+  }));
+}
+// #endregion

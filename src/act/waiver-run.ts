@@ -26,8 +26,12 @@ import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
 import { loadRestOfSeason } from "../analysis/ros-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
-import { planWaivers, bestClaim, DEFAULT_WAIVERS, type AvailablePlayer, type RosterState } from "../analysis/waivers.ts";
+import {
+  planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities,
+  DEFAULT_WAIVERS, type AvailablePlayer, type RosterState,
+} from "../analysis/waivers.ts";
 import type { RailPlayer } from "../analysis/rails.ts";
+import { byeWeek } from "../data/byes.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
@@ -87,12 +91,15 @@ async function main(): Promise<void> {
     const dump = players[id];
     const name = dump?.full_name ?? (dump ? `${dump.first_name} ${dump.last_name}`.trim() : r?.name ?? id);
     const position = dump?.position ?? r?.position ?? (/^[A-Z]{2,4}$/.test(id) ? "DEF" : "?");
+    // team drives the bye lookup; a DEF's team abbreviation IS its id.
+    const team = dump?.team ?? r?.team ?? (/^[A-Z]{2,4}$/.test(id) ? id : undefined);
     return {
       name,
       position,
       points: r?.points ?? 0,
       injuryStatus: dump?.injury_status ?? r?.injuryStatus ?? undefined,
       returnsBeforePlayoffs: r?.returnsBeforePlayoffs ?? false,
+      bye: byeWeek(team) ?? undefined, // for the upcoming-bye lookahead and tie-break
     };
   });
 
@@ -120,21 +127,48 @@ async function main(): Promise<void> {
     injuryStatus: p.injuryStatus ?? undefined,
     returnsBeforePlayoffs: p.returnsBeforePlayoffs,
     onWaivers: recentlyDropped.has(p.playerId),
+    bye: byeWeek(p.team) ?? undefined, // so a candidate on a crowded bye is debited
   }));
 
   // Roster capacity, from membership/reserve counts (not the stale starters array).
   const benchCap = league.roster_positions.filter((s) => s === "BN").length;
-  const irCap = league.roster_positions.filter((s) => s === "IR").length;
+  // IR (reserve) capacity lives in settings.reserve_slots, NOT roster_positions.
+  // Our league has reserve_slots: 2 and zero "IR" entries in roster_positions
+  // (verified against the live API on 2026-08-31), so the old
+  // roster_positions.filter(IR) read 0 and the IR-stash path never fired. Fall
+  // back to the roster_positions count for any league that does list IR there.
+  const irCap = league.settings.reserve_slots ?? league.roster_positions.filter((s) => s === "IR").length;
   const onReserve = mine.reserve?.length ?? 0;
+  // IR-eligibility is league-configured via the reserve_allow_* flags; IR itself
+  // is always eligible. Build the actual eligible set rather than assuming one.
+  const irAllow = new Set<string>(["IR"]);
+  const s = league.settings;
+  if (s.reserve_allow_out) irAllow.add("OUT");
+  if (s.reserve_allow_doubtful) irAllow.add("DOUBTFUL");
+  if (s.reserve_allow_sus) irAllow.add("SUS");
+  if (s.reserve_allow_cov) irAllow.add("COV");
+  if (s.reserve_allow_na) irAllow.add("NA");
+  if (s.reserve_allow_dnr) irAllow.add("DNR");
+  irAllow.add("PUP"); // Sleeper treats PUP as reserve-eligible independently of the flags
+  const irEligible = (status?: string | null): boolean => irAllow.has((status ?? "").trim().toUpperCase());
+  const openIrSlots = Math.max(0, irCap - onReserve);
   const activePlayers = mine.players.length - onReserve;
   const rosterState: RosterState = {
     roster,
     openBenchSlots: Math.max(0, slots.length + benchCap - activePlayers),
-    openIrSlots: Math.max(0, irCap - onReserve),
+    openIrSlots,
     startingSlots: slots,
+    irEligible,
   };
 
-  const moves = planWaivers(available, rosterState, DEFAULT_WAIVERS);
+  // Look ahead for a crowded STARTER bye we still have time to relieve (the
+  // week-8 hole is a week-7 job), and feed the crowded weeks into the move
+  // ranking so a relieving add edges ahead of an equal one that ignores it.
+  const byeCrunch = upcomingByeCrunch(roster, slots, week, DEFAULT_WAIVERS);
+  const crowdedByes = crowdedByeWeeks(byeCrunch);
+  const irOpps = irOpportunities(roster, openIrSlots, irEligible);
+
+  const moves = planWaivers(available, rosterState, DEFAULT_WAIVERS, crowdedByes);
   const claim = bestClaim(moves);
   const freeAdds = moves.filter((m) => m.kind === "free-add");
   const froze = freezeState();
@@ -146,15 +180,56 @@ async function main(): Promise<void> {
   if (!moves.length) console.log("  no rails-legal upgrades available this week.");
   for (const m of moves.slice(0, 12)) {
     const drop = m.drop ? ` / drop ${m.drop}` : "";
-    console.log(`  [${m.kind}] ${m.add} (${m.position}, +${m.gainPts} ROS)${drop} — ${m.reason}`);
+    const bye = m.byeCredit ? ` {bye ${m.byeCredit > 0 ? "+" : ""}${m.byeCredit}}` : "";
+    console.log(`  [${m.kind}] ${m.add} (${m.position}, +${m.gainPts} ROS)${drop}${bye} — ${m.reason}`);
   }
   console.log(`  single best claim: ${claim ? `${claim.add} (+${claim.gainPts} ROS)` : "none worth a priority burn"}`);
 
-  logEvent("coach", live ? "waiver-run" : "waiver-shadow", `Week ${week} waivers: ${freeAdds.length} free adds, ${claim ? "1 claim" : "no claim"}${live ? "" : " (shadow)"}`, {
+  // Say what it is WATCHING, not only what it did. Filip had to ask repeatedly on
+  // draft night what the engine was about to do; a run that declines to act must
+  // still show the standing objectives are alive, not silently forgotten.
+  console.log("\n  watching:");
+  if (byeCrunch.length) {
+    for (const b of byeCrunch) {
+      console.log(`    week ${b.week} bye: ${b.count} of our starters off (${b.names.join(", ")}) — relieving it is an objective for this week's adds`);
+    }
+    // The best available body that would PLAY through the nearest crowded bye.
+    const nearest = byeCrunch[0]!.week;
+    const relief = available
+      .filter((p) => p.bye !== nearest)
+      .sort((a, b) => b.points - a.points)[0];
+    console.log(`    best week-${nearest} relief candidate available: ${relief ? `${relief.name} (${relief.position}, ${relief.points} ROS)` : `none in the top ${MAX_CANDIDATES}`}`);
+  } else {
+    console.log(`    no crowded starter bye in the next ${DEFAULT_WAIVERS.byeLookaheadWeeks} weeks.`);
+  }
+  if (irOpps.length) {
+    for (const o of irOpps) console.log(`    IR opportunity: ${o.reason}`);
+  } else if (openIrSlots > 0) {
+    console.log(`    ${openIrSlots} IR slot(s) free, but no rostered player is IR-eligible right now.`);
+  } else {
+    console.log("    no free IR slots.");
+  }
+  const topCandidate = available[0];
+  console.log(`    best available overall: ${topCandidate ? `${topCandidate.name} (${topCandidate.position}, ${topCandidate.points} ROS)` : "none"}`);
+
+  logEvent("coach", live ? "waiver-run" : "waiver-shadow", `Week ${week} waivers: ${freeAdds.length} free adds, ${claim ? "1 claim" : "no claim"}${live ? "" : " (shadow)"}${byeCrunch.length ? `; watching week ${byeCrunch.map((b) => b.week).join("/")} bye` : ""}${irOpps.length ? `; ${irOpps.length} IR opportunity` : ""}`, {
     week, leagueId, shadow: !live,
     freeAdds: freeAdds.map((m) => ({ add: m.add, drop: m.drop, gain: m.gainPts })),
     claim: claim ? { add: claim.add, drop: claim.drop, gain: claim.gainPts } : null,
+    byeCrunch: byeCrunch.map((b) => ({ week: b.week, starters: b.count, names: b.names })),
+    irOpportunities: irOpps.map((o) => ({ name: o.name, status: o.injuryStatus, isStash: o.isStash })),
   });
+
+  // Surface a live IR opportunity: it is a costless roster expansion and the one
+  // move that can genuinely help a crowded bye, but the IR-move DOM flow is not
+  // built or staging-verified yet, so it is alerted for manual action rather than
+  // issued blind (the same discipline as waiver claims and trades).
+  if (irOpps.length) {
+    await sendAlert(
+      "IR opportunity",
+      `Week ${week}: ${irOpps.map((o) => `${o.name} (${o.injuryStatus ?? "injured"})`).join(", ")} can move to IR, freeing an active slot for a costless add. Do it in Sleeper.`,
+    ).catch(() => {});
+  }
 
   // A claim is never auto-submitted (unverified write path). Surface it.
   if (claim) {
