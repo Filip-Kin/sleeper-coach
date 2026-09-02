@@ -293,6 +293,12 @@ async function pollOnce(): Promise<void> {
   // league_transactions_by_status(status:"proposed") returns them, and
   // accept_trade / reject_trade respond without touching the trades-page DOM
   // that blocked this for weeks.
+  // The browser is shared and starts alongside the daemon, so at boot this runs
+  // before Brave is listening. Gating here rather than swallowing the connection
+  // error keeps a real outage visible: this is the same race that lost a
+  // scheduled pick'em pass, and it deserved one fix covering both paths, not two.
+  if (!(await browserReady())) return;
+
   const gql = leagueGql();
   try {
     await handlePendingTrades(gql, round, alreadyHandled, markSeen);
