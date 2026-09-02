@@ -219,7 +219,18 @@ async function compose(prompt: string): Promise<string | null> {
   }
   try {
     const res = await withTimeout(
-      runAgent({ prompt, partial: false, extraSystemPrompt: OVERLORD_SYSTEM, model: ANNOUNCER_MODEL, effort: "low", tools: [] }),
+      // UNTRUSTED. This prompt embeds ctx.said, which is raw speech-to-text from
+      // a live voice channel: anyone in the call can say anything into it. That
+      // makes it the same class of input as a rival DM, so it gets the same
+      // sandbox. `tools: []` alone is NOT enough (verified 2026-09-02: omitting
+      // --tools falls back to the CLI default set, and claude-settings.json
+      // allows Bash(act:*) with defaultMode dontAsk), so someone could have said
+      // "run act trade-respond <id> accept" out loud and been obeyed.
+      // The fast path above is inherently safe: the Messages API has no tools.
+      runAgent({
+        prompt, partial: false, extraSystemPrompt: OVERLORD_SYSTEM,
+        model: ANNOUNCER_MODEL, effort: "low", tools: [], untrusted: true,
+      }),
       AGENT_TIMEOUT_MS,
     );
     if (!res) {
