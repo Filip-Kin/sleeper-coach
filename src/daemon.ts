@@ -7,6 +7,7 @@ import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
+import { unreactedDrops } from "./analysis/waivers.ts";
 import { browserGql as leagueGql } from "./league/api.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
 import { handleDms } from "./league/dm-watch.ts";
@@ -49,6 +50,8 @@ db.run(`CREATE TABLE IF NOT EXISTS scheduled_runs (
   job TEXT PRIMARY KEY,
   last_run INTEGER
 )`);
+db.run(`CREATE TABLE IF NOT EXISTS drop_reactions (
+  transaction_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`);
 db.run(`CREATE TABLE IF NOT EXISTS agent_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT, ref TEXT, session_id TEXT, exit_code INTEGER, started INTEGER
@@ -295,6 +298,53 @@ async function runDueJobs(): Promise<void> {
 }
 // #endregion
 
+// #region react to a drop
+// WHY THIS IS NOT ON A TIMER. This league clears waivers two days after a player
+// is dropped (waiver_clear_days 2), not weekly, but claims were only ever
+// computed on Tuesdays. A player dropped on a Thursday therefore cleared on
+// Saturday and was gone long before the coach next looked, which is the gap
+// Filip pointed at. So a drop by ANY manager triggers a fresh claim evaluation.
+//
+// This does NOT undo the free-agent fairness rule, because the two are different
+// races. A claim is resolved at the clear time in waiver_position order, so
+// submitting the moment we notice takes nothing from anybody: everyone has until
+// the clear. It is the instant free-agent grab that is unfair, and that stays on
+// its randomised daily slot.
+const DROP_REACTION_COOLDOWN_MS = 20 * 60 * 1000;
+let lastDropReaction = 0;
+
+function alreadyReacted(id: string): boolean {
+  return db.query<{ at: number }, [string]>("SELECT at FROM drop_reactions WHERE transaction_id = ?").get(id) != null;
+}
+
+async function reactToDrops(week: number): Promise<void> {
+  let txns: { transaction_id?: string; drops?: Record<string, number> | null; type?: string }[] = [];
+  try {
+    txns = (await sleeper.transactions(config.leagueId, Math.max(1, week))) as typeof txns;
+  } catch {
+    return; // a transient read failure is not worth a retry storm
+  }
+  const fresh = unreactedDrops(txns, alreadyReacted);
+  if (!fresh.length) return;
+
+  // Record them first, so a failing evaluation cannot loop on the same drop.
+  for (const id of fresh) db.run("INSERT OR REPLACE INTO drop_reactions (transaction_id, at) VALUES (?, ?)", [id, Date.now()]);
+
+  if (Date.now() - lastDropReaction < DROP_REACTION_COOLDOWN_MS) return;
+  if (freezeState().frozen) return;
+  lastDropReaction = Date.now();
+
+  console.log(`[waivers] ${fresh.length} new drop(s) in the league; re-evaluating claims`);
+  logEvent("coach", "waiver-react", `${fresh.length} player(s) dropped in the league; re-evaluating waiver claims`, { transactions: fresh });
+  const cmd = waiversLive
+    ? ["bun", "run", "src/act/waiver-run.ts", "--live", "--claims-only"]
+    : ["bun", "run", "src/act/waiver-run.ts", "--claims-only"];
+  const proc = Bun.spawn(cmd, { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" });
+  const code = await proc.exited;
+  if (code !== 0) console.error(`[waivers] drop reaction exited ${code}`);
+}
+// #endregion
+
 async function pollOnce(): Promise<void> {
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
@@ -319,6 +369,10 @@ async function pollOnce(): Promise<void> {
   } catch (err) {
     console.error(`[daemon] trade check failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  // A drop anywhere in the league opens a two-day waiver window on that player,
+  // so it is evaluated when it happens rather than on Tuesday.
+  await reactToDrops(round);
 
   // The coach answers its own DMs. Trade negotiation in this league happens in
   // chat, not the trade UI, so ignoring DMs meant ignoring half the game.

@@ -218,7 +218,7 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
     withPackages.some((p) => p.offer.give.length > 1 || p.offer.receive.length > 1),
     `sizes ${withPackages.slice(0, 3).map((p) => `${p.offer.give.length}for${p.offer.receive.length}`).join(",")}`);
   t("among equal gains the smaller package ranks first",
-    withPackages.length < 2 || withPackages[0].score >= withPackages[1].score);
+    withPackages.length < 2 || (withPackages[0]?.score ?? 0) >= (withPackages[1]?.score ?? 0));
 }
 
 

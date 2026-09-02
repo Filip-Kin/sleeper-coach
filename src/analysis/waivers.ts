@@ -402,3 +402,26 @@ export function irOpportunities(
   }));
 }
 // #endregion
+
+/** Transactions that dropped somebody and that we have not yet reacted to.
+ *
+ *  A drop anywhere in the league opens a waiver window on that player, and this
+ *  league clears two days after the drop rather than weekly. Computing claims
+ *  only on Tuesdays therefore missed anyone dropped mid-week entirely: they
+ *  cleared and were gone before the next look. Pure so the awkward cases (an
+ *  add with no drop, a repeat poll, a transaction with no id) are tested rather
+ *  than discovered by a claim that never happened. */
+export function unreactedDrops(
+  txns: { transaction_id?: string; drops?: Record<string, number> | null }[],
+  alreadyReacted: (id: string) => boolean,
+): string[] {
+  const out: string[] = [];
+  for (const tx of txns) {
+    const id = tx.transaction_id;
+    if (!id) continue;
+    if (!tx.drops || Object.keys(tx.drops).length === 0) continue;
+    if (alreadyReacted(id)) continue;
+    out.push(id);
+  }
+  return out;
+}

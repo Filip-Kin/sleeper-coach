@@ -192,5 +192,24 @@ t("the always-eligible IR player still surfaces under the stricter league", irNo
 
 t("no free IR slots means no IR opportunities", irOpportunities(irRoster, 0, ourLeagueIr).length === 0);
 
+
+// --- reacting to a drop -----------------------------------------------------
+{
+  const { unreactedDrops } = await import("./waivers.ts");
+  const none = () => false;
+  const drop = (id: string) => ({ transaction_id: id, drops: { "123": 4 } });
+
+  t("a drop we have not seen is surfaced", unreactedDrops([drop("a")], none).length === 1);
+  t("an add with no drop is ignored",
+    unreactedDrops([{ transaction_id: "b", drops: null }], none).length === 0);
+  t("an empty drops map is ignored",
+    unreactedDrops([{ transaction_id: "c", drops: {} }], none).length === 0);
+  t("a transaction with no id is ignored", unreactedDrops([drop("")], none).length === 0);
+  t("a drop we already reacted to is not repeated",
+    unreactedDrops([drop("a")], (id) => id === "a").length === 0);
+  t("several fresh drops all surface",
+    unreactedDrops([drop("x"), drop("y")], none).length === 2);
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
