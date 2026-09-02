@@ -344,8 +344,19 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
   // 162 x 0.12 x 0.6 = 11.7 season points: real, but well under a starter upgrade.
   t("a second TE is worth a modest season-scale amount", withBackup > 5 && withBackup < 20, `${withBackup}`);
   t("a third TE adds nothing more", depthInsurance([...ours, P("TE2","TE",162), P("TE3","TE",150)], teOnly) === withBackup);
-  t("QB2 is insurance too, and it is counted on its own line",
-    depthInsurance(ours, DEFAULT_FAIRNESS) > 0 && depthInsurance(ours, { ...DEFAULT_FAIRNESS, depthPositions: ["QB"] }) === depthInsurance(ours, DEFAULT_FAIRNESS));
+  t("QB2 is insurance too", depthInsurance(ours, { ...DEFAULT_FAIRNESS, depthPositions: ["QB"] }) > 5);
+  // Filip's week-10 QB: the cover is worth the most where there is exactly one
+  // starter and one backup, and it is the gap to the NEXT man that matters.
+  const wrOnly = { ...DEFAULT_FAIRNESS, depthPositions: ["WR"] };
+  const deepBench = [...ours, P("WR6","WR",205), P("WR7","WR",200)];
+  const loseWR4 = depthInsurance(deepBench, wrOnly) - depthInsurance(deepBench.filter((p) => p.name !== "WR4bench"), wrOnly);
+  const loseLastWR = depthInsurance(ours, wrOnly) - depthInsurance(ours.filter((p) => p.name !== "WR4bench" && p.name !== "WR5"), wrOnly);
+  t("a bench WR is worth something as cover", loseWR4 > 0, `${loseWR4}`);
+  t("losing him costs less when a good WR5 stands behind him than losing the whole bench", loseWR4 < loseLastWR, `${loseWR4} vs ${loseLastWR}`);
+  t("a fourth backup adds almost nothing", depthInsurance([...deepBench, P("WR8","WR",195)], wrOnly) - depthInsurance(deepBench, wrOnly) < 1);
+  const { atLeastKOut } = await import("./trade-fair.ts");
+  t("P(at least one of three starters out) is about 1-(1-p)^3", Math.abs(atLeastKOut(3, 1, 0.12) - (1 - 0.88 ** 3)) < 1e-9);
+  t("P(more holes than starters) is zero", atLeastKOut(1, 2, 0.12) === 0);
 
   // Put together: the bench-for-bench swap that fixes a bye hole AND adds cover
   // is now accepted, and a starter-for-downgrade is still refused.

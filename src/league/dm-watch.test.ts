@@ -100,7 +100,7 @@ test("an acceptance is gracious and still shows the numbers", () => {
 
 test("the reply always invites a better offer, so a rival keeps engaging", () => {
   const t = tradeReplyText(ev(), { receive: ["X"], give: ["Y"] });
-  expect(t).toContain("does not make me worse");
+  expect(t).toContain("does not leave my team worse off");
 });
 
 

@@ -115,13 +115,11 @@ export interface FairnessConfig extends TradeConfig {
   // the reason to refuse. The stake is the marginal lineup value at risk.
   flatMarginPts: number;
   errorFraction: number;
-  // Insurance value of a backup at a single-point-of-failure position. A roster
-  // with exactly one tight end starts NOBODY if he is hurt, all season, and the
-  // engine priced that at zero. cookieeater45: "you sell short the upside these
-  // players have, and that injuries happen". He was right. The value of the best
-  // non-starting player at these positions is credited at injuryRate, which is
-  // roughly the share of games an NFL skill player misses. Small on purpose: it
-  // breaks ties and prices fragility, it does not justify hoarding.
+  // Positions whose bench is priced as injury cover (see depthInsurance). A
+  // roster with one tight end starts NOBODY if he is hurt; a WR4 is who starts
+  // when a WR1 goes down in week 10. cookieeater45: "you sell short the upside
+  // these players have, and that injuries happen". injuryRate is roughly the
+  // share of games an NFL skill player misses.
   depthPositions: string[];
   injuryRate: number;
   // A missing starter is not replaced by NOBODY, he is replaced by a waiver
@@ -166,7 +164,7 @@ export const DEFAULT_FAIRNESS: FairnessConfig = {
   // starters, so decisions on real starters are unchanged.
   flatMarginPts: 3,
   errorFraction: 0.25,
-  depthPositions: ["QB", "TE"],
+  depthPositions: ["QB", "RB", "WR", "TE"],
   injuryRate: 0.12,
   replacementFraction: 0.4,
   maxTradesPerWeek: 2,
@@ -205,26 +203,56 @@ export function requiredEdge(offer: TradeOffer, cfg: FairnessConfig, ourRoster?:
   return Math.max(cfg.flatMarginPts, stake * cfg.errorFraction);
 }
 
-/** SEASON-scale insurance value of the backups at single-point-of-failure
- *  positions, so it adds directly to the bye-aware lineup total, which averages
- *  season-total lineups across weeks and is therefore also season-scale. (I
- *  first wrote this per week and added it to a season number; the test caught
- *  the 17x mismatch.) Only the BEST non-starter at each position counts: a
- *  second backup is worth almost nothing, so this cannot reward hoarding. */
+/** SEASON-scale expected value of the bench as injury cover, at every position.
+ *
+ *  Filip: "just because you don't start a player right now doesn't mean you
+ *  might not in the future ... last year I had my star QB get injured in like
+ *  wk 10 and was out for the rest of the season." The first version priced
+ *  cover at QB and TE only, on the theory that FLEX gives RB/WR natural depth.
+ *  FLEX only helps if you have the bodies: a WR4 is precisely who starts when a
+ *  WR1 goes down.
+ *
+ *  Model: at each position, the starters (dedicated and flex slots both) each
+ *  miss a week with probability injuryRate. Holes are filled in order by the
+ *  best remaining backups, and only the part of a backup above a waiver
+ *  streamer is insurance. Expected season points of cover is therefore
+ *      sum over k of P(at least k starters out) x backup_k x (1 - replacement)
+ *  which has the two properties that matter: a backup with a good backup behind
+ *  him is worth little (his marginal value is the gap to the next man), and a
+ *  third or fourth backup is worth almost nothing (P(3 holes) is tiny), so this
+ *  cannot reward hoarding. Units match byeAwareLineupTotal, which averages
+ *  season-total lineups. (First draft was per week and added to a season
+ *  number; the test caught the 17x.) */
 export function depthInsurance(
   roster: TradePlayer[], cfg: FairnessConfig = DEFAULT_FAIRNESS, slots: readonly string[] = STARTING_SLOTS,
 ): number {
-  const starters = new Set(
-    bestLineup(roster, slots).starters.map((s) => s.player?.name.toLowerCase()).filter(Boolean),
-  );
-  let perWeek = 0;
+  const lineup = bestLineup(roster, slots).starters;
+  const starting = new Set(lineup.map((s) => s.player?.name.toLowerCase()).filter(Boolean));
+  let total = 0;
   for (const pos of cfg.depthPositions) {
-    const backup = roster
-      .filter((p) => p.position === pos && !starters.has(p.name.toLowerCase()))
-      .sort((a, b) => b.points - a.points)[0];
-    if (backup) perWeek += backup.points * cfg.injuryRate * (1 - cfg.replacementFraction);
+    const n = lineup.filter((s) => s.player?.position === pos).length; // starters at pos, flex included
+    if (!n) continue;
+    const backups = roster
+      .filter((p) => p.position === pos && !starting.has(p.name.toLowerCase()))
+      .sort((a, b) => b.points - a.points);
+    backups.forEach((b, i) => {
+      total += atLeastKOut(n, i + 1, cfg.injuryRate) * b.points * (1 - cfg.replacementFraction);
+    });
   }
-  return Math.round(perWeek * 10) / 10;
+  return Math.round(total * 10) / 10;
+}
+
+/** P(at least k of n starters miss a given week), each independently at rate p. */
+export function atLeastKOut(n: number, k: number, p: number): number {
+  if (k > n) return 0;
+  let below = 0;
+  for (let j = 0; j < k; j++) below += binom(n, j) * p ** j * (1 - p) ** (n - j);
+  return Math.max(0, 1 - below);
+}
+function binom(n: number, k: number): number {
+  let r = 1;
+  for (let i = 1; i <= k; i++) r = (r * (n - k + i)) / i;
+  return r;
 }
 
 // How many of our players sit on each bye week.

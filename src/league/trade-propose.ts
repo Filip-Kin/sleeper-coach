@@ -286,7 +286,7 @@ export function briefText(b: TradeBrief): string {
   const list = (ps: { name: string; position: string }[]) =>
     ps.length ? ps.map((p) => `${p.name} (${p.position})`).join(", ") : "none";
   const lines = [
-    `Players I would trade away: ${list(b.surplus)}.`,
+    `Players I would trade away for the right return (they are my injury cover, so the return has to reflect that): ${list(b.surplus)}.`,
     `Positions I am thinnest at: ${b.thin.length ? b.thin.join(", ") : "none in particular"}.`,
     b.askFor.length
       ? `From this manager I am most interested in: ${list(b.askFor)}.`
@@ -311,7 +311,7 @@ export function briefText(b: TradeBrief): string {
     lines.push(`I have no ready-made swap with this manager, so do not invent one. Invite them to send an offer instead.`);
   }
   lines.push(
-    `My acceptance rule, which you may state plainly: I accept any trade that does not make my starting lineup worse, and I do not haggle for the sake of it.`,
+    `My acceptance rule, which you may state plainly: I accept any trade that does not leave my team worse off, and bench players count as injury cover, so bench-for-bench is judged on what each side gives up behind its starters. I do not haggle for the sake of it.`,
     `These are the ONLY players you may name. If they ask about anyone else, say you will look at a formal offer, and do not invent an opinion about a player who is not listed here.`,
     `Say "send it as a real offer" at most once in a reply. Repeating it in every sentence reads like a brush-off, and the point is to get trades done.`,
   );

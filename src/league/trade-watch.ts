@@ -45,18 +45,20 @@ export interface TradeSides { receive: string[]; give: string[] }
 export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides): string {
   const got = sides.receive.join(", ") || "nothing";
   const gave = sides.give.join(", ") || "nothing";
+  // "My team", not "my starting lineup": the number now includes bye weeks and
+  // bench cover, and saying "lineup" invited the correct reply "these are both
+  // bench players", which the coach then argued against its own maths.
   if (ev.verdict === "accept") {
-    return `Accepted. ${gave} out, ${got} in. That is +${ev.ourGain} to my starting lineup ` +
-      `and +${ev.theirGain} to yours, which is a deal I take every time. Pleasure doing business.`;
+    return `Accepted. ${gave} out, ${got} in. That is +${ev.ourGain} to my team over the rest of the season, cover included, ` +
+      `and ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain} to yours. Pleasure doing business.`;
   }
-  // Lead with the blocking reason when there is one: it is the most useful
-  // sentence in the message and usually the funniest.
   const blocked = ev.fairnessBlocks[0] ?? ev.railBlocks[0];
   const head = blocked ? `Rejected: ${blocked}.` : "Rejected.";
-  return `${head} Giving up ${gave} for ${got} moves my starting lineup ${ev.ourGain >= 0 ? "+" : ""}${ev.ourGain} ` +
-    `and yours ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain}. Net of the schedule that is ${ev.netValue} ` +
-    `against the ${ev.requiredEdge} point margin I need. ` +
-    `Send something that helps us both and I will take it: I accept any trade that does not make me worse.`;
+  const small = ev.ourGain > 0 ? ` It is a real but small gain for me, and it does not clear the margin I need before I move a body.` : "";
+  return `${head} Giving up ${gave} for ${got} moves my team ${ev.ourGain >= 0 ? "+" : ""}${ev.ourGain} ` +
+    `over the rest of the season, bye weeks and injury cover included, and yours ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain}. ` +
+    `Net of how often we still play, that is ${ev.netValue} against the ${ev.requiredEdge} I need.${small} ` +
+    `I accept any trade that does not leave my team worse off.`;
 }
 
 /** Find the DM thread this offer was proposed in, so the reply lands in the
