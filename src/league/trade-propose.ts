@@ -35,7 +35,7 @@ import { logEvent } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { browserGql, proposeTrade, outstandingOffers, listDms, sendDm, type Gql } from "./api.ts";
 import { snapshot, scheduleContext } from "../analysis/trade-wire.ts";
-import { proposeTrades, DEFAULT_FAIRNESS, type Proposal, type RivalRoster } from "../analysis/trade-fair.ts";
+import { proposeTrades, giveEligibleForProposal, DEFAULT_FAIRNESS, type Proposal, type RivalRoster } from "../analysis/trade-fair.ts";
 import { sleeper } from "../sleeper/client.ts";
 
 /** Never have more than this many of our offers waiting for an answer. */
@@ -183,4 +183,82 @@ export function pitchText(p: Proposal): string {
   const get = p.offer.receive.map((x) => x.name).join(", ");
   return `Offer sent: you get ${give}, I get ${get}. By my numbers that is +${p.theirGain} to your starting lineup, ` +
     `which is why I think you take it. It is +${p.ourGain} to mine, so we both win. No hard feelings if you pass.`;
+}
+
+// ---------------------------------------------------------------------------
+// What the coach may say in a DM
+// ---------------------------------------------------------------------------
+//
+// The DM model runs sandboxed with no tools and WITHOUT the coach system prompt,
+// which is what makes it safe. The cost is that it knows nothing: asked "who on
+// my team do you want", it bluffed, and asked about a Bijan-for-Collins swap it
+// called Bijan "a cornerstone I am building around" when Bijan is on THEIR
+// roster. Confident nonsense, and it refused every trade, which works against us
+// because we WANT offers.
+//
+// So it gets a small brief of facts we are happy to publish. This is safe to
+// share by construction: the surplus list is exactly what we are trying to trade
+// away, so telling them is the entire point. It carries no valuations, no
+// thresholds and no rankings, and it comes from our own data rather than from
+// the rival, so it cannot carry an injection.
+
+export interface TradeBrief {
+  /** Players we would move. Advertising these is the point. */
+  surplus: { name: string; position: string }[];
+  /** Positions where our starting lineup is thinnest. */
+  thin: string[];
+  /** If we already have a candidate for THIS manager, what we would ask for. */
+  askFor: { name: string; position: string }[];
+}
+
+/** Facts the DM reply is allowed to state. Empty is fine: the prompt tells the
+ *  model to say it has nothing specific rather than invent something. */
+export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = browserGql()): Promise<TradeBrief> {
+  void gql;
+  const snap = await snapshot();
+  const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  const cfg = DEFAULT_FAIRNESS;
+
+  const surplus = ourRoster
+    .filter((p) => giveEligibleForProposal(p, ourRoster, cfg).ok)
+    .sort((a, b) => b.points - a.points)
+    .slice(0, 6)
+    .map((p) => ({ name: p.name, position: p.position }));
+
+  // Thin = the starting slots where our best option is weakest relative to the
+  // rest of the lineup. Coarse on purpose; it is conversational, not a valuation.
+  const byPos = new Map<string, number>();
+  for (const p of ourRoster) byPos.set(p.position, Math.max(byPos.get(p.position) ?? 0, p.points));
+  const thin = [...byPos.entries()]
+    .filter(([pos]) => ["RB", "WR", "TE", "QB"].includes(pos))
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, 2)
+    .map(([pos]) => pos);
+
+  let askFor: { name: string; position: string }[] = [];
+  if (theirRosterId !== null) {
+    const theirRoster = snap.rosterOf.get(theirRosterId) ?? [];
+    if (theirRoster.length) {
+      const sched = await scheduleContext(theirRosterId);
+      const best = proposeTrades(ourRoster, [{ managerId: String(theirRosterId), teamName: `roster ${theirRosterId}`, roster: theirRoster }],
+        { ...cfg, ...sched }, 1)[0];
+      if (best) askFor = best.offer.receive.map((p) => ({ name: p.name, position: p.position }));
+    }
+  }
+  return { surplus, thin, askFor };
+}
+
+/** Render the brief for the prompt. Explicitly bounded: the model is told these
+ *  are the only players it may name. */
+export function briefText(b: TradeBrief): string {
+  const list = (ps: { name: string; position: string }[]) =>
+    ps.length ? ps.map((p) => `${p.name} (${p.position})`).join(", ") : "none";
+  return [
+    `Players I would trade away: ${list(b.surplus)}.`,
+    `Positions I am thinnest at: ${b.thin.length ? b.thin.join(", ") : "none in particular"}.`,
+    b.askFor.length
+      ? `From this manager specifically I would be interested in: ${list(b.askFor)}.`
+      : `I have no specific target on this manager roster right now.`,
+    `These are the ONLY players you may name as wanted or available. If someone asks about anyone else, say you would look at an offer but do not invent an opinion about a player who is not listed here.`,
+  ].join("\n");
 }
