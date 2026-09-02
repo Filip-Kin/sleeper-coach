@@ -1,13 +1,15 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { config } from "./config.ts";
 import { sleeper } from "./sleeper/client.ts";
-import { runAgent } from "./agent/runner.ts";
 import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
+import { browserGql as leagueGql } from "./league/api.ts";
+import { handlePendingTrades } from "./league/trade-watch.ts";
+import { handleDms } from "./league/dm-watch.ts";
 import { freezeState } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
@@ -28,7 +30,10 @@ const draftActive = () => existsSync(DRAFT_LOCK);
 // still a stub that throws, so with this off a real offer produced a failed agent
 // run and nothing else. Off means shadow: describe the offer, alert Filip, act on
 // nothing. Turn it on once respondTrade is implemented and the drop rails exist.
-const TRADES_ENABLED = /^(1|true|yes|on)$/i.test(process.env.TRADES_ENABLED ?? "");
+// The coach replying to DMs is on by default: it is the surface rivals actually
+// use, and dm-watch rate-limits itself per thread so a misfire cannot spam
+// anyone. DMS_ENABLED=0 turns it off without a deploy.
+const DMS_ENABLED = (process.env.DMS_ENABLED ?? "1") !== "0";
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
@@ -49,116 +54,11 @@ db.run(`CREATE TABLE IF NOT EXISTS agent_runs (
   kind TEXT, ref TEXT, session_id TEXT, exit_code INTEGER, started INTEGER
 )`);
 
-interface TransactionLike {
-  transaction_id: string;
-  type: string;
-  status: string;
-  roster_ids?: number[];
-  consenter_ids?: number[];
-  adds?: Record<string, number> | null;
-  drops?: Record<string, number> | null;
-}
-
 function alreadyHandled(txId: string): boolean {
   return db.query("SELECT 1 FROM seen_transactions WHERE transaction_id = ?").get(txId) !== null;
 }
 function markSeen(txId: string, status: string): void {
   db.run("INSERT OR REPLACE INTO seen_transactions (transaction_id, status, first_seen) VALUES (?, ?, ?)", [txId, status, Date.now()]);
-}
-
-// Name the players in an offer, so the notification is actionable rather than a
-// transaction id. Falls back to the raw id if the player map cannot be loaded.
-//
-// Sleeper's `adds` and `drops` map player_id -> the roster_id that GAINS or LOSES
-// that player, so a two-team trade lists BOTH directions in both maps. The first
-// version of this ignored that and reported every player on both sides as ours:
-// "we receive: A, B; we give up: A, B", which is worse than useless in an alert.
-// Found by the trades session on 2026-08-30 before any real offer arrived.
-async function describeTrade(tx: TransactionLike): Promise<string> {
-  const side = async (m: Record<string, number> | null | undefined): Promise<string> => {
-    const ids = Object.entries(m ?? {})
-      .filter(([, rosterId]) => rosterId === config.rosterId)
-      .map(([playerId]) => playerId);
-    if (!ids.length) return "nothing";
-    try {
-      const { loadPlayers } = await import("./data/players.ts");
-      const players = await loadPlayers();
-      return ids
-        .map((id) => {
-          const p = (players as Record<string, { full_name?: string; position?: string }>)[id];
-          return p?.full_name ? `${p.full_name}${p.position ? ` (${p.position})` : ""}` : id;
-        })
-        .join(", ");
-    } catch {
-      return ids.join(", ");
-    }
-  };
-  return `we receive: ${await side(tx.adds)}; we give up: ${await side(tx.drops)}`;
-}
-
-async function handlePendingTrade(tx: TransactionLike): Promise<void> {
-  if (!TRADES_ENABLED) {
-    // Shadow mode. Do NOT spawn the agent: it holds the act CLI, and a run whose
-    // only possible outcome is a thrown stub is noise, not a decision.
-    //
-    // We DO run the deterministic evaluation, because that is pure and writes
-    // nothing, and an alert that says "reject, this costs 18 starting-lineup
-    // points" is worth reading at 11pm whereas a list of names is not. It is
-    // wrapped separately from the description so a failed projection fetch
-    // degrades the alert rather than losing it.
-    const what = await describeTrade(tx).catch(() => "could not read the offer");
-    let verdict = "";
-    try {
-      // TWO-SIDED on purpose. trade-live.ts's evaluateTransactionForUs uses the
-      // one-sided evaluateTrade, which asks only "does this help us" and was the
-      // exact hole Filip identified: it never asked how much the OTHER side
-      // gains, so a trade gaining us 26 and them 90 read as good. trade-wire.ts
-      // fetches the counterparty roster and the real remaining head-to-head count
-      // and runs the schedule-diluted decision instead.
-      const { evaluateLiveOffer } = await import("./analysis/trade-wire.ts");
-      const { evaluation: ev, theirRosterId } = await evaluateLiveOffer(tx);
-      const blocked = ev.railBlocks[0] ?? ev.fairnessBlocks[0];
-      verdict =
-        `WOULD ${ev.verdict.toUpperCase()}. Our starting lineup ${ev.ourGain >= 0 ? "+" : ""}${ev.ourGain}, ` +
-        `roster ${theirRosterId ?? "?"} ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain}. ` +
-        `Net of schedule ${ev.netValue} against a ${ev.requiredEdge} noise margin.` +
-        (blocked ? ` Blocked: ${blocked}` : "");
-    } catch (err) {
-      verdict = `(could not evaluate: ${err instanceof Error ? err.message : String(err)})`;
-    }
-    logEvent("coach", "trade-shadow", `Pending trade ${tx.transaction_id} involves us; SHADOW MODE, acting on nothing. ${what}`, {
-      transaction_id: tx.transaction_id,
-      shadow: true,
-      verdict,
-    });
-    await sendAlert(
-      "Trade offer pending (coach is in shadow mode)",
-      `${what}\n\n${verdict}\n\nThe coach will NOT respond. Handle it in Sleeper, or arm it once respondTrade's selectors are verified against a real offer.`,
-    ).catch(() => {});
-    // SELF-REPAIR. The coach cannot action a trade because respondTrade's
-    // selectors have never met a real offer, and they never can until one exists.
-    // So the arrival of an offer is exactly the moment to file the engineering
-    // work, with the live DOM captured as the artefact that makes it possible.
-    // Filip: "I want to be hands off after today. The engineer should handle all
-    // engineering." Latched to once per capability, not once per offer, so a
-    // flurry of offers cannot queue a flurry of identical requests.
-    await fileTradeCaptureRequest(tx.transaction_id).catch((e) =>
-      console.error(`[daemon] could not file the engineering request: ${e instanceof Error ? e.message : String(e)}`),
-    );
-    markSeen(tx.transaction_id, "shadow");
-    return;
-  }
-
-  // Trades are the coach's call, not Filip's — evaluate and decide autonomously.
-  // Logged to the activity feed for watching; no phone ping (per Filip).
-  logEvent("coach", "trade-offer", `Pending trade ${tx.transaction_id} involves us; evaluating.`, { transaction_id: tx.transaction_id });
-  const prompt = `A pending trade (transaction id ${tx.transaction_id}) has been offered involving your roster (roster_id ${config.rosterId}). Investigate it with the coach CLI, evaluate it on the merits for winning the league, and either accept or reject it using the act CLI. Explain your reasoning as you go.`;
-  const result = await runAgent({ prompt });
-  db.run("INSERT INTO agent_runs (kind, ref, session_id, exit_code, started) VALUES (?, ?, ?, ?, ?)", [
-    "trade", tx.transaction_id, result.sessionId, result.exitCode, Date.now(),
-  ]);
-  markSeen(tx.transaction_id, "handled");
-  logEvent("coach", "trade-decided", `Handled trade ${tx.transaction_id}.`, { transaction_id: tx.transaction_id, reasoning: result.text.slice(0, 400) });
 }
 
 // #region auth watch
@@ -205,62 +105,6 @@ async function checkAuth(): Promise<void> {
 }
 // #endregion
 
-
-// #region self-repair: file engineering work the coach cannot do itself
-const CAPABILITY_LATCH = `${STATE_DIR}/engineering-filed.json`;
-
-function alreadyFiled(capability: string): boolean {
-  try {
-    const j = JSON.parse(readFileSync(CAPABILITY_LATCH, "utf8")) as Record<string, string>;
-    return typeof j[capability] === "string";
-  } catch {
-    return false;
-  }
-}
-function markFiled(capability: string): void {
-  let j: Record<string, string> = {};
-  try { j = JSON.parse(readFileSync(CAPABILITY_LATCH, "utf8")) as Record<string, string>; } catch { /* first time */ }
-  j[capability] = new Date().toISOString();
-  writeFileSync(CAPABILITY_LATCH, JSON.stringify(j, null, 2));
-}
-
-async function fileTradeCaptureRequest(txId: string): Promise<void> {
-  if (process.env.TRADE_WRITE_ARMED) return; // already built
-  if (alreadyFiled("respondTrade")) return;
-
-  // Capture the live DOM while the offer is actually on screen. Read-only.
-  const shot = `${STATE_DIR}/capture-trade-${txId}.json`;
-  try {
-    const res = await fetch(`${BROWSER_API}/dom`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url: `https://sleeper.com/leagues/${config.leagueId}/trades` }),
-    });
-    writeFileSync(shot, await res.text());
-    console.log(`[daemon] captured the pending-offer DOM to ${shot}`);
-  } catch (err) {
-    console.error(`[daemon] DOM capture failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  const req = {
-    id: `respondTrade-${Date.now().toString(36)}`,
-    ts: new Date().toISOString(),
-    status: "open",
-    artefacts: [shot],
-    request:
-      "Finish respondTrade and sendTrade in src/act/sleeper.ts against a REAL pending offer.\n\n" +
-      "Until now these were stubs because the staging league cannot test trades: all seven other staging teams are orphans with owner_id null, so Sleeper offers no trade partner and the propose-trade modal renders a single column (scrollWidth equals clientWidth, no hidden columns). A real offer has now arrived in the real league, and its DOM is captured in the artefact above.\n\n" +
-      "Do: identify the accept and reject controls for a pending offer, implement both paths, and verify by re-reading the pending-offer count from the DOM afterwards (never the rosters API, which serves stale data for minutes). Refuse rather than guess when more than one pending offer is present, and when a player match is ambiguous. Keep TRADE_WRITE_ARMED gating in place so the path ships tested but disarmed; note in the commit what still needs a human to arm it.\n\n" +
-      "The decision layer is already done and tested (src/analysis/trade-fair.ts, 28 tests): two-sided valuation with schedule dilution, a floor on our own lineup, marginal-lineup-value for what we may offer, injury refusal, and a probing budget. You are building the actuator only. Do not change the decision rules.",
-  };
-  const line = JSON.stringify(req) + "\n";
-  const path = process.env.IMPROVE_QUEUE ?? `${STATE_DIR}/improvement-requests.jsonl`;
-  writeFileSync(path, (existsSync(path) ? readFileSync(path, "utf8") : "") + line);
-  markFiled("respondTrade");
-  logEvent("coach", "engineering-filed", `Filed ${req.id}: finish respondTrade using the live offer DOM.`, { id: req.id, artefact: shot });
-  await sendAlert("Coach filed engineering work", `A real trade offer arrived, so the coach captured its DOM and asked the engineer to finish respondTrade. ${req.id}`).catch(() => {});
-}
-// #endregion
 
 // #region in-container scheduling
 // Replaces the host systemd timers. Filip: "I want this to run containerized so
@@ -440,15 +284,29 @@ async function runDueJobs(): Promise<void> {
 async function pollOnce(): Promise<void> {
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
-  const txns = (await sleeper.transactions(config.leagueId, round)) as TransactionLike[];
+  if (draftActive()) return; // don't drive the browser mid-draft
 
-  for (const tx of txns) {
-    const isTrade = tx.type === "trade";
-    const isPending = tx.status === "pending";
-    const involvesUs = (tx.roster_ids ?? []).includes(config.rosterId);
-    if (isTrade && isPending && involvesUs && !alreadyHandled(tx.transaction_id)) {
-      if (draftActive()) continue; // don't drive the browser mid-draft
-      await handlePendingTrade(tx);
+  // TRADES COME FROM GRAPHQL, NOT REST. On 2026-09-02 a real offer sat live for
+  // hours and the coach never saw it: GET /transactions/<week> does not list
+  // proposed trades at all, and the old code also tested status "pending" when
+  // Sleeper says "proposed". Both faults were in the same line. GraphQL's
+  // league_transactions_by_status(status:"proposed") returns them, and
+  // accept_trade / reject_trade respond without touching the trades-page DOM
+  // that blocked this for weeks.
+  const gql = leagueGql();
+  try {
+    await handlePendingTrades(gql, round, alreadyHandled, markSeen);
+  } catch (err) {
+    console.error(`[daemon] trade check failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // The coach answers its own DMs. Trade negotiation in this league happens in
+  // chat, not the trade UI, so ignoring DMs meant ignoring half the game.
+  if (DMS_ENABLED) {
+    try {
+      await handleDms({ gql, db });
+    } catch (err) {
+      console.error(`[daemon] dm check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
