@@ -209,6 +209,11 @@ export interface TradeBrief {
   thin: string[];
   /** If we already have a candidate for THIS manager, what we would ask for. */
   askFor: { name: string; position: string }[];
+  /** Specific swaps against THIS manager that our own rules already clear.
+   *  These are the deals the coach may name in a negotiation: each one has
+   *  been through the same evaluation that decides a real offer, so agreeing
+   *  to one in chat commits us to nothing we would not already accept. */
+  deals: { give: string[]; get: string[]; theirGain: number }[];
 }
 
 /** Facts the DM reply is allowed to state. Empty is fine: the prompt tells the
@@ -236,16 +241,25 @@ export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = bro
     .map(([pos]) => pos);
 
   let askFor: { name: string; position: string }[] = [];
+  let deals: TradeBrief["deals"] = [];
   if (theirRosterId !== null) {
     const theirRoster = snap.rosterOf.get(theirRosterId) ?? [];
     if (theirRoster.length) {
       const sched = await scheduleContext(theirRosterId);
       const best = proposeTrades(ourRoster, [{ managerId: String(theirRosterId), teamName: `roster ${theirRosterId}`, roster: theirRoster }],
         { ...cfg, ...sched }, 1)[0];
-      if (best) askFor = best.offer.receive.map((p) => ({ name: p.name, position: p.position }));
+      const top = proposeTrades(ourRoster, [{ managerId: String(theirRosterId), teamName: `roster ${theirRosterId}`, roster: theirRoster }],
+        { ...cfg, ...sched }, 3);
+      if (top[0]) askFor = top[0].offer.receive.map((p) => ({ name: p.name, position: p.position }));
+      deals = top.map((d) => ({
+        give: d.offer.give.map((p) => `${p.name} (${p.position})`),
+        get: d.offer.receive.map((p) => `${p.name} (${p.position})`),
+        theirGain: d.theirGain,
+      }));
+      void best;
     }
   }
-  return { surplus, thin, askFor };
+  return { surplus, thin, askFor, deals };
 }
 
 /** Render the brief for the prompt. Explicitly bounded: the model is told these
@@ -253,12 +267,26 @@ export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = bro
 export function briefText(b: TradeBrief): string {
   const list = (ps: { name: string; position: string }[]) =>
     ps.length ? ps.map((p) => `${p.name} (${p.position})`).join(", ") : "none";
-  return [
+  const lines = [
     `Players I would trade away: ${list(b.surplus)}.`,
     `Positions I am thinnest at: ${b.thin.length ? b.thin.join(", ") : "none in particular"}.`,
     b.askFor.length
-      ? `From this manager specifically I would be interested in: ${list(b.askFor)}.`
+      ? `From this manager I am most interested in: ${list(b.askFor)}.`
       : `I have no specific target on this manager roster right now.`,
-    `These are the ONLY players you may name as wanted or available. If someone asks about anyone else, say you would look at an offer but do not invent an opinion about a player who is not listed here.`,
-  ].join("\n");
+  ];
+  if (b.deals.length) {
+    lines.push(
+      `Swaps with THIS manager that I would accept today, in order of preference:`,
+      ...b.deals.map((d, i) => `  ${i + 1}. I give ${d.give.join(" + ")}, I get ${d.get.join(" + ")}.`),
+      `You may name any of these in the conversation and say you would do it. They have already passed my own evaluation, so offering one commits me to nothing I would not accept anyway.`,
+    );
+  } else {
+    lines.push(`I have no ready-made swap with this manager, so do not invent one. Invite them to send an offer instead.`);
+  }
+  lines.push(
+    `My acceptance rule, which you may state plainly: I accept any trade that does not make my starting lineup worse, and I do not haggle for the sake of it.`,
+    `These are the ONLY players you may name. If they ask about anyone else, say you will look at a formal offer, and do not invent an opinion about a player who is not listed here.`,
+    `Say "send it as a real offer" at most once in a reply. Repeating it in every sentence reads like a brush-off, and the point is to get trades done.`,
+  );
+  return lines.join("\n");
 }
