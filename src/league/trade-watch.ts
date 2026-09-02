@@ -44,6 +44,18 @@ export interface TradeSides { receive: string[]; give: string[] }
  *  person in Filip's league, so it states the actual numbers the decision was
  *  made on rather than improvising. The swagger is fixed dressing, not a model
  *  free to say anything. */
+/** Somebody offering our starting QB for literally nothing back, or asking us
+ *  to gut our team for a double-digit loss, is not a genuine misjudgement, it
+ *  is a probe to see if the bot bites. Filip, after the coach flatly rejected
+ *  exactly that: "if it gets offered a stupid trade I feel like the response
+ *  should be a little more critical." A dry "Rejected: below the floor" reads
+ *  the same for a real close call and an obvious troll, and it should not. */
+export const BLATANT_OUR_GAIN_PTS = -30;
+export function isBlatantLowball(sides: TradeSides, ev: TwoSidedEvaluation): boolean {
+  if (ev.verdict === "accept") return false;
+  return sides.receive.length === 0 || ev.ourGain <= BLATANT_OUR_GAIN_PTS;
+}
+
 export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides, counter?: Proposal | null): string {
   const got = sides.receive.join(", ") || "nothing";
   const gave = sides.give.join(", ") || "nothing";
@@ -54,8 +66,13 @@ export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides, counte
     return `Accepted. ${gave} out, ${got} in. That is +${ev.ourGain} to my team over the rest of the season, cover included, ` +
       `and ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain} to yours. Pleasure doing business.`;
   }
+  const blatant = isBlatantLowball(sides, ev);
   const blocked = ev.fairnessBlocks[0] ?? ev.railBlocks[0];
-  const head = blocked ? `Rejected: ${blocked}.` : "Rejected.";
+  // The joke never replaces the reason, it leads it: a rival who tried it
+  // still gets told exactly what gave the probe away.
+  const head = blatant
+    ? `Hahaha, very funny, but I am not falling for that one.${blocked ? ` ${blocked}.` : ""}`
+    : blocked ? `Rejected: ${blocked}.` : "Rejected.";
   const small = ev.ourGain > 0 ? ` It is a real but small gain for me, and it does not clear the margin I need before I move a body.` : "";
   // A counter turns "no" into a next move. It is only ever a deal the acceptor
   // would take straight back, so naming it commits us to nothing new.

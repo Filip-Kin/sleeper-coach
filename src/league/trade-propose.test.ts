@@ -121,3 +121,37 @@ test("a rejection that carries a counter names it and their gain", () => {
   expect(t).toContain("Instead, I have sent you one");
   expect(t).toContain(`+${c.theirGain} to your team`);
 });
+
+// --- sharper tone for a blatant lowball --------------------------------------
+import { isBlatantLowball, BLATANT_OUR_GAIN_PTS } from "./trade-watch.ts";
+
+const evLike = (over: Record<string, unknown> = {}) => ({
+  verdict: "reject", ourGain: -3, theirGain: 4, netValue: -4, requiredEdge: 3,
+  railBlocks: [], fairnessBlocks: [], reasons: [], lineupDelta: -3, before: 0, after: 0, edge: 0, ...over,
+}) as never;
+
+test("our starting QB for literally nothing is called out, not just declined", () => {
+  const ev = evLike({ ourGain: -48.3, theirGain: 10.4 });
+  expect(isBlatantLowball({ receive: [], give: ["Jalen Hurts"] }, ev)).toBe(true);
+  const t = tradeReplyText(ev, { receive: [], give: ["Jalen Hurts"] });
+  expect(t).toContain("Hahaha");
+  expect(t).toContain("-48.3"); // still transparent: the real numbers follow
+});
+
+test("a real but marginal refusal keeps the plain, non-mocking tone", () => {
+  // The Tate-for-Washington shape: we DO get something back, and the miss is
+  // small. Sarcasm here would be wrong, since it is a genuine close call.
+  const ev = evLike({ ourGain: -3.3, theirGain: 4.2 });
+  expect(isBlatantLowball({ receive: ["Carnell Tate"], give: ["Parker Washington"] }, ev)).toBe(false);
+  expect(tradeReplyText(ev, { receive: ["Carnell Tate"], give: ["Parker Washington"] })).not.toContain("Hahaha");
+});
+
+test("a huge negative even with something nominal returned still reads as a fleece", () => {
+  const ev = evLike({ ourGain: BLATANT_OUR_GAIN_PTS - 1, theirGain: 90 });
+  expect(isBlatantLowball({ receive: ["a 2029 7th"], give: ["Christian McCaffrey"] }, ev)).toBe(true);
+});
+
+test("an accepted trade is never treated as a lowball, whatever the numbers", () => {
+  const ev = evLike({ verdict: "accept", ourGain: -48.3 });
+  expect(isBlatantLowball({ receive: [], give: ["X"] }, ev)).toBe(false);
+});
