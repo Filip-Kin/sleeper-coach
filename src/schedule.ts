@@ -215,12 +215,21 @@ export const JOBS: Job[] = [
     // waiver claim, a free-agent add is first come first served, so a bot on a
     // fixed clock would win every race and, worse, be trivially beaten once the
     // others noticed and set an alarm a minute earlier. So the run happens at an
-    // unpredictable point inside an eight hour window, different every day and
-    // stable across restarts (see jitterFor). Daily, because free agents appear
-    // continuously, and one add per pass at an unguessable time is both fair and
-    // effective.
-    name: "free-agent", dow: -1, hour: 10, minute: 0, jitterMs: 8 * HOUR, maxLateMs: 2 * HOUR,
-    why: "Costless free-agent adds only, fired at a random point in an 8h window so the humans get a fair shot at the wire. Claims are unaffected: they are batch-processed by priority, so their timing changes nothing.",
+    // unpredictable point inside a TWELVE hour window, 09:00 to 21:00 ET,
+    // different every day and stable across restarts (see jitterFor).
+    //
+    // The window placement matters as much as its width. An earlier version ran
+    // 10:00 to 18:00, which was uniform but always landed inside the working
+    // day: the others check their phones in the evening, so the coach would have
+    // taken every overnight drop while they were at work, and only evening drops
+    // would ever have been safe. 09:00 to 21:00 spans the hours humans actually
+    // look, so sometimes they get there first and sometimes we do, and it still
+    // never fires at 4am when nobody could possibly compete.
+    //
+    // Daily, because free agents appear continuously, and one add per pass at an
+    // unguessable time is both fair and effective.
+    name: "free-agent", dow: -1, hour: 9, minute: 0, jitterMs: 12 * HOUR, maxLateMs: 2 * HOUR,
+    why: "Costless free-agent adds only, fired at a random point between 09:00 and 21:00 ET so the humans genuinely get a shot at the wire. Claims are unaffected: they resolve by waiver_position at the clear time, so their timing changes nothing for anyone.",
   },
   {
     name: "waiver-submit", dow: 2, hour: 20, minute: 0, maxLateMs: 6 * HOUR,

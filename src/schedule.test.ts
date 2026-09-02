@@ -123,13 +123,20 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
   const fa = JOBS.find((j) => j.name === "free-agent");
   t("there is a free-agent job", fa !== undefined);
   if (fa) {
-    t("free agents are randomised across a window", (fa.jitterMs ?? 0) >= 8 * 60 * 60 * 1000,
+    t("free agents are randomised across a 12 hour window", (fa.jitterMs ?? 0) === 12 * 60 * 60 * 1000,
       `${Math.round((fa.jitterMs ?? 0) / 3_600_000)}h`);
+    // Placement, not just width. The window must cover the evening, or the coach
+    // only ever acts while the others are at work, which is not a fair shot.
+    t("the window spans the hours humans actually check, not just the workday",
+      fa.hour <= 9 && fa.hour + (fa.jitterMs ?? 0) / 3_600_000 >= 21,
+      `${fa.hour}:00 to ${fa.hour + (fa.jitterMs ?? 0) / 3_600_000}:00`);
+    t("the window never reaches the small hours, when nobody could compete",
+      fa.hour >= 8 && fa.hour + (fa.jitterMs ?? 0) / 3_600_000 <= 22);
     t("the free-agent job is daily, since free agents appear every day", fa.dow === -1);
 
     // Stability: the same occurrence must always give the same offset, or a
     // restart would re-roll and could buy an earlier slot than the one we drew.
-    const occ = zonedInstant(2026, 10, 7, 10, 0);
+    const occ = zonedInstant(2026, 10, 7, fa.hour, fa.minute);
     t("the offset is stable for one occurrence", jitterFor(fa, occ) === jitterFor(fa, occ));
 
     // Spread: different days must land in genuinely different places, otherwise
@@ -137,7 +144,7 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
     const offsets = new Set<number>();
     let min = Infinity, max = -Infinity;
     for (let d = 0; d < 60; d++) {
-      const o = jitterFor(fa, zonedInstant(2026, 10, 1 + d, 10, 0));
+      const o = jitterFor(fa, zonedInstant(2026, 10, 1 + d, fa.hour, fa.minute));
       offsets.add(Math.floor(o / 3_600_000));
       min = Math.min(min, o); max = Math.max(max, o);
     }
@@ -145,7 +152,7 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
     t("offsets stay inside the window", min >= 0 && max < (fa.jitterMs ?? 0), `${min}..${max}`);
 
     // And the job must not be considered due before its drawn slot.
-    const occ2 = zonedInstant(2026, 10, 8, 10, 0);
+    const occ2 = zonedInstant(2026, 10, 8, fa.hour, fa.minute);
     const drawn = jitterFor(fa, occ2);
     t("not due before the drawn slot", isDue(fa, occ2 + drawn - 60_000, 0).due === false);
     t("due at the drawn slot", isDue(fa, occ2 + drawn + 1000, 0).due === true);
