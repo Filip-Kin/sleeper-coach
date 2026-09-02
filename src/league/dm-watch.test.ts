@@ -150,3 +150,8 @@ test("an ordinary reply still passes the filter", () => {
   const ok = cleanReply("Jacobs is fourth on the depth chart, so no thanks.");
   expect(ok).toBe("Jacobs is fourth on the depth chart, so no thanks.");
 });
+
+test("em dashes are replaced, because a model reaches for them constantly", () => {
+  expect(cleanReply("The trade wont happen — that is not an admin")).toBe("The trade wont happen, that is not an admin");
+  expect(cleanReply("no en dashes – either")).toBe("no en dashes, either");
+});

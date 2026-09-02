@@ -186,6 +186,9 @@ export function cleanReply(raw: string, maxLen = 400): string {
   t = t.replace(/^(reply|response)\s*:\s*/i, "").trim();
   // Sleeper HTML-escapes these and they come back as &#39; on read.
   t = t.replace(/[’']/g, "").replace(/[“”"]/g, "");
+  // Filip does not use em dashes anywhere, and a model reaches for them
+  // constantly. Cheaper to strip here than to keep asking the prompt nicely.
+  t = t.replace(/\s*[—–]\s*/g, ", ");
   if (LEAK_PATTERNS.some((re) => re.test(t))) return "";
   if (t.length > maxLen) {
     const cut = t.slice(0, maxLen);
