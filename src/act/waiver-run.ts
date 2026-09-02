@@ -1,29 +1,27 @@
 #!/usr/bin/env bun
-// Compute waiver / free-agent moves for the week and, by default, SHADOW them:
-// log exactly what the coach would do and change nothing. This is the Tuesday
-// evening entry point (before Wednesday 07:00 GMT waivers clear).
+// Compute the week's waiver and free-agent moves and, with --live, make them.
 //
-//   bun run src/act/waiver-run.ts                # shadow: log proposals, no write
-//   bun run src/act/waiver-run.ts --live         # perform costless free-agent ADDS only
-//   bun run src/act/waiver-run.ts --week 3
+//   bun run src/act/waiver-run.ts            SHADOW: decide and print, write nothing
+//   bun run src/act/waiver-run.ts --live     make the moves
 //
-// Per the in-season plan, waivers run in shadow for the first cycle and go live
-// only after a human has reviewed a cycle. Two hard safety facts shape --live:
+// Two facts shape this:
 //
-//  1. A costless free-agent ADD (a player who has already cleared waivers) uses
-//     the verified addPlayer path and can be automated. Free adds are preferred
-//     anyway under rolling priority.
-//  2. A waiver CLAIM (an on-waivers player, processed Wednesday) is submitted
-//     through a DIFFERENT, not-yet-verified DOM flow. Like trades, an unverified
-//     write is never issued blind: --live SHADOWS every claim and alerts Filip to
-//     submit it (or waits for the claim flow to be built and staging-verified).
+//  1. Rolling waiver PRIORITY, not FAAB. A successful claim sends us to the back
+//     of the queue, so it is a real cost and at most ONE claim is ever submitted
+//     per cycle: the single best one. Costless free-agent adds are preferred
+//     wherever the player is not on waivers, because they cost nothing at all.
+//  2. Every write goes through GraphQL (submit_waiver_claim,
+//     league_create_transaction), not the browser. Claims used to be shadowed
+//     unconditionally because the claim flow existed only as unverified
+//     trades-page DOM work, which meant the coach could work out the right claim
+//     and then not make it. That gap is closed.
 //
-// Rolling waiver priority, NOT FAAB: a successful claim sends us to the back of
-// the queue, so at most ONE claim is ever proposed per cycle - the best one.
+// One transaction per pass, so a failure cannot leave a half-applied roster.
 
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
+import { browserGql, addFreeAgent, submitWaiverClaim } from "../league/api.ts";
 import { loadRestOfSeason } from "../analysis/ros-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
 import {
@@ -120,6 +118,12 @@ async function main(): Promise<void> {
   const recentlyDropped = new Set<string>();
   for (const tx of txns) for (const id of Object.keys(tx.drops ?? {})) recentlyDropped.add(id);
 
+  // Name -> player_id, for both the available pool and our own roster. The
+  // analysis reasons in names, but every write needs an id: the GraphQL roster
+  // mutations take player ids, not display names.
+  const idByName = new Map<string, string>();
+  for (const p of ros.values()) if (p.name) idByName.set(p.name, p.playerId);
+
   const available: AvailablePlayer[] = availableRos.map((p) => ({
     name: p.name,
     position: p.position,
@@ -175,7 +179,7 @@ async function main(): Promise<void> {
 
   // Report.
   console.log(`\nWaivers for ${season} week ${week} — league ${leagueId}${leagueId === config.leagueId ? "" : " (override)"}`);
-  console.log(`  mode: ${live ? "LIVE (free adds only; claims shadowed)" : "SHADOW (no write)"}${froze.frozen ? `  [FROZEN: ${froze.reason}]` : ""}`);
+  console.log(`  mode: ${live ? "LIVE (free adds and one waiver claim)" : "SHADOW (no write)"}${froze.frozen ? `  [FROZEN: ${froze.reason}]` : ""}`);
   console.log(`  open slots: bench ${rosterState.openBenchSlots}, IR ${rosterState.openIrSlots}`);
   if (!moves.length) console.log("  no rails-legal upgrades available this week.");
   for (const m of moves.slice(0, 12)) {
@@ -240,30 +244,55 @@ async function main(): Promise<void> {
   }
 
   if (!live) {
-    console.log("\n(shadow — pass --live to perform the costless free-agent adds; claims are always surfaced, never auto-submitted)");
+    console.log("\n(shadow — pass --live to perform the free-agent adds and submit the single best claim)");
     return;
   }
 
-  // --live: perform only the costless free-agent adds (verified addPlayer path).
-  assertWritesAllowed(`perform week ${week} free-agent adds`);
+  // --live: perform the moves for real.
+  //
+  // Claims used to be shadowed here no matter what, because the claim flow had
+  // only ever existed as unverified trades-page DOM work, so the coach could
+  // work out the right claim and then not make it. submit_waiver_claim is a
+  // plain GraphQL mutation, so that gap is closed and a claim is submitted like
+  // any other move. Still at most ONE per cycle: this league runs rolling
+  // priority, not FAAB, so a successful claim costs our place in the queue.
+  assertWritesAllowed(`perform week ${week} waiver moves`);
+  const gql = browserGql();
+  const resolve = (name: string): string => {
+    const id = idByName.get(name);
+    if (!id) throw new Error(`no player id for "${name}"; refusing to guess on a roster write`);
+    return id;
+  };
+
   for (const m of freeAdds) {
     try {
-      const res = await fetch(`${BROWSER_API}/add`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ add: m.add, drop: m.drop ?? undefined, leagueId }),
+      const res = await addFreeAgent(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);
+      console.log(`  added ${m.add}${m.drop ? ` (dropped ${m.drop})` : ""} [${res.status}]`);
+      logEvent("coach", "waiver-add", `Added free agent ${m.add}${m.drop ? `, dropped ${m.drop}` : ""}.`, {
+        week, leagueId, add: m.add, drop: m.drop, transaction_id: res.transactionId, status: res.status,
       });
-      const j = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok || j.error) throw new Error(String(j.error ?? res.statusText));
-      console.log(`  added ${m.add}${m.drop ? ` (dropped ${m.drop})` : ""}`);
-      logEvent("coach", "waiver-add", `Added free agent ${m.add}${m.drop ? `, dropped ${m.drop}` : ""}.`, { week, leagueId, add: m.add, drop: m.drop });
-      // One transaction per pass is the rails' rule; re-reading is done inside
-      // addPlayer. Stop after the first successful add so a batch cannot leave a
-      // half-applied state that is hard to reason about.
+      // One transaction per pass, so a batch cannot leave a half-applied roster.
       break;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logEvent("coach", "waiver-add-failed", `Free-agent add ${m.add} failed: ${msg}`, { week, leagueId, add: m.add });
       await sendAlert("Free-agent add failed", `Week ${week}: ${m.add} — ${msg}`);
+      throw err;
+    }
+  }
+
+  if (claim) {
+    try {
+      const res = await submitWaiverClaim(gql, resolve(claim.add), claim.drop ? resolve(claim.drop) : null);
+      console.log(`  claimed ${claim.add}${claim.drop ? ` (dropping ${claim.drop})` : ""} [${res.status}]`);
+      logEvent("coach", "waiver-claim", `Submitted waiver claim for ${claim.add}${claim.drop ? `, dropping ${claim.drop}` : ""} (+${claim.gainPts} ROS).`, {
+        week, leagueId, add: claim.add, drop: claim.drop, gainPts: claim.gainPts,
+        transaction_id: res.transactionId, status: res.status,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logEvent("coach", "waiver-claim-failed", `Waiver claim ${claim.add} failed: ${msg}`, { week, leagueId, add: claim.add });
+      await sendAlert("Waiver claim failed", `Week ${week}: ${claim.add} — ${msg}`);
       throw err;
     }
   }

@@ -152,6 +152,14 @@ export const JOBS: Job[] = [
     why: "Daily backstop: fills any blank game with a favourite (which leaks nothing) and refreshes the kickoff cache that drives the real pre-kickoff passes.",
   },
   {
+    // Offers of our own. Wednesday morning, after Tuesday night waivers have
+    // settled, so the rosters it reasons about are the ones people actually
+    // have. Late tolerance is generous because being a few hours late costs
+    // nothing: this is not a deadline, it is an opportunity.
+    name: "trade-propose", dow: 3, hour: 10, minute: 0, maxLateMs: 10 * HOUR,
+    why: "Weekly outbound offers, after waivers settle so rosters are stable. Self-limiting: at most two of our offers outstanding, one per rival, nothing repeated for 21 days, and nothing sent unless the other side gains too.",
+  },
+  {
     name: "waiver-compute", dow: 2, hour: 2, minute: 0, maxLateMs: 12 * HOUR,
     why: "Read-only planning, so being late costs nothing; it just needs to precede the submit.",
   },

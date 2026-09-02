@@ -191,3 +191,134 @@ export async function sendDm(gql: Gql, dmId: string, text: string): Promise<stri
   const r = (unwrap(body, "create_message") ?? {}) as { message_id?: string };
   return String(r.message_id ?? "");
 }
+
+/** Send a trade offer.
+ *
+ *  The arguments are PARALLEL ARRAYS, and every player appears in BOTH lists:
+ *  once in adds keyed to the roster receiving him, once in drops keyed to the
+ *  roster losing him. A one-for-one where we (roster 3) get B from roster 2 and
+ *  give A is therefore:
+ *      k_adds  ["B","A"]   v_adds  [3,2]
+ *      k_drops ["B","A"]   v_drops [2,3]
+ *  which is exactly the shape a received offer reads back as.
+ *
+ *  `rejectTransactionId` turns this into a counter-offer: their offer is
+ *  rejected and ours proposed in the same call. */
+export interface ProposalSpec {
+  /** player_id -> roster_id receiving him. */
+  adds: Record<string, number>;
+  /** player_id -> roster_id losing him. */
+  drops: Record<string, number>;
+  expiresAt?: number;
+  rejectTransactionId?: string;
+  rejectTransactionLeg?: number;
+}
+
+export async function proposeTrade(
+  gql: Gql, spec: ProposalSpec, leagueId = config.leagueId,
+): Promise<{ transactionId: string; status: string }> {
+  const addKeys = Object.keys(spec.adds);
+  const dropKeys = Object.keys(spec.drops);
+  if (!addKeys.length || !dropKeys.length) throw new Error("proposeTrade: empty offer");
+  for (const id of [...addKeys, ...dropKeys]) safeId(id);
+  const list = (xs: string[]) => `[${xs.map((x) => `"${x}"`).join(",")}]`;
+  const ints = (xs: number[]) => `[${xs.map((x) => Math.trunc(x)).join(",")}]`;
+
+  const args = [
+    `league_id:"${safeId(leagueId)}"`,
+    `k_adds:${list(addKeys)}`,
+    `v_adds:${ints(addKeys.map((k) => spec.adds[k] as number))}`,
+    `k_drops:${list(dropKeys)}`,
+    `v_drops:${ints(dropKeys.map((k) => spec.drops[k] as number))}`,
+  ];
+  if (spec.expiresAt) args.push(`expires_at:${Math.trunc(spec.expiresAt)}`);
+  if (spec.rejectTransactionId) {
+    args.push(`reject_transaction_id:"${safeId(spec.rejectTransactionId)}"`);
+    if (spec.rejectTransactionLeg) args.push(`reject_transaction_leg:${Math.trunc(spec.rejectTransactionLeg)}`);
+  }
+  const body = await gql(`mutation{propose_trade(${args.join(",")}){transaction_id status}}`);
+  const r = (unwrap(body, "propose_trade") ?? {}) as { transaction_id?: string; status?: string };
+  return { transactionId: String(r.transaction_id ?? ""), status: String(r.status ?? "") };
+}
+
+/** Offers WE sent that are still awaiting their answer. Needed so the proposer
+ *  does not pile a second offer on someone who has not answered the first. */
+export async function outstandingOffers(gql: Gql, leg: number, leagueId = config.leagueId): Promise<PendingTrade[]> {
+  const all = await pendingTrades(gql, leg, leagueId);
+  return all.filter((t) => t.consenterIds.includes(config.rosterId));
+}
+
+// ---------------------------------------------------------------------------
+// Roster moves: waiver claims, free-agent adds, lineups
+// ---------------------------------------------------------------------------
+//
+// These replace the browser paths one by one. The claim flow in particular was
+// never verified through the DOM, which is why every waiver claim was shadowed
+// and WAIVERS_LIVE stayed off: the coach could work out the right claim and then
+// not make it. submit_waiver_claim removes that.
+
+/** A waiver claim: add one player, optionally dropping one to make room.
+ *
+ *  This league uses ROLLING WAIVER PRIORITY, not FAAB, so there is no bid to
+ *  set; a successful claim simply sends us to the back of the queue. That is
+ *  also why the analysis only ever proposes ONE claim per cycle. */
+export async function submitWaiverClaim(
+  gql: Gql, addPlayerId: string, dropPlayerId: string | null,
+  rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<{ transactionId: string; status: string }> {
+  const args = [
+    `league_id:"${safeId(leagueId)}"`,
+    `k_adds:["${safeId(addPlayerId)}"]`,
+    `v_adds:[${Math.trunc(rosterId)}]`,
+  ];
+  if (dropPlayerId) {
+    args.push(`k_drops:["${safeId(dropPlayerId)}"]`, `v_drops:[${Math.trunc(rosterId)}]`);
+  }
+  const body = await gql(`mutation{submit_waiver_claim(${args.join(",")}){transaction_id status}}`);
+  const r = (unwrap(body, "submit_waiver_claim") ?? {}) as { transaction_id?: string; status?: string };
+  return { transactionId: String(r.transaction_id ?? ""), status: String(r.status ?? "") };
+}
+
+/** A costless free-agent add. Unlike a claim this does not burn waiver priority,
+ *  which is why the analysis prefers it whenever the player is unclaimed. */
+export async function addFreeAgent(
+  gql: Gql, addPlayerId: string, dropPlayerId: string | null,
+  rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<{ transactionId: string; status: string }> {
+  const args = [
+    `type:"free_agent"`,
+    `league_id:"${safeId(leagueId)}"`,
+    `k_adds:["${safeId(addPlayerId)}"]`,
+    `v_adds:[${Math.trunc(rosterId)}]`,
+  ];
+  if (dropPlayerId) {
+    args.push(`k_drops:["${safeId(dropPlayerId)}"]`, `v_drops:[${Math.trunc(rosterId)}]`);
+  }
+  const body = await gql(`mutation{league_create_transaction(${args.join(",")}){transaction_id status}}`);
+  const r = (unwrap(body, "league_create_transaction") ?? {}) as { transaction_id?: string; status?: string };
+  return { transactionId: String(r.transaction_id ?? ""), status: String(r.status ?? "") };
+}
+
+export async function cancelWaiverClaim(
+  gql: Gql, transactionId: string, leg: number, leagueId = config.leagueId,
+): Promise<string> {
+  const body = await gql(
+    `mutation{cancel_waiver_claim(league_id:"${safeId(leagueId)}",transaction_id:"${safeId(transactionId)}",leg:${Math.trunc(leg)}){transaction_id status}}`,
+  );
+  const r = (unwrap(body, "cancel_waiver_claim") ?? {}) as { status?: string };
+  return String(r.status ?? "");
+}
+
+/** Set the week's starters. Order matters and must match the league's slot
+ *  order exactly; Sleeper positions by index, not by player position. */
+export async function updateStarters(
+  gql: Gql, starters: string[], rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<string[]> {
+  for (const id of starters) if (id && id !== "0") safeId(id);
+  const list = `[${starters.map((x) => `"${x}"`).join(",")}]`;
+  const body = await gql(
+    `mutation{roster_update_starters(league_id:"${safeId(leagueId)}",roster_id:${Math.trunc(rosterId)},starters:${list}){roster_id starters}}`,
+  );
+  const r = (unwrap(body, "roster_update_starters") ?? {}) as { starters?: string[] };
+  return r.starters ?? [];
+}

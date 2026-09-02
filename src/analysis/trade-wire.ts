@@ -21,6 +21,11 @@ export interface LeagueSnapshot {
   playerById: Map<string, TradePlayer>;
   rosterOf: Map<number, TradePlayer[]>; // roster_id -> players
   ourRosterId: number;
+  // Sending an offer needs the player ID back from the name the value model
+  // works in. Built from ROSTERED players only, which removes almost all of the
+  // duplicate-name ambiguity in the full 12k dump.
+  idByName: Map<string, string>;
+  ownerIdOf: Map<number, string>; // roster_id -> Sleeper user_id
 }
 
 // One fetch, reused for every offer in a poll cycle.
@@ -48,13 +53,20 @@ export async function snapshot(): Promise<LeagueSnapshot> {
 
   const rosters = await sleeper.rosters(config.leagueId);
   const rosterOf = new Map<number, TradePlayer[]>();
+  const idByName = new Map<string, string>();
+  const ownerIdOf = new Map<number, string>();
   for (const r of rosters) {
     rosterOf.set(
       r.roster_id,
       (r.players ?? []).map((id) => playerById.get(id) ?? { name: id, position: "", points: 0 }),
     );
+    for (const id of r.players ?? []) {
+      const name = playerById.get(id)?.name;
+      if (name) idByName.set(name, id);
+    }
+    if (r.owner_id) ownerIdOf.set(r.roster_id, String(r.owner_id));
   }
-  return { playerById, rosterOf, ourRosterId: config.rosterId };
+  return { playerById, rosterOf, ourRosterId: config.rosterId, idByName, ownerIdOf };
 }
 
 // Turn a Sleeper trade transaction into an offer from OUR perspective, and score

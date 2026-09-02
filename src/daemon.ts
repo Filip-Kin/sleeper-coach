@@ -131,10 +131,17 @@ function markRun(job: string, occurrence: number): void {
 //
 // The two waiver jobs are genuinely different despite looking similar:
 // compute is read-only planning in the small hours, submit is the one that acts.
-// waiver-run.ts --live performs only costless free-agent adds and still SHADOWS
-// every claim, because the claim DOM flow is unverified. So WAIVERS_LIVE flips
-// the submit job without a code change, once a shadow cycle has been reviewed.
-const waiversLive = /^(1|true|yes|on)$/i.test(process.env.WAIVERS_LIVE ?? "");
+// Waivers write by default now. They used to be off because every claim was
+// shadowed regardless: the claim flow existed only as unverified trades-page DOM
+// work, so the coach could work out the right claim and then not make it.
+// submit_waiver_claim closed that, and Filip's position is that the manager
+// manages ("it needs to be able to do everything that a league manager would").
+//
+// The schedule keeps a review window either way: waiver-compute runs Tuesday
+// 02:00 in shadow and prints its intent to the activity feed, waiver-submit acts
+// at 20:00, so there are eighteen hours to look and to touch the FREEZE file.
+// WAIVERS_LIVE=0 turns writes off entirely without a deploy.
+const waiversLive = (process.env.WAIVERS_LIVE ?? "1") !== "0";
 const JOB_COMMAND: Record<string, string[]> = {
   // The engineer runs on the same containerized schedule as the coaching. Filip:
   // "I want to be hands off after today. The engineer should handle all
@@ -150,6 +157,7 @@ const JOB_COMMAND: Record<string, string[]> = {
   // Daily backstop only. The passes that actually carry our edge are spawned by
   // pickemKickoffPass() below, off real kickoff times.
   "pickem-slate": ["bun", "run", "src/pickem/run.ts"],
+  "trade-propose": ["bun", "run", "src/league/propose-run.ts"],
   "waiver-compute": ["bun", "run", "src/act/waiver-run.ts"],
   "waiver-submit": waiversLive
     ? ["bun", "run", "src/act/waiver-run.ts", "--live"]
