@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { dossierFromDump, validateWebEntries, merge, watchSet } from "./news-refresh.ts";
+import { dossierFromDump, validateWebEntries, merge, watchSet, extractJson, capUncorroborated } from "./news-refresh.ts";
 
 const dump = {
   "1": { full_name: "Josh Jacobs", position: "RB", status: "Active", injury_status: "NA", depth_chart_order: 4 },
@@ -43,8 +43,8 @@ test("players outside the watch set are ignored, so the file stays small", () =>
 test("web entries are validated, never repaired", () => {
   const known = new Set(["Josh Jacobs", "Healthy Guy"]);
   const d = validateWebEntries({ players: [
-    { name: "Josh Jacobs", status: "out", note: "Suspended 2 Sep pending legal case.", multiplier: 0.05 },
-    { name: "Healthy Guy", status: "watch", note: "Limited practice 1 Sep.", multiplier: 7 },   // clamped
+    { name: "Josh Jacobs", status: "out", note: "Suspended 2 Sep pending legal case.", multiplier: 0.05, source: "https://example.com/report" },
+    { name: "Healthy Guy", status: "watch", note: "Limited practice 1 Sep.", multiplier: 7 },   // clamped; watch needs no source
     { name: "Made Up Player", status: "out", note: "x" },                                        // unknown name
     { name: "Josh Jacobs", status: "cursed", note: "x" },                                        // bad status (overwrites? no: dropped)
     { name: "Healthy Guy", status: "risk" },                                                     // no note
@@ -104,4 +104,37 @@ test("the free-agent pool excludes retired and teamless players, however well ra
   expect(w.has("x1")).toBe(false);
   expect(w.has("x2")).toBe(false);
   expect(w.has("k1")).toBe(false);
+});
+
+test("the JSON is found even when the agent narrates around it", () => {
+  const prose = 'I need to verify these claims first. Fetching trackers...\n\nDone. {"players":[{"name":"A","status":"watch","note":"x"}]}\nThat is everything.';
+  expect((extractJson(prose) as { players: unknown[] }).players.length).toBe(1);
+  expect(extractJson("no json here at all")).toBeNull();
+  expect(extractJson('{"other":1} then {"players":[]}')).toEqual({ players: [] });
+});
+
+test("out or risk without a source URL is discarded; watch is fine without one", () => {
+  const d = validateWebEntries({ players: [
+    { name: "A", status: "out", note: "hallucinated" },
+    { name: "B", status: "risk", note: "also", source: "not a url" },
+    { name: "C", status: "risk", note: "real", source: "https://x.y/z" },
+    { name: "D", status: "watch", note: "fine" },
+  ] }, new Set(["A", "B", "C", "D"]));
+  expect(Object.keys(d).sort()).toEqual(["C", "D"]);
+  expect(d["C"]?.note).toContain("https://x.y/z");
+});
+
+test("the web alone cannot declare a healthy player out", () => {
+  // The most damaging hallucination: out means a 0.05 multiplier, and the coach
+  // would give a healthy starter away for nothing. Capped at risk.
+  const w = { status: "out", note: "x", multiplier: 0.05, source: "web" } as const;
+  const capped = capUncorroborated(w, undefined);
+  expect(capped.status).toBe("risk");
+  expect(capped.multiplier).toBeGreaterThanOrEqual(0.5);
+  // Sleeper corroborates: the cap lifts.
+  expect(capUncorroborated(w, { status: "out", note: "NA", source: "dump" }).status).toBe("out");
+  expect(capUncorroborated(w, { status: "risk", note: "depth", source: "dump" }).status).toBe("out");
+  // And merge applies it.
+  const m = merge({}, { "Healthy": { status: "out", note: "fake", multiplier: 0.05, source: "web" } });
+  expect(m["Healthy"]?.status).toBe("risk");
 });

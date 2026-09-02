@@ -61,6 +61,31 @@ export function dossierFromDump(dump: Record<string, DumpPlayer>, watch: Set<str
   return out;
 }
 
+/** Pull the JSON object out of whatever the agent said. It was asked for JSON
+ *  only and still sometimes narrates ("I need to verify these claims...") and
+ *  puts the object at the end, or not at all. Find the first balanced object
+ *  that mentions "players"; null if there is none. Never repairs anything. */
+export function extractJson(text: string): unknown | null {
+  const src = text.replace(/```(?:json)?/g, "");
+  let i = src.indexOf("{");
+  while (i >= 0) {
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < src.length; j++) {
+      const c = src[j];
+      if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === "{") depth++;
+      else if (c === "}") { depth--; if (depth === 0) {
+        const cand = src.slice(i, j + 1);
+        if (cand.includes('"players"')) { try { return JSON.parse(cand); } catch { /* keep looking */ } }
+        break;
+      } }
+    }
+    i = src.indexOf("{", i + 1);
+  }
+  return null;
+}
+
 /** Layer 2 output, validated. Anything malformed is dropped, never repaired. */
 export function validateWebEntries(raw: unknown, knownNames: Set<string>): Dossier {
   const out: Dossier = {};
@@ -72,9 +97,14 @@ export function validateWebEntries(raw: unknown, knownNames: Set<string>): Dossi
     if (!name || !knownNames.has(name) || !STATUSES.includes(status)) continue;
     const note = typeof e.note === "string" ? e.note.trim().slice(0, 300) : "";
     if (!note) continue;
+    // A claim that moves value has to point at where it came from. The agent
+    // itself reported that its fetched summaries "contain hallucinations"; an
+    // entry with no URL is exactly the kind that does.
+    const url = typeof e.source === "string" && /^https?:\/\/\S+$/.test(e.source.trim()) ? e.source.trim() : null;
+    if ((status === "out" || status === "risk") && !url) continue;
     let multiplier: number | undefined;
     if (typeof e.multiplier === "number" && Number.isFinite(e.multiplier)) multiplier = Math.min(1, Math.max(0.05, e.multiplier));
-    out[name] = { status, note, multiplier, source: "web" };
+    out[name] = { status, note: url ? `${note} (${url})` : note, multiplier, source: "web" };
   }
   return out;
 }
@@ -88,10 +118,21 @@ export function validateWebEntries(raw: unknown, knownNames: Set<string>): Dossi
  *  as the worse of the two, the multiplier as the lower, and the note is the
  *  web's explanation with the dump's fact kept alongside it. */
 const SEVERITY: Record<NewsStatus, number> = { out: 3, risk: 2, watch: 1, soft: 0 };
+/** The web alone cannot declare a player OUT. "Out" means a 0.05 multiplier,
+ *  which is the single most damaging thing a hallucinated article could do to
+ *  us: the coach would give a healthy starter away for nothing. So a web "out"
+ *  with no corroborating Sleeper flag is capped at "risk", which is a haircut
+ *  the roster survives. Sleeper's own flag lifts the cap. */
+export function capUncorroborated(w: DossierEntry, d: DossierEntry | undefined): DossierEntry {
+  if (w.status !== "out" || (d && SEVERITY[d.status] >= SEVERITY.risk)) return w;
+  return { ...w, status: "risk", multiplier: Math.max(0.5, w.multiplier ?? 0.5), note: `(web only, not yet on Sleeper) ${w.note}` };
+}
+
 export function merge(dump: Dossier, web: Dossier): Dossier {
   const out: Dossier = { ...dump };
-  for (const [name, w] of Object.entries(web)) {
+  for (const [name, raw] of Object.entries(web)) {
     const d = out[name];
+    const w = capUncorroborated(raw, d);
     if (!d) { out[name] = w; continue; }
     const status = SEVERITY[w.status] >= SEVERITY[d.status] ? w.status : d.status;
     const mults = [w.multiplier, d.multiplier].filter((m): m is number => typeof m === "number");
@@ -111,8 +152,9 @@ For EACH of these players, find out whether anything threatens his availability 
 
 Players: ${names.join(", ")}
 
-Reply with ONLY a JSON object, no prose, of the form:
-{"players":[{"name":"<exact name from the list>","status":"out|risk|watch|soft","note":"<one sentence, with the date of the report>","multiplier":<optional number 0.05-1>}]}
+Your reply must END with a single JSON object and nothing after it. Do not narrate. The object has this form:
+{"players":[{"name":"<exact name from the list>","status":"out|risk|watch|soft","note":"<one sentence, with the date of the report>","source":"<URL of the report you actually read>","multiplier":<optional number 0.05-1>}]}
+An entry with status out or risk MUST carry a source URL you actually fetched; entries without one will be discarded. If you are not sure a report is real, leave the player out.
 
 Status meaning: out = will miss most or all of the rest of the season; risk = real chance of missing time or losing his role (give a multiplier, e.g. 0.6 for a likely multi-week absence); watch = playing but carrying something worth knowing; soft = minor. Omit any player with nothing to report. Never invent a report; if you did not find one, leave him out.`;
 
@@ -146,9 +188,11 @@ export async function refreshNews(opts: { web?: boolean; dry?: boolean } = {}): 
       research: true, partial: false, effort: "medium",
       extraSystemPrompt: "You are a careful sports researcher. Output valid JSON only.",
     });
-    const text = res.text.trim().replace(/^```(?:json)?\s*|\s*```$/g, "");
+    const text = res.text.trim();
     try {
-      fromWeb = validateWebEntries(JSON.parse(text), known);
+      const parsed = extractJson(text);
+      if (parsed === null) throw new Error("no JSON object with a players list in the reply");
+      fromWeb = validateWebEntries(parsed, known);
       // Zero survivors is not an error, but it is not silence either: log the
       // head so "the agent found nothing" and "the agent returned prose that
       // happened to parse" can be told apart from the activity feed.
