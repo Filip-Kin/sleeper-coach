@@ -238,6 +238,20 @@
   .pkloss { color:var(--muted); text-decoration:line-through; }
   /* #endregion */
 
+  /* #region DMs */
+  .dmthread { border-top:1px solid var(--line); padding:12px 14px; }
+  .dmthread:first-of-type { border-top:0; }
+  .dmwho { font-weight:650; display:flex; align-items:center; gap:8px; }
+  .dmwait { font-size:11px; font-weight:700; color:var(--warn); border:1px solid var(--warn);
+            border-radius:999px; padding:0 6px; }
+  .bubble { margin-top:8px; padding:8px 10px; border-radius:12px; max-width:88%; font-size:14px; line-height:1.4;
+            white-space:pre-wrap; overflow-wrap:anywhere; }
+  .bubble.them { background:var(--panel2); border-top-left-radius:4px; }
+  .bubble.us { background:rgba(57,135,229,.16); margin-left:auto; border-top-right-radius:4px; }
+  .bubble .when { display:block; margin-top:4px; font-size:11px; color:var(--muted); }
+  .bubble.offer { font-style:italic; color:var(--ink2); }
+  /* #endregion */
+
   /* #region bottom tab bar: the thumb zone */
   .tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
@@ -277,6 +291,7 @@
   <div id="tab-coach" class="hide"></div>
   <div id="tab-league" class="hide"></div>
   <div id="tab-pickem" class="hide"></div>
+  <div id="tab-dms" class="hide"></div>
 </main>
 
 <nav class="tabbar" role="tablist">
@@ -284,6 +299,7 @@
   <button data-tab="coach"><span class="g">&#9998;</span>Coach</button>
   <button data-tab="league"><span class="g">&#9776;</span>League</button>
   <button data-tab="pickem"><span class="g">&#9878;</span>Pick'em</button>
+  <button data-tab="dms"><span class="g">&#9993;</span>DMs</button>
 </nav>
 
 <script>
@@ -331,6 +347,7 @@ const state = {
   intentWeek: null,
   pickem: null,
   pickemWeek: null,
+  dms: null,
   timer: null,
   loading: false,
 };
@@ -747,6 +764,40 @@ async function loadPickem(week) {
 }
 // #endregion
 
+// #region DMs tab
+// Read-only. Replying is the coach's job, and this exists so Filip does not have
+// to open the Sleeper app to follow a conversation his own bot is having.
+function renderDms(d) {
+  if (!d) return `<div class="card"><div class="cutnote">Loading conversations…</div></div>`;
+  if (d.error) return `<div class="card"><div class="err">${esc(d.error)}</div></div>`;
+  if (!d.threads.length) return `<div class="card"><div class="cutnote">No conversations yet.</div></div>`;
+
+  const when = (t) => new Date(t).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
+  return d.threads.map((t) => `
+    <div class="card wide">
+      <h2>${esc(t.who)}</h2>
+      <div class="dmthread">
+        <div class="dmwho">${esc(t.who)}${t.awaitingUs ? `<span class="dmwait">awaiting reply</span>` : ""}</div>
+        ${t.messages.map((m) => `
+          <div class="bubble ${m.isUs ? "us" : "them"}${m.isTradeOffer ? " offer" : ""}">
+            ${m.isTradeOffer ? "sent a trade offer" : esc(m.text)}
+            <span class="when">${esc(m.author)} &middot; ${esc(when(m.at))}</span>
+          </div>`).join("")}
+      </div>
+    </div>`).join("");
+}
+
+async function loadDms() {
+  try {
+    const d = await getJson("/api/dms");
+    state.dms = d;
+  } catch (err) {
+    state.dms = { error: err.message };
+  }
+  if (state.tab === "dms") $("tab-dms").innerHTML = renderDms(state.dms);
+}
+// #endregion
+
 // #region render + load
 function paint() {
   const v = state.view;
@@ -765,7 +816,8 @@ function paint() {
   // The pick'em pool is a different league on a different Sleeper product, so it
   // is fetched on its own and only repainted from its own cache here.
   $("tab-pickem").innerHTML = renderPickem(state.pickem);
-  for (const t of ["matchup", "coach", "league", "pickem"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
+  $("tab-dms").innerHTML = renderDms(state.dms);
+  for (const t of ["matchup", "coach", "league", "pickem", "dms"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
 }
 
 async function load(week, opts) {
@@ -832,7 +884,9 @@ document.querySelector(".tabbar").addEventListener("click", (e) => {
   if (!b) return;
   state.tab = b.dataset.tab;
   for (const btn of document.querySelectorAll(".tabbar button")) btn.classList.toggle("on", btn === b);
-  for (const t of ["matchup", "coach", "league", "pickem"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
+  for (const t of ["matchup", "coach", "league", "pickem", "dms"]) $("tab-" + t).classList.toggle("hide", state.tab !== t);
+  // Conversations move on their own, so this one always refetches on open.
+  if (state.tab === "dms") loadDms();
   // Fetched only when the tab is first opened, so the scoreboard never waits on
   // it and a phone on cell data does not pay for a pool it is not looking at.
   if (state.tab === "pickem" && !state.pickem) loadPickem();
@@ -844,6 +898,7 @@ $("refreshBtn").addEventListener("click", () => {
   // The pick'em pool is fetched on its own, so a manual refresh has to ask for it
   // explicitly or the tab would keep showing whatever it first loaded.
   if (state.tab === "pickem") loadPickem(state.pickemWeek);
+  if (state.tab === "dms") loadDms();
 });
 
 // Re-opening the installed app should show current data, not whatever was on

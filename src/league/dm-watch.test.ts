@@ -214,3 +214,14 @@ test("a failure listing requests never blocks answering visible threads", async 
   const gql = async () => { throw new Error("sleeper down"); };
   expect(await acceptLeagueChatRequests(gql as never)).toEqual([]);
 });
+
+test("a thread already marked read is still answered", () => {
+  // Sleeper marks a thread read the moment anything looks at it, including
+  // Filip opening it on his phone. Whether we owe a reply is our own state.
+  expect(shouldReply([m({ messageId: "a" })], 0, null).reply).toBe(true);
+});
+
+test("we skip only when we genuinely spoke last or already answered", () => {
+  expect(shouldReply([m({ messageId: "a", isUs: true })], 0, null).why).toBe("we spoke last");
+  expect(shouldReply([m({ messageId: "a" })], 0, "a").why).toBe("already answered this message");
+});

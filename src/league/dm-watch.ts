@@ -146,7 +146,17 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
   await acceptLeagueChatRequests(gql);
 
   for (const thread of await listDms(gql, 25)) {
-    if (!thread.unread) continue;
+    // DO NOT gate on Sleeper's unread flag. Reading a thread marks it read, so
+    // anything that looks at the conversation first silently cancels the reply:
+    // a diagnostic, another client, or Filip simply opening the DM on his phone.
+    // That happened on 2026-09-02 and the bot sat mute on a direct question with
+    // nothing in the log to explain why, because the skip was a bare continue.
+    //
+    // Whether we owe a reply is OUR state, not Sleeper's: the last message is
+    // theirs and we have not already answered that message id. shouldReply
+    // enforces exactly that, so the only thing worth checking here is that we
+    // did not speak last, which saves fetching the thread at all.
+    if (thread.lastAuthorId === config.userId) continue;
     const msgs = await threadMessages(gql, thread.dmId);
     const recent = db.query<{ n: number }, [string, number]>(
       "SELECT COUNT(*) AS n FROM dm_replies WHERE dm_id = ? AND at > ?",
@@ -156,7 +166,13 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
     ).get(thread.dmId)?.message_id ?? null;
 
     const decision = shouldReply(msgs, recent, lastReplied);
-    if (!decision.reply) continue;
+    if (!decision.reply) {
+      // Logged, because a silent skip is how a mute bot goes undiagnosed.
+      if (decision.why !== "we spoke last" && decision.why !== "already answered this message") {
+        logEvent("coach", "dm-hold", `Not replying to ${thread.lastAuthorName}: ${decision.why}`, { dmId: thread.dmId });
+      }
+      continue;
+    }
 
     const last = msgs[msgs.length - 1]!;
     // Real facts, so a reply can be useful instead of bluster. Derived from our
