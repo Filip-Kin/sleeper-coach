@@ -214,6 +214,10 @@ export interface TradeBrief {
    *  rival a swap "moves my Sunday score by nothing" while its own engine had it
    *  at +7.2, and lost the argument to someone reading it more carefully. */
   lastOffer: { give: string[]; get: string[]; ourGain: number; theirGain: number; verdict: string; why: string } | null;
+  /** Offers WE have sent this manager that are still open. Without this the
+   *  coach denied a deal it had DM'd him about minutes earlier ("I did not take
+   *  Andrews") because the brief only knew about inbound offers. */
+  pendingFromUs: { give: string[]; get: string[] }[];
   /** Specific swaps against THIS manager that our own rules already clear.
    *  These are the deals the coach may name in a negotiation: each one has
    *  been through the same evaluation that decides a real offer, so agreeing
@@ -248,7 +252,19 @@ export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = bro
   let askFor: { name: string; position: string }[] = [];
   let deals: TradeBrief["deals"] = [];
   let lastOffer: TradeBrief["lastOffer"] = null;
+  const pendingFromUs: TradeBrief["pendingFromUs"] = [];
   if (theirRosterId !== null) {
+    try {
+      const week = Math.max(1, (await sleeper.nflState()).week ?? 1);
+      for (const t of await outstandingOffers(gql, week)) {
+        if (!t.rosterIds.includes(theirRosterId)) continue;
+        const nameOf = (id: string) => snap.playerById.get(id)?.name ?? id;
+        pendingFromUs.push({
+          give: Object.entries(t.drops).filter(([, r]) => r === snap.ourRosterId).map(([id]) => nameOf(id)),
+          get: Object.entries(t.adds).filter(([, r]) => r === snap.ourRosterId).map(([id]) => nameOf(id)),
+        });
+      }
+    } catch { /* an unreadable offer list must not blank the brief */ }
     const ev = recentEvents(400).reverse().find((e) =>
       e.type === "trade-offer" && (e.detail as { theirRosterId?: number } | undefined)?.theirRosterId === theirRosterId);
     const d = ev?.detail as { sides?: { give: string[]; receive: string[] }; ourGain?: number; theirGain?: number; verdict?: string; reasons?: string[] } | undefined;
@@ -277,7 +293,7 @@ export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = bro
       void best;
     }
   }
-  return { surplus, thin, askFor, deals, lastOffer };
+  return { surplus, thin, askFor, deals, lastOffer, pendingFromUs };
 }
 
 /** Render the brief for the prompt. Explicitly bounded: the model is told these
@@ -292,6 +308,13 @@ export function briefText(b: TradeBrief): string {
       ? `From this manager I am most interested in: ${list(b.askFor)}.`
       : `I have no specific target on this manager roster right now.`,
   ];
+  if (b.pendingFromUs.length) {
+    lines.push(
+      `Offers I currently have OUT to this manager, awaiting their answer: ` +
+      b.pendingFromUs.map((o) => `I give ${o.give.join(" + ") || "nothing"}, I get ${o.get.join(" + ") || "nothing"}`).join("; ") + `.`,
+      `If they ask about one of these, confirm it and stand by it. Never deny an offer you have made.`,
+    );
+  }
   if (b.lastOffer) {
     const lo = b.lastOffer;
     lines.push(

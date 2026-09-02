@@ -56,3 +56,13 @@ test("the pitch leads with THEIR gain, which is the reason to say yes", () => {
   expect(t).toContain("Bijan Robinson");
   expect(t).toContain("No hard feelings");
 });
+
+test("the brief renders our outbound offers so the coach cannot deny one", async () => {
+  const { briefText } = await import("./trade-propose.ts");
+  const text = briefText({
+    surplus: [], thin: [], askFor: [], deals: [], lastOffer: null,
+    pendingFromUs: [{ give: ["Parker Washington"], get: ["Mark Andrews"] }],
+  });
+  expect(text).toContain("I give Parker Washington, I get Mark Andrews");
+  expect(text).toContain("Never deny an offer you have made");
+});
