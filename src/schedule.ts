@@ -61,6 +61,14 @@ export interface Job {
   minute: number;
   // How late this occurrence may still run and be worth running.
   maxLateMs: number;
+  // Spread the actual fire time uniformly across this many ms AFTER the nominal
+  // time. Filip's one condition for letting the coach manage: it must not sit on
+  // free agents the instant they appear and hoover them up before anyone else
+  // has looked. A fixed clock time would be worse than useless once the others
+  // notice it, because they could simply set an alarm for one minute earlier.
+  // The offset is derived from the occurrence, so it is stable across restarts
+  // (a restart must not buy a second, earlier roll) and different every day.
+  jitterMs?: number;
   // Why this time, so nobody has to re-derive it later.
   why: string;
 }
@@ -75,6 +83,24 @@ export function dayLabel(job: Job): string {
 
 // The most recent scheduled occurrence at or before `now`, or null if none in the
 // last 8 days (which cannot happen for a weekly job, but keeps the search bounded).
+/** A stable pseudo-random offset in [0, jitterMs) for one occurrence of one job.
+ *
+ *  Deterministic on purpose. Restarting the container must not re-roll into an
+ *  earlier slot, and two polls a minute apart must agree on whether the job has
+ *  come due yet. FNV-1a over the job name and the occurrence: not cryptographic,
+ *  and it does not need to be, it only needs to be unpredictable to someone
+ *  watching from the outside and stable to us. */
+export function jitterFor(job: Job, occurrence: number): number {
+  if (!job.jitterMs || job.jitterMs <= 0) return 0;
+  const key = `${job.name}:${occurrence}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return Math.floor((h / 0x100000000) * job.jitterMs);
+}
+
 export function lastOccurrence(job: Job, now: number, zone = ZONE): number | null {
   for (let back = 0; back <= 8; back++) {
     const probe = now - back * 86_400_000;
@@ -98,7 +124,20 @@ export function isDue(job: Job, now: number, lastRun: number, zone = ZONE): DueV
   const occ = lastOccurrence(job, now, zone);
   if (occ === null) return { due: false, occurrence: null, reason: "no occurrence in the search window" };
   if (lastRun >= occ) return { due: false, occurrence: occ, reason: "already ran this occurrence" };
-  const late = now - occ;
+
+  // A jittered job does not run at its nominal time; it runs somewhere in the
+  // window after it. Everything downstream still keys off the nominal
+  // occurrence, so "already ran this occurrence" keeps working unchanged.
+  const jitter = jitterFor(job, occ);
+  if (now < occ + jitter) {
+    return {
+      due: false,
+      occurrence: occ,
+      reason: `holding ${Math.round((occ + jitter - now) / 60000)} more min of this occurrence's ${Math.round((job.jitterMs ?? 0) / 3_600_000)}h random window`,
+    };
+  }
+
+  const late = now - (occ + jitter);
   if (late > job.maxLateMs) {
     return {
       due: false,
@@ -106,7 +145,13 @@ export function isDue(job: Job, now: number, lastRun: number, zone = ZONE): DueV
       reason: `missed by ${Math.round(late / 60000)} min, past the ${Math.round(job.maxLateMs / 60000)} min useful window; skipping rather than acting late`,
     };
   }
-  return { due: true, occurrence: occ, reason: `due, ${Math.round(late / 60000)} min after the ${job.hour}:${String(job.minute).padStart(2, "0")} ${zone} lock` };
+  return {
+    due: true,
+    occurrence: occ,
+    reason: jitter
+      ? `due, ${Math.round(late / 60000)} min after this occurrence's randomised slot (${Math.round(jitter / 60000)} min past ${job.hour}:${String(job.minute).padStart(2, "0")} ${zone})`
+      : `due, ${Math.round(late / 60000)} min after the ${job.hour}:${String(job.minute).padStart(2, "0")} ${zone} lock`,
+  };
 }
 
 const MIN = 60_000;
@@ -162,6 +207,20 @@ export const JOBS: Job[] = [
   {
     name: "waiver-compute", dow: 2, hour: 2, minute: 0, maxLateMs: 12 * HOUR,
     why: "Read-only planning, so being late costs nothing; it just needs to precede the submit.",
+  },
+  {
+    // FREE AGENTS ARE RANDOMISED. This is Filip's one condition for letting the
+    // coach manage the team: it must not sit on the wire and take every dropped
+    // player the second he appears, before a human has even looked. Unlike a
+    // waiver claim, a free-agent add is first come first served, so a bot on a
+    // fixed clock would win every race and, worse, be trivially beaten once the
+    // others noticed and set an alarm a minute earlier. So the run happens at an
+    // unpredictable point inside an eight hour window, different every day and
+    // stable across restarts (see jitterFor). Daily, because free agents appear
+    // continuously, and one add per pass at an unguessable time is both fair and
+    // effective.
+    name: "free-agent", dow: -1, hour: 10, minute: 0, jitterMs: 8 * HOUR, maxLateMs: 2 * HOUR,
+    why: "Costless free-agent adds only, fired at a random point in an 8h window so the humans get a fair shot at the wire. Claims are unaffected: they are batch-processed by priority, so their timing changes nothing.",
   },
   {
     name: "waiver-submit", dow: 2, hour: 20, minute: 0, maxLateMs: 6 * HOUR,

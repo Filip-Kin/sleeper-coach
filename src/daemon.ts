@@ -159,9 +159,15 @@ const JOB_COMMAND: Record<string, string[]> = {
   "pickem-slate": ["bun", "run", "src/pickem/run.ts"],
   "trade-propose": ["bun", "run", "src/league/propose-run.ts"],
   "waiver-compute": ["bun", "run", "src/act/waiver-run.ts"],
+  // Claims only: their timing is irrelevant (batch-processed by priority), so
+  // this one keeps a fixed, comfortable slot before the clear.
   "waiver-submit": waiversLive
-    ? ["bun", "run", "src/act/waiver-run.ts", "--live"]
-    : ["bun", "run", "src/act/waiver-run.ts"],
+    ? ["bun", "run", "src/act/waiver-run.ts", "--live", "--claims-only"]
+    : ["bun", "run", "src/act/waiver-run.ts", "--claims-only"],
+  // Adds only, on the randomised schedule. See the free-agent job in schedule.ts.
+  "free-agent": waiversLive
+    ? ["bun", "run", "src/act/waiver-run.ts", "--live", "--adds-only"]
+    : ["bun", "run", "src/act/waiver-run.ts", "--adds-only"],
 };
 
 async function runJob(job: Job, occurrence: number): Promise<void> {

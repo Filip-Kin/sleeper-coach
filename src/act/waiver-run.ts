@@ -47,6 +47,14 @@ interface TransactionLike { drops?: Record<string, number> | null; }
 
 async function main(): Promise<void> {
   const live = flag("live");
+  // Claims and free adds are split because their FAIRNESS differs. A claim is
+  // batch-processed at the league's clear time in priority order, so WHEN we
+  // submit it changes nothing for anybody. A free-agent add is first come first
+  // served and instant, which is the one place a bot is genuinely unfair to the
+  // humans, so it runs on its own randomised schedule. See the free-agent job in
+  // src/schedule.ts and Filip's condition recorded there.
+  const doClaims = !flag("adds-only");
+  const doAdds = !flag("claims-only");
   const leagueId = opt("league") ?? config.leagueId;
   // A league override MUST carry a roster override. Our roster_id is 3 in the
   // real league and 1 in the staging clone, so passing --league alone silently
@@ -179,7 +187,7 @@ async function main(): Promise<void> {
 
   // Report.
   console.log(`\nWaivers for ${season} week ${week} — league ${leagueId}${leagueId === config.leagueId ? "" : " (override)"}`);
-  console.log(`  mode: ${live ? "LIVE (free adds and one waiver claim)" : "SHADOW (no write)"}${froze.frozen ? `  [FROZEN: ${froze.reason}]` : ""}`);
+  console.log(`  mode: ${live ? `LIVE (${[doAdds ? "free adds" : null, doClaims ? "one waiver claim" : null].filter(Boolean).join(" + ")})` : "SHADOW (no write)"}${froze.frozen ? `  [FROZEN: ${froze.reason}]` : ""}`);
   console.log(`  open slots: bench ${rosterState.openBenchSlots}, IR ${rosterState.openIrSlots}`);
   if (!moves.length) console.log("  no rails-legal upgrades available this week.");
   for (const m of moves.slice(0, 12)) {
@@ -264,7 +272,7 @@ async function main(): Promise<void> {
     return id;
   };
 
-  for (const m of freeAdds) {
+  for (const m of doAdds ? freeAdds : []) {
     try {
       const res = await addFreeAgent(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);
       console.log(`  added ${m.add}${m.drop ? ` (dropped ${m.drop})` : ""} [${res.status}]`);
@@ -281,7 +289,7 @@ async function main(): Promise<void> {
     }
   }
 
-  if (claim) {
+  if (claim && doClaims) {
     try {
       const res = await submitWaiverClaim(gql, resolve(claim.add), claim.drop ? resolve(claim.drop) : null);
       console.log(`  claimed ${claim.add}${claim.drop ? ` (dropping ${claim.drop})` : ""} [${res.status}]`);

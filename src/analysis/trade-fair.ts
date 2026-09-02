@@ -362,26 +362,65 @@ export interface Proposal {
   why: string;
 }
 
+/** All subsets of `xs` with between 1 and `maxSize` members. */
+export function combinations<T>(xs: T[], maxSize: number): T[][] {
+  const out: T[][] = [];
+  const walk = (start: number, picked: T[]): void => {
+    if (picked.length) out.push([...picked]);
+    if (picked.length === maxSize) return;
+    for (let i = start; i < xs.length; i++) {
+      picked.push(xs[i] as T);
+      walk(i + 1, picked);
+      picked.pop();
+    }
+  };
+  walk(0, []);
+  return out;
+}
+
+/** Package size limits. Filip asked for many-to-many, which is right: the deal
+ *  that helps both sides is often two of our spare receivers for one back they
+ *  can spare, and a one-for-one search simply cannot see it.
+ *
+ *  The cost is combinatorial, so the search is bounded rather than exhaustive:
+ *  only the best PACKAGE_POOL players on each side are considered, in packages
+ *  of at most PACKAGE_MAX. That is 2^k-ish rather than 2^16, and it keeps the
+ *  weekly run to a few seconds while still covering every shape a human would
+ *  actually offer: 1-for-1, 1-for-2, 2-for-1, 2-for-2, up to 3 a side. */
+export const PACKAGE_MAX = Number(process.env.TRADE_PACKAGE_MAX ?? "3");
+export const PACKAGE_POOL = Number(process.env.TRADE_PACKAGE_POOL ?? "9");
+
 // Generate proposals worth sending: ones the rival would plausibly accept
 // because their lineup genuinely improves, that still satisfy Filip's rule that
-// we gain at least as much. Only one-for-one swaps are generated; multi-player
-// packages explode combinatorially and are much harder for a human to sanity
-// check, which matters for something that gives away real assets.
+// we gain at least as much.
 export function proposeTrades(
   ourRoster: TradePlayer[],
   rivals: RivalRoster[],
   cfg: FairnessConfig = DEFAULT_FAIRNESS,
   limit = 10,
+  maxPackage = PACKAGE_MAX,
 ): Proposal[] {
   const out: Proposal[] = [];
+
+  // Only pieces our lineup can genuinely spare, measured by what it loses
+  // without them rather than by raw projection. Taking the most valuable
+  // surplus first keeps the bounded pool the useful one.
+  const givable = ourRoster
+    .filter((p) => giveEligibleForProposal(p, ourRoster, cfg).ok)
+    .sort((a, b) => b.points - a.points)
+    .slice(0, PACKAGE_POOL);
+  const giveSets = combinations(givable, maxPackage);
+
   for (const rival of rivals) {
-    for (const give of ourRoster) {
-      // Only offer pieces our lineup can genuinely spare, measured by what it
-      // loses without them rather than by raw projection.
-      if (!giveEligibleForProposal(give, ourRoster, cfg).ok) continue;
-      for (const receive of rival.roster) {
-        if (refusedForInjury(receive)) continue;
-        const offer: TradeOffer = { receive: [receive], give: [give] };
+    const gettable = rival.roster
+      .filter((p) => !refusedForInjury(p))
+      .sort((a, b) => b.points - a.points)
+      .slice(0, PACKAGE_POOL);
+    const receiveSets = combinations(gettable, maxPackage);
+
+    for (const give of giveSets) {
+      for (const receive of receiveSets) {
+        const offer: TradeOffer = { receive, give };
         const ev = evaluateTradeTwoSided(offer, ourRoster, rival.roster, cfg);
         if (ev.railBlocks.length || ev.fairnessBlocks.length) continue;
         // They must actually gain, or there is no reason for them to say yes.
@@ -389,6 +428,7 @@ export function proposeTrades(
         // And it must be worth our while beyond noise.
         if (ev.ourGain < cfg.rejectBelowPts) continue;
         const relief = byeRelief(offer, ourRoster, cfg);
+        const names = (ps: TradePlayer[]) => ps.map((p) => `${p.name} (${p.position})`).join(" + ");
         out.push({
           managerId: rival.managerId,
           teamName: rival.teamName,
@@ -397,20 +437,21 @@ export function proposeTrades(
           theirGain: ev.theirGain,
           edge: ev.edge,
           byeRelief: relief,
-          score: ev.ourGain + relief * cfg.byeReliefPts,
+          // Prefer the SMALLEST package that achieves the gain. A two-for-two is
+          // harder for a human to say yes to than a one-for-one worth the same,
+          // and it churns more of the roster for the same result.
+          score: ev.ourGain + relief * cfg.byeReliefPts - (give.length + receive.length) * 0.5,
           why:
-            `we get ${receive.name} (${receive.position}) for ${give.name} (${give.position}): ` +
+            `we get ${names(receive)} for ${names(give)}: ` +
             `our lineup +${ev.ourGain}, theirs +${ev.theirGain}` +
             (relief > 0 ? `, and it takes ${relief} off a crowded bye` : relief < 0 ? `, but it adds ${-relief} to a crowded bye` : ""),
         });
       }
     }
   }
-  // Best for us first, then by how attractive it is to them, since among equal
-  // gains for us the one they are most likely to accept is the one to send.
-  // Best for us first (bye relief included), then by how attractive it is to
-  // them, since among equally good trades the one they are likeliest to accept
-  // is the one worth sending.
+  // Best for us first (bye relief and package-size penalty included), then by
+  // how attractive it is to them, since among equally good trades the one they
+  // are likeliest to accept is the one worth sending.
   out.sort((a, b) => b.score - a.score || b.theirGain - a.theirGain);
   return out.slice(0, limit);
 }

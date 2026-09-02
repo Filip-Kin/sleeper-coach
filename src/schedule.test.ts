@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { pickemTriggerDue } from "./pickem/strategy.ts";
-import { zonedInstant, lastOccurrence, isDue, dayLabel, JOBS, type Job } from "./schedule.ts";
+import { zonedInstant, lastOccurrence, isDue, dayLabel, jitterFor, JOBS, type Job } from "./schedule.ts";
 
 let pass = 0, fail = 0;
 const t = (label: string, cond: boolean, detail = "") => {
@@ -110,6 +110,50 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
   }
   t("the pick'em backstop is daily, so no day of the week is uncovered",
     JOBS.filter((j) => j.name.startsWith("pickem-")).every((j) => j.dow === -1));
+}
+
+// 10. FREE-AGENT RANDOMISATION. Filip's one condition for letting the coach
+//     manage the team: it must not take every dropped player the instant he
+//     appears. Claims are unaffected and deliberately so; verified from the live
+//     league that waiver_type is 0 (rolling priority) with an explicit
+//     waiver_position per roster, a strict 1..8 order, so cross-team claims
+//     resolve by that number and submission time changes nothing for anyone.
+//     Free-agent adds are first come first served, so THAT is what is randomised.
+{
+  const fa = JOBS.find((j) => j.name === "free-agent");
+  t("there is a free-agent job", fa !== undefined);
+  if (fa) {
+    t("free agents are randomised across a window", (fa.jitterMs ?? 0) >= 8 * 60 * 60 * 1000,
+      `${Math.round((fa.jitterMs ?? 0) / 3_600_000)}h`);
+    t("the free-agent job is daily, since free agents appear every day", fa.dow === -1);
+
+    // Stability: the same occurrence must always give the same offset, or a
+    // restart would re-roll and could buy an earlier slot than the one we drew.
+    const occ = zonedInstant(2026, 10, 7, 10, 0);
+    t("the offset is stable for one occurrence", jitterFor(fa, occ) === jitterFor(fa, occ));
+
+    // Spread: different days must land in genuinely different places, otherwise
+    // the others can just learn the time.
+    const offsets = new Set<number>();
+    let min = Infinity, max = -Infinity;
+    for (let d = 0; d < 60; d++) {
+      const o = jitterFor(fa, zonedInstant(2026, 10, 1 + d, 10, 0));
+      offsets.add(Math.floor(o / 3_600_000));
+      min = Math.min(min, o); max = Math.max(max, o);
+    }
+    t("offsets spread across most hours of the window", offsets.size >= 7, `${offsets.size} distinct hours`);
+    t("offsets stay inside the window", min >= 0 && max < (fa.jitterMs ?? 0), `${min}..${max}`);
+
+    // And the job must not be considered due before its drawn slot.
+    const occ2 = zonedInstant(2026, 10, 8, 10, 0);
+    const drawn = jitterFor(fa, occ2);
+    t("not due before the drawn slot", isDue(fa, occ2 + drawn - 60_000, 0).due === false);
+    t("due at the drawn slot", isDue(fa, occ2 + drawn + 1000, 0).due === true);
+  }
+
+  const submit = JOBS.find((j) => j.name === "waiver-submit");
+  t("waiver-submit is NOT randomised, because claim timing changes nothing",
+    submit !== undefined && !submit.jitterMs);
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed`);

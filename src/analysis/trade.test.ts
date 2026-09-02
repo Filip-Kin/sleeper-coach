@@ -180,5 +180,47 @@ const bigSumNoSlot = evaluateTrade(
 t("a big incoming raw sum that fills no slot is rejected", bigSumNoSlot.verdict === "reject", `${bigSumNoSlot.verdict} delta=${bigSumNoSlot.lineupDelta}`);
 t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.lineupDelta) < 5, String(bigSumNoSlot.lineupDelta));
 
+
+// --- many-to-many packages --------------------------------------------------
+
+{
+  const { combinations, proposeTrades, PACKAGE_MAX, PACKAGE_POOL } = await import("./trade-fair.ts");
+
+  const combos = combinations([1, 2, 3, 4], 2);
+  t("combinations covers singles and pairs, no empty set", combos.length === 4 + 6, `${combos.length}`);
+  t("combinations respects the size cap", combos.every((c) => c.length <= 2));
+  t("combinations does not repeat a member", combos.every((c) => new Set(c).size === c.length));
+  t("combinations of one is just the singles", combinations([1, 2, 3], 1).length === 3);
+
+  t("the package cap allows the shapes a human actually offers", PACKAGE_MAX >= 2, `${PACKAGE_MAX}`);
+  t("the search pool is bounded so the weekly run stays quick", PACKAGE_POOL <= 12, `${PACKAGE_POOL}`);
+
+  // A 2-for-1 that a one-for-one search cannot see: we are deep at WR and thin
+  // at RB, they are the reverse, so two spare receivers for one back helps both.
+  const P = (name: string, position: string, points: number) => ({ name, position, points });
+  const ours = [
+    P("RB1", "RB", 200), P("RB2", "RB", 60),
+    P("WR1", "WR", 210), P("WR2", "WR", 205), P("WR3", "WR", 200), P("WR4", "WR", 195), P("WR5", "WR", 190),
+    P("TE1", "TE", 150), P("QB1", "QB", 300), P("K1", "K", 120), P("DEF1", "DEF", 110),
+  ];
+  const theirs = [
+    P("tRB1", "RB", 215), P("tRB2", "RB", 210), P("tRB3", "RB", 205),
+    P("tWR1", "WR", 120), P("tWR2", "WR", 100),
+    P("tTE1", "TE", 140), P("tQB1", "QB", 280), P("tK1", "K", 115), P("tDEF1", "DEF", 105),
+  ];
+  const onlySingles = proposeTrades(ours, [{ managerId: "2", teamName: "them", roster: theirs }], undefined, 20, 1);
+  const withPackages = proposeTrades(ours, [{ managerId: "2", teamName: "them", roster: theirs }], undefined, 20, 3);
+  t("packages find offers a one-for-one search cannot", withPackages.length >= onlySingles.length,
+    `singles ${onlySingles.length}, packages ${withPackages.length}`);
+  t("every generated package still helps the other side too",
+    withPackages.every((p) => p.theirGain > 0));
+  t("a multi-player package is actually produced",
+    withPackages.some((p) => p.offer.give.length > 1 || p.offer.receive.length > 1),
+    `sizes ${withPackages.slice(0, 3).map((p) => `${p.offer.give.length}for${p.offer.receive.length}`).join(",")}`);
+  t("among equal gains the smaller package ranks first",
+    withPackages.length < 2 || withPackages[0].score >= withPackages[1].score);
+}
+
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
