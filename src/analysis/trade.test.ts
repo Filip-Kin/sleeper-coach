@@ -222,5 +222,32 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
 }
 
 
+// THE BUG THIS EXISTS TO PREVENT. The proposer once used a weaker bar than the
+// acceptor and generated a deal the accept path refused, after the coach had
+// already offered it in a DM. Anything we propose must be something we would say
+// yes to, or the bot contradicts itself in front of a real person.
+{
+  const { proposeTrades, evaluateTradeTwoSided, DEFAULT_FAIRNESS } = await import("./trade-fair.ts");
+  const P = (name: string, position: string, points: number) => ({ name, position, points });
+  const ours = [
+    P("QB1","QB",300), P("RB1","RB",290), P("RB2","RB",255), P("RB3","RB",208),
+    P("WR1","WR",262), P("WR2","WR",229), P("WR3","WR",222), P("WR4","WR",190), P("WR5","WR",120),
+    P("TE1","TE",196), P("K1","K",44), P("DEF1","DEF",0),
+  ];
+  const theirs = [
+    P("tQB","QB",280), P("tRB1","RB",240), P("tRB2","RB",200),
+    P("tWR1","WR",229), P("tWR2","WR",150), P("tWR3","WR",110),
+    P("tTE","TE",140), P("tK","K",40), P("tDEF","DEF",0),
+  ];
+  const props = proposeTrades(ours, [{ managerId: "2", teamName: "them", roster: theirs }], DEFAULT_FAIRNESS, 25);
+  const wouldRefuse = props.filter((p) =>
+    evaluateTradeTwoSided(p.offer, ours, theirs, DEFAULT_FAIRNESS).verdict !== "accept");
+  t("every proposal would also be ACCEPTED if it came back to us",
+    wouldRefuse.length === 0,
+    wouldRefuse.map((p) => p.why).join(" | ").slice(0, 160));
+  t("every proposal still gains the other side something",
+    props.every((p) => p.theirGain > 0));
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

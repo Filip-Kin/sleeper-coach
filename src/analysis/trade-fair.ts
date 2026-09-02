@@ -422,11 +422,17 @@ export function proposeTrades(
       for (const receive of receiveSets) {
         const offer: TradeOffer = { receive, give };
         const ev = evaluateTradeTwoSided(offer, ourRoster, rival.roster, cfg);
-        if (ev.railBlocks.length || ev.fairnessBlocks.length) continue;
-        // They must actually gain, or there is no reason for them to say yes.
+        // THE PROPOSER MUST USE THE ACCEPTOR'S BAR. This previously filtered on
+        // its own weaker conditions (no blocks, theirGain > 0, ourGain above the
+        // noise floor) and never asked whether the deal would actually be
+        // ACCEPTED. It generated Mike Evans plus Travis Etienne for Rashee Rice,
+        // which the accept path rejects: +7.1 to us against +26.3 to them, a net
+        // of 3.6 against the 18.3 it needs. Offering a deal we would then refuse
+        // is incoherent, and worse, the coach had already said so in a DM.
+        if (ev.verdict !== "accept") continue;
+        // They must actually gain too, or there is no reason for them to say
+        // yes. This is the ONLY condition the proposer adds beyond acceptance.
         if (ev.theirGain <= 0) continue;
-        // And it must be worth our while beyond noise.
-        if (ev.ourGain < cfg.rejectBelowPts) continue;
         const relief = byeRelief(offer, ourRoster, cfg);
         const names = (ps: TradePlayer[]) => ps.map((p) => `${p.name} (${p.position})`).join(" + ");
         out.push({
