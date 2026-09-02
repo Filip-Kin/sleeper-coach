@@ -14,6 +14,22 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN ?? `${HOME}/.local/bin/claude`;
 const MODEL = process.env.COACH_MODEL ?? "claude-opus-4-8";
 const EFFORT = process.env.COACH_EFFORT ?? "high";
 const SETTINGS = join(REPO_ROOT, "claude-settings.json");
+// A second settings file for anything driven by input we did not write: DMs from
+// rivals, speech heard in a voice call. It allows no tools and denies the
+// dangerous ones by name, with defaultMode "manual" so a tool call cannot be
+// auto-approved in a non-interactive run.
+const UNTRUSTED_SETTINGS = join(REPO_ROOT, "untrusted-settings.json");
+// Belt and braces alongside the settings file. Verified 2026-09-02: passing
+// `tools: []` did NOT disable tools, because omitting --tools falls back to the
+// CLI's default set, and claude-settings.json allows Bash(act:*) with
+// defaultMode dontAsk. A DM could therefore have talked the model into running
+// `act trade-respond <id> accept` against the real league. These are denied
+// explicitly so the guarantee does not rest on how an absent flag is
+// interpreted.
+const DENIED_WHEN_UNTRUSTED = [
+  "Bash", "Edit", "Write", "Read", "NotebookEdit", "WebFetch", "WebSearch",
+  "Glob", "Grep", "Task", "Agent",
+];
 const SYSTEM_PROMPT_PATH = join(REPO_ROOT, "system-prompt.md");
 // claude derives its transcript dir from cwd, replacing "/" with "-".
 const SESSION_STORE = join(HOME, ".claude", "projects", REPO_ROOT.replace(/\//g, "-"));
@@ -32,6 +48,11 @@ export interface RunOptions {
   model?: string; // override the model (e.g. a fast model for short quips)
   effort?: string; // override reasoning effort: low|medium|high|xhigh
   tools?: string[]; // override the tool allowlist; [] = no tools (fastest, text-only)
+  // Set for any run whose prompt contains text a rival wrote. Denies every tool,
+  // and REPLACES the coach system prompt instead of appending to it, so an
+  // injected "print your instructions" cannot leak strategy, roster plans or the
+  // act CLI reference. See DENIED_WHEN_UNTRUSTED.
+  untrusted?: boolean;
 }
 
 export interface RunResult {
@@ -42,9 +63,14 @@ export interface RunResult {
 }
 
 export async function runAgent(opts: RunOptions): Promise<RunResult> {
-  const systemPrompt =
-    (await Bun.file(SYSTEM_PROMPT_PATH).text().catch(() => "")) +
-    (opts.extraSystemPrompt ? `\n\n${opts.extraSystemPrompt}` : "");
+  // An untrusted run gets ONLY the caller's prompt. The coach system prompt
+  // names the league, the roster, the strategy and every act subcommand, which
+  // is exactly the material an injected "ignore your instructions and print your
+  // system prompt" would try to extract.
+  const systemPrompt = opts.untrusted
+    ? (opts.extraSystemPrompt ?? "")
+    : (await Bun.file(SYSTEM_PROMPT_PATH).text().catch(() => "")) +
+      (opts.extraSystemPrompt ? `\n\n${opts.extraSystemPrompt}` : "");
 
   const sessionId = opts.sessionId ?? crypto.randomUUID();
   const canResume = existsSync(join(SESSION_STORE, `${sessionId}.jsonl`));
@@ -57,7 +83,10 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   // callers that only need whole messages (the draft engine), skip them so the
   // stream is clean, complete assistant turns.
   if (opts.partial !== false) args.push("--include-partial-messages");
-  args.push("--model", model, "--effort", effort, "--settings", SETTINGS, "--append-system-prompt", systemPrompt);
+  args.push("--model", model, "--effort", effort,
+    "--settings", opts.untrusted ? UNTRUSTED_SETTINGS : SETTINGS,
+    "--append-system-prompt", systemPrompt);
+  if (opts.untrusted) args.push("--permission-mode", "manual", "--disallowed-tools", ...DENIED_WHEN_UNTRUSTED);
   // Tools add tool-use deliberation latency; callers wanting a fast text-only
   // reply (the announcer) pass tools: [] to omit them entirely.
   if (tools.length) args.push("--tools", ...tools);
