@@ -60,12 +60,19 @@ function key(name: string): string {
 
 let cache: { updatedAt: string | null; byKey: Map<string, NewsEntry> } | null = null;
 
+let cachedMtime = -1;
 export async function loadNews(): Promise<{ updatedAt: string | null; byKey: Map<string, NewsEntry> }> {
-  if (cache) return cache;
+  // Keyed on the file's mtime, not cached forever. The daemon is a long-running
+  // process and the dossier is now rebuilt every morning by a separate job; a
+  // forever-cache meant every trade would be graded against the dossier as of
+  // the daemon's last boot, which is the staleness this refresh exists to end.
+  const f = Bun.file(NEWS_PATH);
+  const mtime = (await f.exists()) ? f.lastModified : -1;
+  if (cache && mtime === cachedMtime) return cache;
+  cachedMtime = mtime;
   const byKey = new Map<string, NewsEntry>();
   let updatedAt: string | null = null;
   try {
-    const f = Bun.file(NEWS_PATH);
     if (await f.exists()) {
       const parsed = (await f.json()) as NewsFile;
       updatedAt = parsed.updatedAt ?? null;

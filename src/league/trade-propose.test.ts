@@ -66,3 +66,58 @@ test("the brief renders our outbound offers so the coach cannot deny one", async
   expect(text).toContain("I give Parker Washington, I get Mark Andrews");
   expect(text).toContain("Never deny an offer you have made");
 });
+
+// --- counters -----------------------------------------------------------------
+import { pickCounter, recordProposal } from "./trade-propose.ts";
+import { evaluateTradeTwoSided, DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
+import { asksForCounter } from "./dm-watch.ts";
+import { tradeReplyText } from "./trade-watch.ts";
+
+const PP = (name: string, position: string, points: number, depth = 1) => ({ name, position, points, depthChartOrder: depth });
+// WR-rich with a hole at RB2; they are RB-rich and WR-poor. A 2-for-1 exists.
+const OURS = [PP("QB1","QB",300), PP("RB1","RB",280), PP("RBbad","RB",60,3), PP("WRa","WR",250), PP("WRb","WR",245), PP("WRc","WR",240),
+  PP("WRd","WR",235), PP("WRe","WR",230), PP("TE1","TE",190), PP("K1","K",44), PP("DEF1","DEF",10)];
+const THEIRS = [PP("tQB","QB",290), PP("tRB1","RB",270), PP("tRB2","RB",265), PP("tRB3","RB",260), PP("tRB4","RB",200), PP("tWRa","WR",90), PP("tWRb","WR",80), PP("tWRc","WR",70),
+  PP("tTE","TE",185), PP("tK","K",42), PP("tDEF","DEF",8)];
+const RIVAL = { managerId: "2", teamName: "them", roster: THEIRS };
+
+test("THE INVARIANT: any counter it picks would be accepted if it came straight back", () => {
+  const c = pickCounter(OURS as never, RIVAL as never, DEFAULT_FAIRNESS, db(), 1_700_000_000_000);
+  expect(c).not.toBeNull();
+  const back = evaluateTradeTwoSided(c!.offer, OURS as never, THEIRS as never, DEFAULT_FAIRNESS);
+  expect(back.verdict).toBe("accept");
+  expect(c!.theirGain).toBeGreaterThan(0);
+});
+
+test("no counter when nothing clears the bar", () => {
+  // Their roster is all junk; nothing we could receive helps us.
+  const junk = { managerId: "2", teamName: "them", roster: THEIRS.map((p) => ({ ...p, points: 5 })) };
+  expect(pickCounter(OURS as never, junk as never, DEFAULT_FAIRNESS, db(), 1)).toBeNull();
+});
+
+test("a counter already offered recently is skipped", () => {
+  const d = db();
+  const now = 1_700_000_000_000;
+  const first = pickCounter(OURS as never, RIVAL as never, DEFAULT_FAIRNESS, d, now)!;
+  recordProposal(d, first, "tx1", now);
+  const second = pickCounter(OURS as never, RIVAL as never, DEFAULT_FAIRNESS, d, now);
+  const key = (p: typeof first) => [p.offer.receive.map((x) => x.name).sort().join("+"), p.offer.give.map((x) => x.name).sort().join("+")].join("|");
+  expect(second === null || key(second) !== key(first)).toBe(true);
+});
+
+test("asking for a counter is detected, ordinary chat is not", () => {
+  for (const yes of ["can you counter?", "what would you give for Rice", "send me an offer", "make me an offer then", "what do you want for Evans", "counter offer?"]) {
+    expect(asksForCounter(yes)).toBe(true);
+  }
+  for (const no of ["good luck this week", "lol", "these are both bench players", "why did you reject that"]) {
+    expect(asksForCounter(no)).toBe(false);
+  }
+});
+
+test("a rejection that carries a counter names it and their gain", () => {
+  const c = pickCounter(OURS as never, RIVAL as never, DEFAULT_FAIRNESS, db(), 1)!;
+  const ev = { verdict: "reject", ourGain: -3, theirGain: 4, netValue: -4, requiredEdge: 3, railBlocks: [], fairnessBlocks: [], reasons: [], lineupDelta: -3, before: 0, after: 0, edge: 0 } as never;
+  const t = tradeReplyText(ev, { receive: ["X"], give: ["Y"] }, c);
+  expect(t).toContain("Instead, I have sent you one");
+  expect(t).toContain(`+${c.theirGain} to your team`);
+});

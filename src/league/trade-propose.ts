@@ -35,7 +35,8 @@ import { logEvent, recentEvents } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { browserGql, proposeTrade, outstandingOffers, listDms, sendDm, type Gql } from "./api.ts";
 import { snapshot, scheduleContext } from "../analysis/trade-wire.ts";
-import { proposeTrades, giveEligibleForProposal, DEFAULT_FAIRNESS, type Proposal, type RivalRoster } from "../analysis/trade-fair.ts";
+import { proposeTrades, giveEligibleForProposal, DEFAULT_FAIRNESS, type Proposal, type RivalRoster, type FairnessConfig } from "../analysis/trade-fair.ts";
+import type { TradePlayer } from "../analysis/trade.ts";
 import { sleeper } from "../sleeper/client.ts";
 
 /** Never have more than this many of our offers waiting for an answer. */
@@ -67,7 +68,7 @@ export function onCooldown(
   return row !== null && row !== undefined;
 }
 
-function ensureTable(db: Database): void {
+export function ensureTable(db: Database): void {
   db.run(`CREATE TABLE IF NOT EXISTS trade_proposals (
     pair_key TEXT NOT NULL, manager_id TEXT NOT NULL, transaction_id TEXT,
     at INTEGER NOT NULL, why TEXT)`);
@@ -339,4 +340,27 @@ export function briefText(b: TradeBrief): string {
     `Say "send it as a real offer" at most once in a reply. Repeating it in every sentence reads like a brush-off, and the point is to get trades done.`,
   );
   return lines.join("\n");
+}
+
+/** Record an offer we sent, so the cooldown and the outstanding-offer cap see it
+ *  whether it came from the weekly proposer or from a counter. */
+export function recordProposal(db: Database, p: Proposal, transactionId: string, now: number): void {
+  ensureTable(db);
+  db.run("INSERT INTO trade_proposals (pair_key, manager_id, transaction_id, at, why) VALUES (?, ?, ?, ?, ?)",
+    [pairKey(p.managerId, p.offer.receive.map((x) => x.name), p.offer.give.map((x) => x.name)), p.managerId, transactionId, now, p.why]);
+}
+
+/** The best counter to send a rival who just sent us something we refused.
+ *
+ *  Pure apart from the cooldown lookup, so it is testable. Returns null when
+ *  nothing clears the acceptor's bar with that rival gaining too, or when the
+ *  best candidate was offered to them recently. A counter is a proposal like
+ *  any other: it must be a deal we would accept if it came straight back. */
+export function pickCounter(
+  ourRoster: TradePlayer[], rival: RivalRoster, cfg: FairnessConfig, db: Database, now: number,
+): Proposal | null {
+  ensureTable(db);
+  const candidates = proposeTrades(ourRoster, [rival], cfg, 5);
+  return candidates.find((c) =>
+    !onCooldown(db, pairKey(c.managerId, c.offer.receive.map((p) => p.name), c.offer.give.map((p) => p.name)), now)) ?? null;
 }

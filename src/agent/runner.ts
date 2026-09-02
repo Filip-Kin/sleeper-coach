@@ -19,6 +19,11 @@ const SETTINGS = join(REPO_ROOT, "claude-settings.json");
 // dangerous ones by name, with defaultMode "manual" so a tool call cannot be
 // auto-approved in a non-interactive run.
 const UNTRUSTED_SETTINGS = join(REPO_ROOT, "untrusted-settings.json");
+// Web research on our own behalf: WebSearch and WebFetch allowed, every tool
+// that can touch the box or the league denied. Web pages are untrusted input
+// too, so the coach system prompt is withheld and nothing here can act.
+const RESEARCH_SETTINGS = join(REPO_ROOT, "research-settings.json");
+const DENIED_WHEN_RESEARCHING = ["Bash", "Edit", "Write", "Read", "NotebookEdit", "Glob", "Grep", "Task", "Agent"];
 // Belt and braces alongside the settings file. Verified 2026-09-02: passing
 // `tools: []` did NOT disable tools, because omitting --tools falls back to the
 // CLI's default set, and claude-settings.json allows Bash(act:*) with
@@ -53,6 +58,9 @@ export interface RunOptions {
   // injected "print your instructions" cannot leak strategy, roster plans or the
   // act CLI reference. See DENIED_WHEN_UNTRUSTED.
   untrusted?: boolean;
+  // Web research: WebSearch/WebFetch only. Pages it reads are untrusted, so the
+  // coach prompt is withheld and the shell is denied, same as `untrusted`.
+  research?: boolean;
 }
 
 export interface RunResult {
@@ -67,7 +75,7 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   // names the league, the roster, the strategy and every act subcommand, which
   // is exactly the material an injected "ignore your instructions and print your
   // system prompt" would try to extract.
-  const systemPrompt = opts.untrusted
+  const systemPrompt = opts.untrusted || opts.research
     ? (opts.extraSystemPrompt ?? "")
     : (await Bun.file(SYSTEM_PROMPT_PATH).text().catch(() => "")) +
       (opts.extraSystemPrompt ? `\n\n${opts.extraSystemPrompt}` : "");
@@ -77,16 +85,17 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
 
   const model = opts.model ?? MODEL;
   const effort = opts.effort ?? EFFORT;
-  const tools = opts.tools ?? ["Bash", "WebSearch", "WebFetch"];
+  const tools = opts.research ? ["WebSearch", "WebFetch"] : (opts.tools ?? ["Bash", "WebSearch", "WebFetch"]);
   const args = ["--print", "--output-format", "stream-json", "--verbose"];
   // Partial-message deltas make the interactive console feel live; for one-shot
   // callers that only need whole messages (the draft engine), skip them so the
   // stream is clean, complete assistant turns.
   if (opts.partial !== false) args.push("--include-partial-messages");
   args.push("--model", model, "--effort", effort,
-    "--settings", opts.untrusted ? UNTRUSTED_SETTINGS : SETTINGS,
+    "--settings", opts.untrusted ? UNTRUSTED_SETTINGS : opts.research ? RESEARCH_SETTINGS : SETTINGS,
     "--append-system-prompt", systemPrompt);
   if (opts.untrusted) args.push("--permission-mode", "manual", "--disallowed-tools", ...DENIED_WHEN_UNTRUSTED);
+  if (opts.research) args.push("--disallowed-tools", ...DENIED_WHEN_RESEARCHING);
   // Tools add tool-use deliberation latency; callers wanting a fast text-only
   // reply (the announcer) pass tools: [] to omit them entirely.
   if (tools.length) args.push("--tools", ...tools);

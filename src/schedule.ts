@@ -209,6 +209,15 @@ export const JOBS: Job[] = [
     why: "Read-only planning, so being late costs nothing; it just needs to precede the submit.",
   },
   {
+    // The news dossier is rebuilt before anything else acts on the day: before
+    // the earliest free-agent slot (09:00) and before any trade is evaluated.
+    // It was hand-written on draft day and never touched; Filip: "we should fix
+    // the news feed to refresh automatically like every morning or something".
+    // Late tolerance is generous because a late refresh still beats none.
+    name: "news-refresh", dow: -1, hour: 7, minute: 0, maxLateMs: 6 * HOUR,
+    why: "Daily rebuild of the news dossier from the Sleeper dump plus a web research pass, so trades and waivers are graded on this week's facts rather than draft day's.",
+  },
+  {
     // FREE AGENTS ARE RANDOMISED. This is Filip's one condition for letting the
     // coach manage the team: it must not sit on the wire and take every dropped
     // player the second he appears, before a human has even looked. Unlike a

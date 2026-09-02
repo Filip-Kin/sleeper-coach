@@ -33,7 +33,11 @@ import { logEvent } from "../log.ts";
 import { freezeState } from "../killswitch.ts";
 import { runAgent } from "../agent/runner.ts";
 import { listDms, threadMessages, sendDm, pendingChatRequests, acceptChatRequest, type Gql, type DmMessage, type ChatRequest } from "./api.ts";
-import { tradeBriefFor, briefText } from "./trade-propose.ts";
+import { tradeBriefFor, briefText, pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS } from "./trade-propose.ts";
+import { proposeTrade, outstandingOffers } from "./api.ts";
+import { scheduleContext } from "../analysis/trade-wire.ts";
+import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
+import { sleeper } from "../sleeper/client.ts";
 import { snapshot } from "../analysis/trade-wire.ts";
 
 /** Which roster does this Sleeper user own? Needed so the brief can name what we
@@ -82,6 +86,45 @@ function sanitise(v: string, n: number): string {
     out += (c < 0x20 || c === 0x7f) ? " " : ch;
   }
   return out.replace(/<\/?message_log>/gi, "").slice(0, n);
+}
+
+/** Did they just ask us to make them an offer? Deterministic on purpose: the
+ *  MODEL never decides to send a trade, this regex does, and what gets sent is
+ *  whatever pickCounter clears through the acceptor. Filip: "especially if the
+ *  other manager asks for a counter offer". */
+export const COUNTER_ASK_RE = /\b(counter ?offer|counter|what would you (give|offer|do|take)|(send|make) me (an? )?offer|what do you want for|what will you give)\b/i;
+export function asksForCounter(text: string): boolean {
+  return COUNTER_ASK_RE.test(text);
+}
+
+/** Send a real offer to a manager who asked for one, if the engine has one.
+ *  Same caps as every other outbound offer. Returns a line for the brief so the
+ *  reply confirms what was actually sent, or explains that nothing clears. */
+async function counterOnRequest(gql: Gql, db: Database, theirRosterId: number, now: number): Promise<string> {
+  const week = Math.max(1, (await sleeper.nflState()).week ?? 1);
+  const open = await outstandingOffers(gql, week);
+  if (open.some((o) => o.rosterIds.includes(theirRosterId))) {
+    return "They asked for an offer, but I already have one out to them awaiting their answer. Point them at it.";
+  }
+  if (open.length >= MAX_OPEN_OFFERS) {
+    return "They asked for an offer, but I have as many offers out as I allow myself right now. Say I will come back to them.";
+  }
+  const snap = await snapshot();
+  const ours = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  const theirs = snap.rosterOf.get(theirRosterId) ?? [];
+  const cfg = { ...DEFAULT_FAIRNESS, ...(await scheduleContext(theirRosterId)) };
+  const pick = pickCounter(ours, { managerId: String(theirRosterId), teamName: `roster ${theirRosterId}`, roster: theirs }, cfg, db, now);
+  if (!pick) return "They asked for an offer. Nothing on their roster clears my bar at a price I would pay right now, so say so plainly and invite them to try me.";
+  const adds: Record<string, number> = {}, drops: Record<string, number> = {};
+  for (const p of pick.offer.receive) { const id = snap.idByName.get(p.name); if (!id) throw new Error(`no id for ${p.name}`); adds[id] = snap.ourRosterId; drops[id] = theirRosterId; }
+  for (const p of pick.offer.give)    { const id = snap.idByName.get(p.name); if (!id) throw new Error(`no id for ${p.name}`); adds[id] = theirRosterId; drops[id] = snap.ourRosterId; }
+  const res = await proposeTrade(gql, { adds, drops, expiresAt: Math.floor((now + OFFER_TTL_DAYS * 86_400_000) / 1000) });
+  recordProposal(db, pick, res.transactionId, now);
+  logEvent("coach", "trade-proposed", `Offered ${pick.offer.give.map((p) => p.name).join(" + ")} for ${pick.offer.receive.map((p) => p.name).join(" + ")} to roster ${theirRosterId} because they asked in a DM`, {
+    transaction_id: res.transactionId, status: res.status, theirRosterId, ourGain: pick.ourGain, theirGain: pick.theirGain, why: pick.why,
+  });
+  return `They asked for an offer and I have JUST SENT one: I give ${pick.offer.give.map((p) => p.name).join(" + ")}, I get ${pick.offer.receive.map((p) => p.name).join(" + ")}. ` +
+    `That is +${pick.theirGain} to their team by my numbers. Tell them it is in their inbox.`;
 }
 
 /** The last few turns, oldest first, as data for the model.
@@ -190,6 +233,16 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
     try {
       const rosterId = await rosterIdForUser(last.authorId);
       brief = briefText(await tradeBriefFor(rosterId));
+      // If they asked for an offer, the offer goes out deterministically HERE,
+      // and the model is told what happened. It never gets to decide.
+      if (rosterId !== null && asksForCounter(last.text)) {
+        try {
+          brief += "\n" + (await counterOnRequest(gql, db, rosterId, now));
+        } catch (e) {
+          logEvent("coach", "trade-counter-failed", `Could not send a requested offer to ${last.authorName}`, { error: String(e) });
+          brief += "\nThey asked for an offer but I could not send one just now; say you will send one shortly.";
+        }
+      }
     } catch (e) {
       logEvent("coach", "dm-brief-failed", `Could not build a trade brief for ${last.authorName}`, { error: String(e) });
     }

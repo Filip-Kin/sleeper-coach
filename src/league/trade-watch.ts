@@ -16,11 +16,13 @@ import { config } from "../config.ts";
 import { logEvent } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import {
-  pendingTrades, acceptTrade, rejectTrade, listDms, threadMessages, sendDm,
+  pendingTrades, acceptTrade, rejectTrade, proposeTrade, outstandingOffers, listDms, threadMessages, sendDm,
   type Gql, type PendingTrade,
 } from "./api.ts";
-import { snapshot, offerFromTransaction, evaluateLiveOffer } from "../analysis/trade-wire.ts";
-import type { TwoSidedEvaluation } from "../analysis/trade-fair.ts";
+import { snapshot, offerFromTransaction, evaluateLiveOffer, scheduleContext } from "../analysis/trade-wire.ts";
+import { DEFAULT_FAIRNESS, type TwoSidedEvaluation, type Proposal } from "../analysis/trade-fair.ts";
+import { pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS } from "./trade-propose.ts";
+import type { Database } from "bun:sqlite";
 import { newsAgeDays } from "../data/news.ts";
 
 /** Warn once a day when the news dossier is old enough to be lying to us. */
@@ -42,7 +44,7 @@ export interface TradeSides { receive: string[]; give: string[] }
  *  person in Filip's league, so it states the actual numbers the decision was
  *  made on rather than improvising. The swagger is fixed dressing, not a model
  *  free to say anything. */
-export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides): string {
+export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides, counter?: Proposal | null): string {
   const got = sides.receive.join(", ") || "nothing";
   const gave = sides.give.join(", ") || "nothing";
   // "My team", not "my starting lineup": the number now includes bye weeks and
@@ -55,10 +57,15 @@ export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides): strin
   const blocked = ev.fairnessBlocks[0] ?? ev.railBlocks[0];
   const head = blocked ? `Rejected: ${blocked}.` : "Rejected.";
   const small = ev.ourGain > 0 ? ` It is a real but small gain for me, and it does not clear the margin I need before I move a body.` : "";
+  // A counter turns "no" into a next move. It is only ever a deal the acceptor
+  // would take straight back, so naming it commits us to nothing new.
+  const tail = counter
+    ? ` Instead, I have sent you one that works for both of us: you get ${counter.offer.give.map((p) => p.name).join(" + ")}, ` +
+      `I get ${counter.offer.receive.map((p) => p.name).join(" + ")}. That is +${counter.theirGain} to your team by my numbers. Accept it and we are done.`
+    : ` I accept any trade that does not leave my team worse off.`;
   return `${head} Giving up ${gave} for ${got} moves my team ${ev.ourGain >= 0 ? "+" : ""}${ev.ourGain} ` +
     `over the rest of the season, bye weeks and injury cover included, and yours ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain}. ` +
-    `Net of how often we still play, that is ${ev.netValue} against the ${ev.requiredEdge} I need.${small} ` +
-    `I accept any trade that does not leave my team worse off.`;
+    `Net of how often we still play, that is ${ev.netValue} against the ${ev.requiredEdge} I need.${small}${tail}`;
 }
 
 /** Find the DM thread this offer was proposed in, so the reply lands in the
@@ -88,6 +95,7 @@ export async function handlePendingTrades(
   leg: number,
   alreadyHandled: (id: string) => boolean,
   markHandled: (id: string, how: string) => void,
+  db?: Database,
 ): Promise<HandledTrade[]> {
   const out: HandledTrade[] = [];
   const trades: PendingTrade[] = await pendingTrades(gql, leg);
@@ -118,15 +126,60 @@ export async function handlePendingTrades(
     }
     assertWritesAllowed("trade respond");
 
-    const status = ev.verdict === "accept"
-      ? await acceptTrade(gql, t.transactionId, leg)
-      : await rejectTrade(gql, t.transactionId, leg);
+    // COUNTER-OFFER. A refusal with a better shape in hand should say so with a
+    // real offer, not a hint in chat. Sleeper's propose_trade takes the id of
+    // the offer being rejected and does both in one call. Bounded by the same
+    // limits as the weekly proposer: never more than MAX_OPEN_OFFERS out, never
+    // a second offer to someone who has not answered the first, never the same
+    // pairing inside the cooldown. If the counter fails for any reason we fall
+    // back to a plain reject, so a refusal is never left undelivered.
+    let counter: Proposal | null = null;
+    let status = "";
+    if (ev.verdict === "accept") {
+      status = await acceptTrade(gql, t.transactionId, leg);
+    } else {
+      if (db && theirRosterId !== null) {
+        try {
+          const open = await outstandingOffers(gql, leg);
+          const busy = open.some((o) => o.rosterIds.includes(theirRosterId));
+          if (open.length < MAX_OPEN_OFFERS && !busy) {
+            const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+            const theirRoster = snap.rosterOf.get(theirRosterId) ?? [];
+            const cfg = { ...DEFAULT_FAIRNESS, ...(await scheduleContext(theirRosterId)) };
+            counter = pickCounter(ourRoster, { managerId: String(theirRosterId), teamName: `roster ${theirRosterId}`, roster: theirRoster }, cfg, db, Date.now());
+          }
+        } catch (e) {
+          logEvent("coach", "trade-counter-skipped", `Could not look for a counter to ${t.transactionId}`, { error: String(e) });
+        }
+      }
+      if (counter) {
+        try {
+          const adds: Record<string, number> = {}, drops: Record<string, number> = {};
+          for (const p of counter.offer.receive) { const id = snap.idByName.get(p.name); if (!id) throw new Error(`no id for ${p.name}`); adds[id] = snap.ourRosterId; drops[id] = theirRosterId!; }
+          for (const p of counter.offer.give)    { const id = snap.idByName.get(p.name); if (!id) throw new Error(`no id for ${p.name}`); adds[id] = theirRosterId!; drops[id] = snap.ourRosterId; }
+          const res = await proposeTrade(gql, {
+            adds, drops,
+            expiresAt: Math.floor((Date.now() + OFFER_TTL_DAYS * 86_400_000) / 1000),
+            rejectTransactionId: t.transactionId, rejectTransactionLeg: leg,
+          });
+          status = `countered:${res.status}`;
+          recordProposal(db!, counter, res.transactionId, Date.now());
+          logEvent("coach", "trade-countered", `Rejected ${t.transactionId} and countered roster ${theirRosterId}: ${counter.why}`, {
+            rejected: t.transactionId, transaction_id: res.transactionId, theirRosterId, ourGain: counter.ourGain, theirGain: counter.theirGain,
+          });
+        } catch (e) {
+          logEvent("coach", "trade-counter-failed", `Counter to ${t.transactionId} failed; rejecting plainly`, { error: String(e) });
+          counter = null;
+        }
+      }
+      if (!counter) status = await rejectTrade(gql, t.transactionId, leg);
+    }
 
     let replied = false;
     try {
       const dmId = await findTradeThread(gql, t.transactionId);
       if (dmId) {
-        await sendDm(gql, dmId, tradeReplyText(ev, sides));
+        await sendDm(gql, dmId, tradeReplyText(ev, sides, counter));
         replied = true;
       }
     } catch (e) {

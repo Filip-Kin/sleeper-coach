@@ -159,6 +159,7 @@ const JOB_COMMAND: Record<string, string[]> = {
   // backstop and the pre-kickoff passes are the same code with different timing.
   // Daily backstop only. The passes that actually carry our edge are spawned by
   // pickemKickoffPass() below, off real kickoff times.
+  "news-refresh": ["bun", "run", "src/data/news-refresh.ts"],
   "pickem-slate": ["bun", "run", "src/pickem/run.ts"],
   "trade-propose": ["bun", "run", "src/league/propose-run.ts"],
   "waiver-compute": ["bun", "run", "src/act/waiver-run.ts"],
@@ -365,7 +366,7 @@ async function pollOnce(): Promise<void> {
 
   const gql = leagueGql();
   try {
-    await handlePendingTrades(gql, round, alreadyHandled, markSeen);
+    await handlePendingTrades(gql, round, alreadyHandled, markSeen, db);
   } catch (err) {
     console.error(`[daemon] trade check failed: ${err instanceof Error ? err.message : String(err)}`);
   }
