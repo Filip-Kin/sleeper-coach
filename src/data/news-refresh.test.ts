@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { dossierFromDump, validateWebEntries, merge } from "./news-refresh.ts";
+import { dossierFromDump, validateWebEntries, merge, watchSet } from "./news-refresh.ts";
 
 const dump = {
   "1": { full_name: "Josh Jacobs", position: "RB", status: "Active", injury_status: "NA", depth_chart_order: 4 },
@@ -68,4 +68,20 @@ test("the web layer wins over the dump for the same player, because it knows why
   );
   expect(m["Josh Jacobs"]?.status).toBe("out");
   expect(m["Josh Jacobs"]?.source).toBe("web");
+});
+
+test("the free-agent pool excludes retired and teamless players, however well ranked", () => {
+  const d = {
+    "r1": { full_name: "Rostered", position: "WR", status: "Active", team: "SEA", search_rank: 500 },
+    "a1": { full_name: "Live FA", position: "RB", status: "Active", team: "GB", search_rank: 40 },
+    "x1": { full_name: "Drew Brees", position: "QB", status: "Inactive", team: null, search_rank: 10 },
+    "x2": { full_name: "Teamless", position: "WR", status: "Active", team: null, search_rank: 12 },
+    "k1": { full_name: "A Kicker", position: "K", status: "Active", team: "DAL", search_rank: 5 },
+  };
+  const w = watchSet(d as never, ["r1"]);
+  expect(w.has("r1")).toBe(true);
+  expect(w.has("a1")).toBe(true);
+  expect(w.has("x1")).toBe(false);
+  expect(w.has("x2")).toBe(false);
+  expect(w.has("k1")).toBe(false);
 });

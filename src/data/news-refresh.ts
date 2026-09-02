@@ -94,16 +94,25 @@ Reply with ONLY a JSON object, no prose, of the form:
 
 Status meaning: out = will miss most or all of the rest of the season; risk = real chance of missing time or losing his role (give a multiplier, e.g. 0.6 for a likely multi-week absence); watch = playing but carrying something worth knowing; soft = minor. Omit any player with nothing to report. Never invent a report; if you did not find one, leave him out.`;
 
+/** Who the dossier covers: everyone rostered in the league plus the top of the
+ *  free-agent pool. The pool is filtered to ACTIVE players with a team, because
+ *  the dump keeps retired players with a stale search_rank and the first dry run
+ *  dutifully reported Drew Brees and Julian Edelman as out. Pure, so tested. */
+export function watchSet(dump: Record<string, DumpPlayer & { search_rank?: number }>, rostered: Iterable<string>, poolSize = 60): Set<string> {
+  const watch = new Set<string>(rostered);
+  const pool = Object.entries(dump)
+    .filter(([id, p]) => !watch.has(id) && p.full_name && ["QB", "RB", "WR", "TE"].includes(p.position ?? "")
+      && (p.status ?? "").toLowerCase() === "active" && !!p.team && typeof p.search_rank === "number")
+    .sort((a, b) => (a[1].search_rank ?? 9999) - (b[1].search_rank ?? 9999))
+    .slice(0, poolSize);
+  for (const [id] of pool) watch.add(id);
+  return watch;
+}
+
 export async function refreshNews(opts: { web?: boolean; dry?: boolean } = {}): Promise<{ dump: number; web: number; total: number; path: string }> {
-  const dump = (await loadPlayers()) as Record<string, DumpPlayer>;
+  const dump = (await loadPlayers()) as Record<string, DumpPlayer & { search_rank?: number }>;
   const rosters = await sleeper.rosters(config.leagueId);
-  // Everyone rostered in the league, plus the top of the free-agent pool.
-  const watch = new Set<string>(rosters.flatMap((r) => r.players ?? []));
-  const byRank = Object.entries(dump)
-    .filter(([id, p]) => !watch.has(id) && p.full_name && ["QB", "RB", "WR", "TE"].includes(p.position ?? "") && typeof (p as { search_rank?: number }).search_rank === "number")
-    .sort((a, b) => ((a[1] as { search_rank?: number }).search_rank ?? 9999) - ((b[1] as { search_rank?: number }).search_rank ?? 9999))
-    .slice(0, 60);
-  for (const [id] of byRank) watch.add(id);
+  const watch = watchSet(dump, rosters.flatMap((r) => r.players ?? []));
 
   const fromDump = dossierFromDump(dump, watch);
   let fromWeb: Dossier = {};
@@ -118,8 +127,14 @@ export async function refreshNews(opts: { web?: boolean; dry?: boolean } = {}): 
     const text = res.text.trim().replace(/^```(?:json)?\s*|\s*```$/g, "");
     try {
       fromWeb = validateWebEntries(JSON.parse(text), known);
+      // Zero survivors is not an error, but it is not silence either: log the
+      // head so "the agent found nothing" and "the agent returned prose that
+      // happened to parse" can be told apart from the activity feed.
+      if (!Object.keys(fromWeb).length) {
+        logEvent("coach", "news-web-empty", "Research agent returned no usable entries", { error: res.error ?? null, head: text.slice(0, 300) });
+      }
     } catch (e) {
-      logEvent("coach", "news-web-failed", "Research agent did not return valid JSON; using the dump layer only", { error: String(e), head: text.slice(0, 200) });
+      logEvent("coach", "news-web-failed", "Research agent did not return valid JSON; using the dump layer only", { error: String(e), agentError: res.error ?? null, head: text.slice(0, 300) });
     }
   }
   const merged = merge(fromDump, fromWeb);
