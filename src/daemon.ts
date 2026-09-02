@@ -11,6 +11,8 @@ import { unreactedDrops } from "./analysis/waivers.ts";
 import { browserGql as leagueGql } from "./league/api.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
 import { handleDms } from "./league/dm-watch.ts";
+import { assessVeto, DEFAULT_VETO } from "./league/veto.ts";
+import { snapshot } from "./analysis/trade-wire.ts";
 import { freezeState } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
@@ -261,6 +263,7 @@ async function pickemKickoffPass(): Promise<void> {
  *  first deploy, and because a failed job is marked handled rather than retried,
  *  the day's run was simply lost. Cheap ping, short timeout, no navigation. */
 let browserWaitLogged = false;
+let browserReadyFlag = false;
 async function browserReady(): Promise<boolean> {
   try {
     const res = await fetch(`${BROWSER_API}/auth`, { signal: AbortSignal.timeout(5_000) });
@@ -346,6 +349,37 @@ async function reactToDrops(week: number): Promise<void> {
 }
 // #endregion
 
+// #region veto review of other managers' trades
+const vetoSeen = new Set<string>();
+async function reviewOthersTrades(leg: number): Promise<void> {
+  if (!browserReadyFlag) return;
+  let pend: { transactionId: string; rosterIds: number[]; adds: Record<string, number>; drops: Record<string, number>; consenterIds: number[] }[] = [];
+  try {
+    const { pendingTrades } = await import("./league/api.ts");
+    pend = await pendingTrades(leagueGql(), leg);
+  } catch { return; }
+  const others = pend.filter((t) => !t.rosterIds.includes(config.rosterId) && !vetoSeen.has(t.transactionId));
+  if (!others.length) return;
+  const snap = await snapshot();
+  for (const t of others) {
+    vetoSeen.add(t.transactionId);
+    const a = assessVeto(
+      { transactionId: t.transactionId, rosterIds: t.rosterIds, adds: t.adds, drops: t.drops },
+      snap.rosterOf,
+      (id) => snap.playerById.get(id) ?? { name: id, position: "", points: 0 },
+      DEFAULT_VETO,
+    );
+    logEvent("coach", "veto-review", `Trade ${t.transactionId} between rosters ${t.rosterIds.join(", ")}: ${a.verdict}. ${a.reason}`, {
+      transaction_id: t.transactionId, verdict: a.verdict, gain: a.gain,
+    });
+    if (a.verdict === "flag") {
+      await sendAlert("Possible collusion trade to review",
+        `A trade between other managers looks like a dump: ${a.reason}. It is NOT vetoed automatically; review it in the app if you want to vote.`).catch(() => {});
+    }
+  }
+}
+// #endregion
+
 async function pollOnce(): Promise<void> {
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
@@ -374,6 +408,12 @@ async function pollOnce(): Promise<void> {
   // A drop anywhere in the league opens a two-day waiver window on that player,
   // so it is evaluated when it happens rather than on Tuesday.
   await reactToDrops(round);
+
+  // Trades between OTHER managers go to a league veto vote. We default to
+  // allowing them (allow needs no action), and only flag a suspected collusion
+  // dump for a human, because a wrong public veto poisons the league and the
+  // vote mechanism is not yet observable to cast safely. See league/veto.ts.
+  await reviewOthersTrades(round).catch((e) => console.error(`[veto] ${e instanceof Error ? e.message : String(e)}`));
 
   // The coach answers its own DMs. Trade negotiation in this league happens in
   // chat, not the trade UI, so ignoring DMs meant ignoring half the game.

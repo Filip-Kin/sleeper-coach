@@ -186,6 +186,10 @@ export async function refreshNews(opts: { web?: boolean; dry?: boolean } = {}): 
     const res = await runAgent({
       prompt: RESEARCH_PROMPT(names, new Date().toISOString().slice(0, 10)),
       research: true, partial: false, effort: "medium",
+      // Sonnet, not the default Opus: this is structured extraction from web
+      // pages, not judgement, and it runs daily over ~110 players. Filip:
+      // "hopefully we're using sonnet for news ingestion right?"
+      model: process.env.NEWS_MODEL ?? "claude-sonnet-5",
       extraSystemPrompt: "You are a careful sports researcher. Output valid JSON only.",
     });
     const text = res.text.trim();

@@ -32,9 +32,12 @@ test("leaves the trade-offer message to trade-watch", () => {
   expect(d.why).toContain("trade-watch");
 });
 
-test("stops after the per-thread reply limit", () => {
+test("stops after the daily reply cap, which is a backstop against a runaway loop, not a limit on real conversation", () => {
+  expect(MAX_REPLIES_PER_THREAD).toBe(100);
   expect(shouldReply([m({ messageId: "a" })], MAX_REPLIES_PER_THREAD, null).reply).toBe(false);
   expect(shouldReply([m({ messageId: "a" })], MAX_REPLIES_PER_THREAD - 1, null).reply).toBe(true);
+  // A normal back-and-forth, even a long one in a day, never gets muzzled.
+  expect(shouldReply([m({ messageId: "a" })], 20, null).reply).toBe(true);
 });
 
 test("ignores an empty or whitespace message", () => {

@@ -48,10 +48,15 @@ async function rosterIdForUser(userId: string): Promise<number | null> {
   return null;
 }
 
-/** No more than this many coach replies to one person per window. A friendly
- *  bot that will not shut up is worse than one that misses a message. */
-export const MAX_REPLIES_PER_THREAD = 4;
-export const REPLY_WINDOW_MS = 6 * 60 * 60 * 1000;
+/** A ceiling loose enough that a real conversation never hits it, tight enough
+ *  to stop an abuse loop. The old value (4 per 6h) silently held a real trade
+ *  question, "what else would you propose", with nothing in the log to say
+ *  why. shouldReply's real guards (we did not speak last, not the same message
+ *  twice) already stop the coach talking to itself, so this is a backstop
+ *  against something going wrong, not a rate limit on ordinary chat. Filip:
+ *  "cap to 100 in a day or something". */
+export const MAX_REPLIES_PER_THREAD = 100;
+export const REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Longest single message we will show the model, and the longest transcript. A
  *  rival can type anything, including a wall of text designed to push the real
@@ -253,6 +258,11 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
       extraSystemPrompt: SYSTEM(brief),
       tools: [],
       partial: false,
+      // Sonnet, not the default Opus: a chat reply is not a hard decision (the
+      // deterministic engine already made the real call), and this can fire
+      // often now that the reply cap is gone. Filip: "switching to sonnet to
+      // save usage".
+      model: process.env.DM_MODEL ?? "claude-sonnet-5",
     });
     const text = cleanReply(result.text);
     if (!text) {
