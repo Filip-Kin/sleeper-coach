@@ -158,3 +158,59 @@ test("em dashes are replaced, because a model reaches for them constantly", () =
   expect(cleanReply("The trade won't happen — that is not an admin")).toBe("The trade won't happen, that is not an admin");
   expect(cleanReply("no en dashes – either")).toBe("no en dashes, either");
 });
+
+
+// --- chat requests ----------------------------------------------------------
+// A DM from a non-friend arrives as a pending request, and until it is accepted
+// the thread is invisible to my_dms. That is how a real trade explanation went
+// undelivered on 2026-09-02: the trade was visible through the transactions API
+// and correctly rejected, but the thread to explain it in did not exist yet.
+
+import { acceptLeagueChatRequests } from "./dm-watch.ts";
+import { acceptChatRequest } from "./api.ts";
+
+test("the request type is the undiscoverable one, not a guess", async () => {
+  // "dm", "chat", "friend" and "league_dm" all return an empty list happily.
+  // Only "dm_single" works, found by hooking XHR in the Sleeper web app.
+  const src = await Bun.file(new URL("./api.ts", import.meta.url)).text();
+  expect(src).toContain('request_type:"dm_single"');
+});
+
+test("only league mates get auto-accepted", async () => {
+  // Accepting anything would let any Sleeper user open a channel to a bot that
+  // answers. Rivals can already reach us in league chat, so this grants nothing.
+  const seen: string[] = [];
+  const gql = async (q: string) => {
+    seen.push(q);
+    if (q.includes("inbound_requests")) {
+      return { data: { inbound_requests: [
+        { type_id: "1400921359709655040", requester_id: "1267685003886604288", requester_display_name: "Owen", type_description: "", created: 1 },
+        { type_id: "1400921359709655041", requester_id: "9999999999999999999", requester_display_name: "Nobody", type_description: "", created: 1 },
+      ] } };
+    }
+    return { data: { accept_request: true } };
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ json: async () => [{ user_id: "1267685003886604288" }] })) as never;
+  try {
+    const accepted = await acceptLeagueChatRequests(gql as never);
+    expect(accepted.map((a) => a.requesterId)).toEqual(["1267685003886604288"]);
+    expect(seen.filter((q) => q.includes("accept_request")).length).toBe(1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a non-numeric id is refused before it can reach the mutation", async () => {
+  // safeId caught this when the test itself used a fake id. Ids are interpolated
+  // into the GraphQL string, so the character-class guard is what keeps that safe.
+  const gql = async () => ({ data: { accept_request: true } });
+  await expect(acceptChatRequest(gql as never,
+    { typeId: "1", requesterId: "not-an-id", requesterName: "x", description: "", created: 1 }))
+    .rejects.toThrow(/unsafe id/);
+});
+
+test("a failure listing requests never blocks answering visible threads", async () => {
+  const gql = async () => { throw new Error("sleeper down"); };
+  expect(await acceptLeagueChatRequests(gql as never)).toEqual([]);
+});

@@ -28,10 +28,11 @@
 // all, which is the real guarantee.
 
 import { Database } from "bun:sqlite";
+import { config } from "../config.ts";
 import { logEvent } from "../log.ts";
 import { freezeState } from "../killswitch.ts";
 import { runAgent } from "../agent/runner.ts";
-import { listDms, threadMessages, sendDm, type Gql, type DmMessage } from "./api.ts";
+import { listDms, threadMessages, sendDm, pendingChatRequests, acceptChatRequest, type Gql, type DmMessage, type ChatRequest } from "./api.ts";
 import { tradeBriefFor, briefText } from "./trade-propose.ts";
 import { snapshot } from "../analysis/trade-wire.ts";
 
@@ -140,6 +141,10 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
 
   if (freezeState().frozen) return sent;
 
+  // Take pending chat requests first, or the conversation they belong to is
+  // invisible and we cannot answer it at all.
+  await acceptLeagueChatRequests(gql);
+
   for (const thread of await listDms(gql, 25)) {
     if (!thread.unread) continue;
     const msgs = await threadMessages(gql, thread.dmId);
@@ -184,6 +189,50 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
     sent.push({ dmId: thread.dmId, text });
   }
   return sent;
+}
+
+/** Accept pending chat requests, but ONLY from people we actually play against.
+ *
+ *  A DM from a non-friend is a request, not a thread, and until it is accepted
+ *  my_dms cannot see it. That is how a real trade explanation went undelivered:
+ *  the trade itself was visible through the transactions API and correctly
+ *  rejected, but the thread to explain it in did not exist yet.
+ *
+ *  The league-membership guard matters. Auto-accepting anything would let any
+ *  Sleeper user open a channel straight to a bot that answers, which is a
+ *  standing invitation to be probed by strangers. Rivals we already share a
+ *  league with can message us in league chat anyway, so this grants nothing new. */
+export async function acceptLeagueChatRequests(gql: Gql): Promise<ChatRequest[]> {
+  let requests: ChatRequest[] = [];
+  try {
+    requests = await pendingChatRequests(gql);
+  } catch {
+    return []; // never let this block answering the threads we can already see
+  }
+  if (!requests.length) return [];
+
+  const leagueMates = await leagueMemberIds();
+  const accepted: ChatRequest[] = [];
+  for (const r of requests) {
+    if (!leagueMates.has(r.requesterId)) {
+      logEvent("coach", "dm-request-ignored", `Ignored a chat request from ${r.requesterName}, who is not in our league`, { requesterId: r.requesterId });
+      continue;
+    }
+    if (await acceptChatRequest(gql, r).catch(() => false)) {
+      accepted.push(r);
+      logEvent("coach", "dm-request-accepted", `Accepted a chat request from ${r.requesterName}`, { requesterId: r.requesterId });
+    }
+  }
+  return accepted;
+}
+
+/** Sleeper user ids of everyone in our league. */
+async function leagueMemberIds(): Promise<Set<string>> {
+  const res = await fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/users`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  const users = (await res.json()) as { user_id: string }[];
+  return new Set(users.map((u) => String(u.user_id)));
 }
 
 /** Phrases that only appear if an injection worked. Cheap last line of defence:

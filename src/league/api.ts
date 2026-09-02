@@ -322,3 +322,49 @@ export async function updateStarters(
   const r = (unwrap(body, "roster_update_starters") ?? {}) as { starters?: string[] };
   return r.starters ?? [];
 }
+
+// ---------------------------------------------------------------------------
+// Chat requests
+// ---------------------------------------------------------------------------
+//
+// A DM from someone who is not a Sleeper friend arrives as a PENDING REQUEST,
+// not as a thread. Until it is accepted the conversation is invisible to
+// my_dms, so the coach cannot see it, cannot reply in it, and cannot even find
+// it to explain a trade decision. That happened on 2026-09-02: cookieeater45
+// proposed a trade and messaged about it, the trade was correctly rejected from
+// the transactions API, and the explanation never went out because the thread
+// did not exist yet as far as the API was concerned.
+//
+// The type string is "dm_single" and it is not guessable; "dm", "chat",
+// "friend" and "league_dm" all return an empty list quite happily. It was found
+// by hooking XMLHttpRequest in the page and reading the query the Sleeper web
+// app sends for itself.
+
+export interface ChatRequest {
+  typeId: string;
+  requesterId: string;
+  requesterName: string;
+  description: string;
+  created: number;
+}
+
+export async function pendingChatRequests(gql: Gql): Promise<ChatRequest[]> {
+  const body = await gql(
+    `{inbound_requests(request_type:"dm_single"){type_id requester_id requester_display_name type_description created}}`,
+  );
+  const raw = (unwrap(body, "inbound_requests") ?? []) as Record<string, unknown>[];
+  return raw.map((r) => ({
+    typeId: String(r.type_id ?? ""),
+    requesterId: String(r.requester_id ?? ""),
+    requesterName: String(r.requester_display_name ?? ""),
+    description: String(r.type_description ?? ""),
+    created: Number(r.created ?? 0),
+  })).filter((r) => r.typeId && r.requesterId);
+}
+
+export async function acceptChatRequest(gql: Gql, req: ChatRequest): Promise<boolean> {
+  const body = await gql(
+    `mutation{accept_request(request_type:"dm_single",type_id:"${safeId(req.typeId)}",requester_id:"${safeId(req.requesterId)}")}`,
+  );
+  return unwrap(body, "accept_request") === true;
+}
