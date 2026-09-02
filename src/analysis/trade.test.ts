@@ -305,5 +305,57 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
     `${ev.verdict} theirGain ${ev.theirGain}`);
 }
 
+// --- the margin is the value at RISK, not raw projection -------------------
+// cookieeater45 offered Andrews for Washington, bench for bench. Washington is
+// worth 0 to our lineup, yet the margin was scaled off his 212 raw points and
+// demanded 17. A projection error on a player who never starts cannot move our
+// score, so it cannot be the reason to refuse.
+{
+  const { requiredEdge, depthInsurance, evaluateTradeTwoSided, DEFAULT_FAIRNESS } = await import("./trade-fair.ts");
+  const P = (name: string, position: string, points: number, bye?: number) => ({ name, position, points, bye });
+  const ours = [
+    P("QB1","QB",310), P("QB2","QB",300), P("RB1","RB",291), P("RB2","RB",255), P("RB3","RB",244), P("RB4","RB",208),
+    P("WR1","WR",262), P("WR2","WR",229), P("WR3","WR",222), P("WR4bench","WR",212,7), P("WR5","WR",198),
+    P("TE1","TE",196,6), P("K1","K",44), P("DEF1","DEF",0),
+  ];
+  // Their receivers are strong so our bench WR does not crack their lineup:
+  // this mirrors the real Andrews offer, where their gain was negative.
+  // A FULL roster, or an empty FLEX makes any bench player look like a 46-point
+  // upgrade for them and the rival-gain ceiling fires. That first fixture was
+  // ten men; the engine was right to reject it.
+  const theirs = [
+    P("tQB","QB",280), P("tRB1","RB",240), P("tRB2","RB",230), P("tRB3","RB",225), P("tRB4","RB",190),
+    P("tWR1","WR",250), P("tWR2","WR",240), P("tWR3","WR",235), P("tWR4","WR",228), P("tWR5","WR",150),
+    P("tTE1","TE",185), P("tTE2","TE",162,13), P("tK","K",40), P("tDEF","DEF",0),
+  ];
+  const benchSwap = { receive: [P("tTE2","TE",162,13)], give: [P("WR4bench","WR",212,7)] };
+  const starterSwap = { receive: [P("tWR1","WR",229)], give: [P("WR1","WR",262)] };
+
+  const benchNeed = requiredEdge(benchSwap, DEFAULT_FAIRNESS, ours);
+  const starterNeed = requiredEdge(starterSwap, DEFAULT_FAIRNESS, ours);
+  t("giving up a bench player needs only the flat floor", benchNeed === DEFAULT_FAIRNESS.flatMarginPts, `${benchNeed}`);
+  t("giving up a starter still needs a real margin", starterNeed > benchNeed * 3, `${starterNeed} vs ${benchNeed}`);
+
+  // Depth: one TE is a single point of failure; a second one is insurance.
+  const teOnly = { ...DEFAULT_FAIRNESS, depthPositions: ["TE"] };
+  const noBackup = depthInsurance(ours, teOnly);
+  const withBackup = depthInsurance([...ours, P("TE2","TE",162)], teOnly);
+  t("a lone TE carries no insurance value", noBackup === 0, `${noBackup}`);
+  // 162 x 0.12 x 0.6 = 11.7 season points: real, but well under a starter upgrade.
+  t("a second TE is worth a modest season-scale amount", withBackup > 5 && withBackup < 20, `${withBackup}`);
+  t("a third TE adds nothing more", depthInsurance([...ours, P("TE2","TE",162), P("TE3","TE",150)], teOnly) === withBackup);
+  t("QB2 is insurance too, and it is counted on its own line",
+    depthInsurance(ours, DEFAULT_FAIRNESS) > 0 && depthInsurance(ours, { ...DEFAULT_FAIRNESS, depthPositions: ["QB"] }) === depthInsurance(ours, DEFAULT_FAIRNESS));
+
+  // Put together: the bench-for-bench swap that fixes a bye hole AND adds cover
+  // is now accepted, and a starter-for-downgrade is still refused.
+  const cfg = { ...DEFAULT_FAIRNESS, upcomingWeeks: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15], headToHeadRemaining: 2, remainingWeeks: 15 };
+  const good = evaluateTradeTwoSided(benchSwap, ours, theirs, cfg);
+  t("a free bye fix plus insurance is accepted", good.verdict === "accept", `${good.verdict} our ${good.ourGain} need ${good.requiredEdge}`);
+  t("its reasons mention the injury cover", good.reasons.some((r) => /injury cover/.test(r)), good.reasons.join(" | ").slice(0, 200));
+  const bad = evaluateTradeTwoSided(starterSwap, ours, theirs, cfg);
+  t("a starter for a downgrade is still refused", bad.verdict === "reject", `${bad.verdict} our ${bad.ourGain}`);
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

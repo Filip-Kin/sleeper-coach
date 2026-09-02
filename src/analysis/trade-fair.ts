@@ -79,12 +79,33 @@ export interface FairnessConfig extends TradeConfig {
   // A rival contending for the same playoff place costs more than the raw
   // schedule says, because their seeding is our seeding. 1 = no extra weight.
   rivalThreatMultiplier: number;
-  // The edge must beat projection NOISE, not merely be positive. Required edge is
-  // max(flatMarginPts, valueMoved * errorFraction): a +6 edge on a blockbuster is
-  // inside the error bars and is a coin flip with transaction risk attached,
-  // while the same +6 on two fringe players is real.
+  // The edge must beat projection NOISE, not merely be positive. Required edge
+  // is max(flatMarginPts, stake * errorFraction), where STAKE is what our lineup
+  // actually loses without the players we give up, NOT their raw projections.
+  //
+  // This was wrong twice. First it summed every player's raw points, so a swap
+  // of two 230-point receivers demanded a 37-point edge. Then it took the
+  // biggest single raw projection, which still demanded 17 points on a
+  // bench-for-bench swap where the player we gave up was worth ZERO to our
+  // lineup, and cookieeater45 correctly called that out in a DM. A projection
+  // error on a player who never starts cannot move our score, so it cannot be
+  // the reason to refuse. The stake is the marginal lineup value at risk.
   flatMarginPts: number;
   errorFraction: number;
+  // Insurance value of a backup at a single-point-of-failure position. A roster
+  // with exactly one tight end starts NOBODY if he is hurt, all season, and the
+  // engine priced that at zero. cookieeater45: "you sell short the upside these
+  // players have, and that injuries happen". He was right. The value of the best
+  // non-starting player at these positions is credited at injuryRate, which is
+  // roughly the share of games an NFL skill player misses. Small on purpose: it
+  // breaks ties and prices fragility, it does not justify hoarding.
+  depthPositions: string[];
+  injuryRate: number;
+  // A missing starter is not replaced by NOBODY, he is replaced by a waiver
+  // streamer. Only the part of a backup above that floor is insurance. 0.4
+  // means a streamer recovers about 40% of a decent backup's value, so a
+  // 162-point TE2 is worth 162 x 0.12 x 0.6 = 11.7 season points of cover.
+  replacementFraction: number;
   // Every trade is irreversible and priced on noisy projections, so volume
   // multiplies model error rather than averaging it out.
   maxTradesPerWeek: number;
@@ -115,8 +136,16 @@ export const DEFAULT_FAIRNESS: FairnessConfig = {
   remainingWeeks: 15,
   headToHeadRemaining: 2,
   rivalThreatMultiplier: 1,
-  flatMarginPts: 12, // about 0.7 pts/week of real edge before it is worth the churn
-  errorFraction: 0.08, // 8% of the value changing hands
+  // Recalibrated with the stake change. 3 flat: a bench-for-bench swap risks
+  // nothing, so it needs to clear only rounding and the bother of the move.
+  // 0.25 of the marginal value we give up: trading away a 60-point starter
+  // demands a 15-point edge, which is where the old 8%-of-raw landed for
+  // starters, so decisions on real starters are unchanged.
+  flatMarginPts: 3,
+  errorFraction: 0.25,
+  depthPositions: ["QB", "TE"],
+  injuryRate: 0.12,
+  replacementFraction: 0.4,
   maxTradesPerWeek: 2,
   minOwnGainPts: 0,
   rosterSlotCostPts: 5,
@@ -144,9 +173,35 @@ export function opponentWeight(cfg: FairnessConfig): number {
 // receivers moves 460 gross and demanded a 37-point edge, which blocks every
 // sensible upgrade. What we are actually uncertain about is the NET, and the net
 // uncertainty tracks the size of the largest piece, not the total changing hands.
-export function requiredEdge(offer: TradeOffer, cfg: FairnessConfig): number {
-  const biggest = [...offer.receive, ...offer.give].reduce((m, p) => Math.max(m, Math.abs(p.points)), 0);
-  return Math.max(cfg.flatMarginPts, biggest * cfg.errorFraction);
+export function requiredEdge(offer: TradeOffer, cfg: FairnessConfig, ourRoster?: TradePlayer[]): number {
+  // What we put at risk is what our lineup loses without the players we give.
+  // Without a roster (unit tests of the formula itself) fall back to raw points.
+  const stake = ourRoster
+    ? offer.give.reduce((m, p) => Math.max(m, marginalLineupValue(p.name, ourRoster)), 0)
+    : [...offer.receive, ...offer.give].reduce((m, p) => Math.max(m, Math.abs(p.points)), 0);
+  return Math.max(cfg.flatMarginPts, stake * cfg.errorFraction);
+}
+
+/** SEASON-scale insurance value of the backups at single-point-of-failure
+ *  positions, so it adds directly to the bye-aware lineup total, which averages
+ *  season-total lineups across weeks and is therefore also season-scale. (I
+ *  first wrote this per week and added it to a season number; the test caught
+ *  the 17x mismatch.) Only the BEST non-starter at each position counts: a
+ *  second backup is worth almost nothing, so this cannot reward hoarding. */
+export function depthInsurance(
+  roster: TradePlayer[], cfg: FairnessConfig = DEFAULT_FAIRNESS, slots: readonly string[] = STARTING_SLOTS,
+): number {
+  const starters = new Set(
+    bestLineup(roster, slots).starters.map((s) => s.player?.name.toLowerCase()).filter(Boolean),
+  );
+  let perWeek = 0;
+  for (const pos of cfg.depthPositions) {
+    const backup = roster
+      .filter((p) => p.position === pos && !starters.has(p.name.toLowerCase()))
+      .sort((a, b) => b.points - a.points)[0];
+    if (backup) perWeek += backup.points * cfg.injuryRate * (1 - cfg.replacementFraction);
+  }
+  return Math.round(perWeek * 10) / 10;
 }
 
 // How many of our players sit on each bye week.
@@ -254,7 +309,18 @@ export function evaluateTradeTwoSided(
   const theirGain = weeks.length
     ? byeAwareGain(theirRoster, { receive: offer.give, give: offer.receive }, weeks)
     : Math.round((theirAfter - theirBefore) * 10) / 10;
-  const ourGain = weeks.length ? byeAwareGain(ourRoster, offer, weeks) : ours.lineupDelta;
+  const ourGainLineup = weeks.length ? byeAwareGain(ourRoster, offer, weeks) : ours.lineupDelta;
+  // Depth and the bye-aware lineup are both season-scale (the bye-aware total
+  // averages season-total lineups across weeks). Only applied on the bye-aware
+  // path, which is the live path; the legacy season-total path stays as it was.
+  const afterOurs = [
+    ...ourRoster.filter((p) => !offer.give.some((g) => g.name.toLowerCase() === p.name.toLowerCase())),
+    ...offer.receive,
+  ];
+  const depthDelta = weeks.length
+    ? Math.round((depthInsurance(afterOurs, cfg) - depthInsurance(ourRoster, cfg)) * 10) / 10
+    : 0;
+  const ourGain = Math.round((ourGainLineup + depthDelta) * 10) / 10;
   const edge = Math.round((ourGain - theirGain) * 10) / 10;
 
   const w = opponentWeight(cfg);
@@ -274,7 +340,7 @@ export function evaluateTradeTwoSided(
   // which is the real requirement, rather than by pretending their loss is worth
   // nothing.
   const netValue = Math.round((ourGain - theirGain * w - slotCost) * 10) / 10;
-  const need = Math.round(requiredEdge(offer, cfg) * 10) / 10;
+  const need = Math.round(requiredEdge(offer, cfg, ourRoster) * 10) / 10;
 
   const fairnessBlocks: string[] = [];
   // A ceiling on their gain that dilution cannot argue away. Head-to-head
@@ -312,7 +378,8 @@ export function evaluateTradeTwoSided(
       ? [
           `valued across weeks ${weeks[0]}-${weeks[weeks.length - 1]} with bye players removed, ` +
           `so a week where a position has nobody eligible costs what it really costs`,
-          `our lineup ${ourGain >= 0 ? "+" : ""}${ourGain} per week averaged over that run`,
+          `our lineup ${ourGainLineup >= 0 ? "+" : ""}${ourGainLineup} per week averaged over that run` +
+            (depthDelta ? `, ${depthDelta >= 0 ? "+" : ""}${depthDelta} for injury cover at ${cfg.depthPositions.join("/")}` : ""),
         ]
       : [`starting-lineup projection ${ours.before.toFixed(1)} -> ${ours.after.toFixed(1)} (${ourGain >= 0 ? "+" : ""}${ourGain})`]),
     `their lineup ${theirGain >= 0 ? "+" : ""}${theirGain}` +

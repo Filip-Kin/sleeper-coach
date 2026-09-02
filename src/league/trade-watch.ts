@@ -90,7 +90,7 @@ export async function handlePendingTrades(
     };
 
     logEvent("coach", "trade-offer", `Trade ${t.transactionId} from roster ${theirRosterId}: ${ev.verdict}`, {
-      transaction_id: t.transactionId, verdict: ev.verdict, ourGain: ev.ourGain, theirGain: ev.theirGain,
+      transaction_id: t.transactionId, theirRosterId, verdict: ev.verdict, ourGain: ev.ourGain, theirGain: ev.theirGain,
       netValue: ev.netValue, requiredEdge: ev.requiredEdge, sides, reasons: ev.reasons,
     });
 

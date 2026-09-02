@@ -31,7 +31,7 @@
 
 import { Database } from "bun:sqlite";
 import { config } from "../config.ts";
-import { logEvent } from "../log.ts";
+import { logEvent, recentEvents } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { browserGql, proposeTrade, outstandingOffers, listDms, sendDm, type Gql } from "./api.ts";
 import { snapshot, scheduleContext } from "../analysis/trade-wire.ts";
@@ -209,6 +209,11 @@ export interface TradeBrief {
   thin: string[];
   /** If we already have a candidate for THIS manager, what we would ask for. */
   askFor: { name: string; position: string }[];
+  /** The most recent offer from THIS manager and how it actually graded, so the
+   *  DM argues from the real numbers instead of a script. The bot once told a
+   *  rival a swap "moves my Sunday score by nothing" while its own engine had it
+   *  at +7.2, and lost the argument to someone reading it more carefully. */
+  lastOffer: { give: string[]; get: string[]; ourGain: number; theirGain: number; verdict: string; why: string } | null;
   /** Specific swaps against THIS manager that our own rules already clear.
    *  These are the deals the coach may name in a negotiation: each one has
    *  been through the same evaluation that decides a real offer, so agreeing
@@ -242,6 +247,19 @@ export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = bro
 
   let askFor: { name: string; position: string }[] = [];
   let deals: TradeBrief["deals"] = [];
+  let lastOffer: TradeBrief["lastOffer"] = null;
+  if (theirRosterId !== null) {
+    const ev = recentEvents(400).reverse().find((e) =>
+      e.type === "trade-offer" && (e.detail as { theirRosterId?: number } | undefined)?.theirRosterId === theirRosterId);
+    const d = ev?.detail as { sides?: { give: string[]; receive: string[] }; ourGain?: number; theirGain?: number; verdict?: string; reasons?: string[] } | undefined;
+    if (d?.sides) {
+      lastOffer = {
+        give: d.sides.give, get: d.sides.receive,
+        ourGain: d.ourGain ?? 0, theirGain: d.theirGain ?? 0, verdict: d.verdict ?? "reject",
+        why: (d.reasons ?? []).find((r) => /net of schedule|below the floor|ceiling/.test(r)) ?? (d.reasons ?? [])[0] ?? "",
+      };
+    }
+  }
   if (theirRosterId !== null) {
     const theirRoster = snap.rosterOf.get(theirRosterId) ?? [];
     if (theirRoster.length) {
@@ -259,7 +277,7 @@ export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = bro
       void best;
     }
   }
-  return { surplus, thin, askFor, deals };
+  return { surplus, thin, askFor, deals, lastOffer };
 }
 
 /** Render the brief for the prompt. Explicitly bounded: the model is told these
@@ -274,6 +292,15 @@ export function briefText(b: TradeBrief): string {
       ? `From this manager I am most interested in: ${list(b.askFor)}.`
       : `I have no specific target on this manager roster right now.`,
   ];
+  if (b.lastOffer) {
+    const lo = b.lastOffer;
+    lines.push(
+      `Their most recent offer to me: I give ${lo.give.join(" + ") || "nothing"}, I get ${lo.get.join(" + ") || "nothing"}. ` +
+      `My honest numbers on it: ${lo.ourGain >= 0 ? "+" : ""}${lo.ourGain} per week to my lineup, ${lo.theirGain >= 0 ? "+" : ""}${lo.theirGain} to theirs, verdict ${lo.verdict.toUpperCase()}` +
+      (lo.why ? ` (${lo.why})` : "") + `.`,
+      `If they ask why, argue from THESE numbers. If my gain was positive, say so and say it fell short of the margin; never claim a trade did nothing when the number says otherwise.`,
+    );
+  }
   if (b.deals.length) {
     lines.push(
       `Swaps with THIS manager that I would accept today, in order of preference:`,

@@ -69,8 +69,8 @@ t("  and it is our own floor that catches it", fleece.fairnessBlocks.some((b) =>
 
 // #region noise, not relative value, is what usually decides
 t("required edge scales with the biggest piece, not the gross sum",
-  requiredEdge({ receive: [P("a", "WR", 300)], give: [P("b", "WR", 300)] }, DEFAULT_FAIRNESS) <
-  600 * DEFAULT_FAIRNESS.errorFraction);
+  requiredEdge({ receive: [P("a", "WR", 300)], give: [P("b", "WR", 300)] }, DEFAULT_FAIRNESS) <=
+  300 * DEFAULT_FAIRNESS.errorFraction);
 t("a tiny edge on big pieces does not clear the noise margin",
   ev([P("Rival WR1", "WR", 240, { bye: 5 })], [P("Nico Collins", "WR", 262, { bye: 8 })]).verdict === "reject");
 // #endregion
