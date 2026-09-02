@@ -107,3 +107,19 @@ export function applyNews<T extends { name: string; points: number }>(
   });
   return { adjusted, changed };
 }
+
+/** Age of the dossier in days, or null if it does not exist. It is hand written
+ *  and nothing refreshes it, so the trade path says so out loud when it is old:
+ *  a four-day-old note about a player facing suspension is not the same thing as
+ *  knowing he is about to miss the season. */
+export async function newsAgeDays(): Promise<number | null> {
+  const f = Bun.file(NEWS_PATH);
+  if (!(await f.exists())) return null;
+  try {
+    const j = (await f.json()) as { updatedAt?: string };
+    const at = j.updatedAt ? Date.parse(j.updatedAt) : f.lastModified;
+    return Math.round(((Date.now() - at) / 86_400_000) * 10) / 10;
+  } catch {
+    return null;
+  }
+}

@@ -357,5 +357,30 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
   t("a starter for a downgrade is still refused", bad.verdict === "reject", `${bad.verdict} our ${bad.ourGain}`);
 }
 
+// --- the depth chart contradicts the projection ------------------------------
+// The Jacobs shape: projects like a starter, listed 4th on his own team. The
+// injury flag happened to catch him; this catches the ones it would not.
+{
+  const { refusedForDepth, evaluateTradeTwoSided, proposeTrades, DEFAULT_FAIRNESS, DEPTH_REFUSE_AT } = await import("./trade-fair.ts");
+  const P = (name: string, position: string, points: number, depth?: number) => ({ name, position, points, depthChartOrder: depth });
+  t("a skill player buried on the depth chart is refused", refusedForDepth(P("Jacobs","RB",250,4)) !== null);
+  t("the refusal names the depth chart, so a rival hears the real reason",
+    /depth chart/.test(refusedForDepth(P("Jacobs","RB",250,4)) ?? ""));
+  t("a starter is not refused", refusedForDepth(P("CMC","RB",291,1)) === null);
+  t("a clear number two is not refused either", refusedForDepth(P("RB2","RB",200,2)) === null);
+  t("the line is at " + DEPTH_REFUSE_AT, refusedForDepth(P("x","WR",200,DEPTH_REFUSE_AT)) !== null && refusedForDepth(P("x","WR",200,DEPTH_REFUSE_AT-1)) === null);
+  t("a missing depth value never blocks", refusedForDepth(P("unknown","WR",200)) === null);
+  t("kickers and defences are ignored", refusedForDepth(P("K","K",44,3)) === null && refusedForDepth(P("SEA","DEF",0,3)) === null);
+
+  const ours = [P("QB1","QB",310,1), P("RB1","RB",291,1), P("RB2","RB",255,1), P("WR1","WR",262,1), P("WR2","WR",229,1),
+    P("WR3","WR",222,2), P("TE1","TE",196,1), P("K1","K",44), P("DEF1","DEF",0), P("WRbench","WR",150,3)];
+  const theirs = [P("tQB","QB",280,1), P("tRB1","RB",240,1), P("tRB2","RB",230,2), P("tWR1","WR",250,1), P("tWR2","WR",240,1),
+    P("tTE","TE",185,1), P("tK","K",40), P("tDEF","DEF",0), P("SCAM","RB",300,4)];
+  const ev = evaluateTradeTwoSided({ receive: [P("SCAM","RB",300,4)], give: [P("WR3","WR",222,2)] }, ours, theirs, DEFAULT_FAIRNESS);
+  t("a tempting projection buried on the depth chart is refused in a real offer", ev.verdict === "reject" && ev.fairnessBlocks.some((b) => /depth chart/.test(b)), ev.verdict);
+  const props = proposeTrades(ours, [{ managerId: "1", teamName: "t", roster: theirs }], DEFAULT_FAIRNESS, 20, 2);
+  t("and the proposer never asks for him either", props.every((p) => !p.offer.receive.some((r) => r.name === "SCAM")));
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

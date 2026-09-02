@@ -35,7 +35,7 @@ export async function snapshot(): Promise<LeagueSnapshot> {
   const news = await loadNews();
   const board = rankByVor(applyNews(raw, news.byKey).adjusted, league, raw);
   const byName = new Map(board.map((b) => [b.name, b]));
-  const dump = (await loadPlayers()) as Record<string, { full_name?: string; position?: string; injury_status?: string | null; team?: string | null }>;
+  const dump = (await loadPlayers()) as Record<string, { full_name?: string; position?: string; injury_status?: string | null; team?: string | null; depth_chart_order?: number | null }>;
 
   const playerById = new Map<string, TradePlayer>();
   for (const [id, p] of Object.entries(dump)) {
@@ -48,6 +48,7 @@ export async function snapshot(): Promise<LeagueSnapshot> {
       points: b?.points ?? 0,
       injuryStatus: p.injury_status ?? undefined,
       bye: byeWeek(p.team ?? b?.team ?? "") ?? undefined,
+      depthChartOrder: typeof p.depth_chart_order === "number" ? p.depth_chart_order : undefined,
     });
   }
 

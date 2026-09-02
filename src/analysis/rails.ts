@@ -21,6 +21,12 @@ export interface RailPlayer {
   // costs about 10.7 points in that week and is the worst single-week hole in the
   // league. A move that relieves it is worth more than its raw points suggest.
   bye?: number;
+  // NFL depth chart slot at his position (1 = starter), from the Sleeper dump.
+  // The one field that catches a projection which has not caught up: Josh
+  // Jacobs was offered to us projecting like an RB1 while listed 4th on Green
+  // Bay's depth chart with an unresolved legal case. Optional because K/DEF and
+  // the unit tests do not carry it, and absence must never block a trade.
+  depthChartOrder?: number;
 }
 
 export interface RailConfig {

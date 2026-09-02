@@ -47,6 +47,29 @@ function norm(n: string): string {
 // treating it as disqualifying would refuse half the league.
 const REFUSE_STATUSES = new Set(["out", "ir", "doubtful", "pup", "sus", "suspended", "na"]);
 
+/** A projection that the depth chart contradicts is the classic scam shape.
+ *
+ *  Projections are the engine's only eyes, and they lag. A rival who knows a
+ *  player is about to lose his job, serve a suspension, or sit for a legal case
+ *  can offer him while his season projection still says "starter" and the model
+ *  will pay starter value. cookieeater45 spelled the exploit out: "anyone who is
+ *  forecasted to score more points could be traded for a sleeper and it would be
+ *  a smash accept". Owen tried it the same day with Josh Jacobs: projecting like
+ *  an RB1, listed FOURTH on Green Bay's depth chart. The injury flag happened to
+ *  catch him; this catches the ones it would not.
+ *
+ *  Skill positions only: K and DEF have no meaningful depth chart, and a missing
+ *  value never blocks anything. */
+export const DEPTH_REFUSE_AT = 3;
+export function refusedForDepth(p: TradePlayer): string | null {
+  if (!["QB", "RB", "WR", "TE"].includes(p.position)) return null;
+  if (p.depthChartOrder === undefined || p.depthChartOrder < DEPTH_REFUSE_AT) return null;
+  return `${p.name} is listed ${ordinal(p.depthChartOrder)} on his team's depth chart at ${p.position}; his projection has not caught up and I am not buying it`;
+}
+function ordinal(n: number): string {
+  return `${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"}`;
+}
+
 export function refusedForInjury(p: TradePlayer): string | null {
   const s = (p.injuryStatus ?? "").trim().toLowerCase();
   if (!s) return null;
@@ -354,7 +377,7 @@ export function evaluateTradeTwoSided(
       `it hands roster ${theirGain} points, past the ${cfg.maxTheirGainPts} ceiling on how strong we will make somebody else`);
   }
   for (const p of offer.receive) {
-    const why = refusedForInjury(p);
+    const why = refusedForInjury(p) ?? refusedForDepth(p);
     if (why) fairnessBlocks.push(why);
   }
   // Never accept a trade that leaves a mandatory slot unfillable. Points are
@@ -555,7 +578,7 @@ export function proposeTrades(
 
   for (const rival of rivals) {
     const gettable = rival.roster
-      .filter((p) => !refusedForInjury(p))
+      .filter((p) => !refusedForInjury(p) && !refusedForDepth(p))
       .sort((a, b) => b.points - a.points)
       .slice(0, PACKAGE_POOL);
     const receiveSets = combinations(gettable, maxPackage);

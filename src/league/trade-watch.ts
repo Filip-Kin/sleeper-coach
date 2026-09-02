@@ -21,6 +21,20 @@ import {
 } from "./api.ts";
 import { snapshot, offerFromTransaction, evaluateLiveOffer } from "../analysis/trade-wire.ts";
 import type { TwoSidedEvaluation } from "../analysis/trade-fair.ts";
+import { newsAgeDays } from "../data/news.ts";
+
+/** Warn once a day when the news dossier is old enough to be lying to us. */
+export const NEWS_STALE_DAYS = 5;
+let lastStaleWarn = 0;
+async function warnIfNewsStale(): Promise<void> {
+  if (Date.now() - lastStaleWarn < 86_400_000) return;
+  const age = await newsAgeDays();
+  if (age !== null && age <= NEWS_STALE_DAYS) return;
+  lastStaleWarn = Date.now();
+  logEvent("coach", "news-stale", age === null
+    ? "No news dossier exists; trades are being valued on raw projections and injury flags only"
+    : `News dossier is ${age} days old; a trade was just evaluated against it`, { ageDays: age });
+}
 
 export interface TradeSides { receive: string[]; give: string[] }
 
@@ -81,6 +95,7 @@ export async function handlePendingTrades(
     if (alreadyHandled(t.transactionId)) continue;
 
     const tx = { adds: t.adds, drops: t.drops, roster_ids: t.rosterIds };
+    await warnIfNewsStale();
     const { evaluation: ev, theirRosterId } = await evaluateLiveOffer(tx);
     const snap = await snapshot();
     const { offer } = offerFromTransaction(tx, snap);
