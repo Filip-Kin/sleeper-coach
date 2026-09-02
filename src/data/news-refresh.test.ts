@@ -61,13 +61,33 @@ test("garbage from the agent yields an empty layer, not a crash", () => {
   expect(validateWebEntries({ players: "nope" }, new Set())).toEqual({});
 });
 
-test("the web layer wins over the dump for the same player, because it knows why", () => {
+test("the web can make a player worse, and supplies the reason", () => {
   const m = merge(
     { "Josh Jacobs": { status: "risk", note: "depth chart", multiplier: 0.7, source: "dump" } },
     { "Josh Jacobs": { status: "out", note: "suspended", source: "web" } },
   );
   expect(m["Josh Jacobs"]?.status).toBe("out");
-  expect(m["Josh Jacobs"]?.source).toBe("web");
+  expect(m["Josh Jacobs"]?.note).toBe("suspended");
+});
+
+test("the web can NEVER soften a hard flag from Sleeper", () => {
+  // The first real run un-outed nine players this way. Sleeper says NA, an
+  // article says risk: the player stays out, and the article becomes the why.
+  const m = merge(
+    { "Josh Jacobs": { status: "out", note: "Sleeper lists him NA.", source: "dump" } },
+    { "Josh Jacobs": { status: "risk", note: "Suspension review still open, per 1 Sep report.", multiplier: 0.6, source: "web" } },
+  );
+  expect(m["Josh Jacobs"]?.status).toBe("out");
+  expect(m["Josh Jacobs"]?.note).toContain("Sleeper lists him NA");
+  expect(m["Josh Jacobs"]?.note).toContain("Suspension review");
+});
+
+test("the lower multiplier wins when both sides give one", () => {
+  const m = merge(
+    { "A": { status: "risk", note: "d", multiplier: 0.7, source: "dump" } },
+    { "A": { status: "risk", note: "w", multiplier: 0.5, source: "web" } },
+  );
+  expect(m["A"]?.multiplier).toBe(0.5);
 });
 
 test("the free-agent pool excludes retired and teamless players, however well ranked", () => {

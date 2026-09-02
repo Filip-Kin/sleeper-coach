@@ -79,8 +79,30 @@ export function validateWebEntries(raw: unknown, knownNames: Set<string>): Dossi
   return out;
 }
 
+/** Merge rule: the MORE SEVERE status wins, the web supplies the reason.
+ *
+ *  The first version let the web entry replace the dump's outright, and the
+ *  first real run un-outed nine players, Josh Jacobs included: Sleeper had him
+ *  NA, an article the agent read said "risk", and risk won. A model's reading
+ *  of a news story must never soften a hard roster flag. So severity is taken
+ *  as the worse of the two, the multiplier as the lower, and the note is the
+ *  web's explanation with the dump's fact kept alongside it. */
+const SEVERITY: Record<NewsStatus, number> = { out: 3, risk: 2, watch: 1, soft: 0 };
 export function merge(dump: Dossier, web: Dossier): Dossier {
-  return { ...dump, ...web };
+  const out: Dossier = { ...dump };
+  for (const [name, w] of Object.entries(web)) {
+    const d = out[name];
+    if (!d) { out[name] = w; continue; }
+    const status = SEVERITY[w.status] >= SEVERITY[d.status] ? w.status : d.status;
+    const mults = [w.multiplier, d.multiplier].filter((m): m is number => typeof m === "number");
+    out[name] = {
+      status,
+      note: status === d.status && SEVERITY[d.status] > SEVERITY[w.status] ? `${d.note} Web: ${w.note}` : w.note,
+      multiplier: mults.length ? Math.min(...mults) : undefined,
+      source: "web",
+    };
+  }
+  return out;
 }
 
 const RESEARCH_PROMPT = (names: string[], today: string) => `Today is ${today}. You are researching NFL availability for a fantasy football manager.
@@ -143,6 +165,8 @@ export async function refreshNews(opts: { web?: boolean; dry?: boolean } = {}): 
   logEvent("coach", "news-refreshed", `News dossier rebuilt: ${Object.keys(fromDump).length} from Sleeper, ${Object.keys(fromWeb).length} from the web`, {
     dump: Object.keys(fromDump).length, web: Object.keys(fromWeb).length, dry: !!opts.dry,
     out: Object.entries(merged).filter(([, e]) => e.status === "out").map(([n]) => n),
+    // What the web actually said, so a bad merge or a bad read is visible.
+    webEntries: Object.entries(fromWeb).map(([n, e]) => `${n}: ${e.status}${e.multiplier !== undefined ? ` x${e.multiplier}` : ""} - ${e.note.slice(0, 90)}`),
   });
   return { dump: Object.keys(fromDump).length, web: Object.keys(fromWeb).length, total: Object.keys(merged).length, path: NEWS_PATH };
 }
