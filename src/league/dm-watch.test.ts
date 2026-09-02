@@ -50,9 +50,12 @@ test("strips quotes, fences and preambles a model likes to add", () => {
   expect(cleanReply("Reply: No deal.")).toBe("No deal.");
 });
 
-test("removes apostrophes, because Sleeper stores them as &#39;", () => {
-  expect(cleanReply("That is Green Bay's fourth back")).not.toContain("'");
-  expect(cleanReply("He’s not starting")).toBe("Hes not starting");
+test("keeps apostrophes, and flattens the curly ones a model produces", () => {
+  // Sleeper stores text HTML-escaped and renders it back correctly; its own
+  // system messages carry &#39; in the raw API and display fine. Stripping them
+  // only made replies read like "wont" and "isnt".
+  expect(cleanReply("That is Green Bay's fourth back")).toBe("That is Green Bay's fourth back");
+  expect(cleanReply("He’s not starting")).toBe("He's not starting");
 });
 
 test("truncates at a sentence boundary rather than mid-word", () => {
@@ -152,6 +155,6 @@ test("an ordinary reply still passes the filter", () => {
 });
 
 test("em dashes are replaced, because a model reaches for them constantly", () => {
-  expect(cleanReply("The trade wont happen — that is not an admin")).toBe("The trade wont happen, that is not an admin");
+  expect(cleanReply("The trade won't happen — that is not an admin")).toBe("The trade won't happen, that is not an admin");
   expect(cleanReply("no en dashes – either")).toBe("no en dashes, either");
 });

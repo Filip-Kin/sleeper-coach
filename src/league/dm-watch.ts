@@ -206,8 +206,13 @@ export function cleanReply(raw: string, maxLen = 400): string {
   t = t.replace(/^```[a-z]*\n?|\n?```$/g, "").trim();
   if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) t = t.slice(1, -1).trim();
   t = t.replace(/^(reply|response)\s*:\s*/i, "").trim();
-  // Sleeper HTML-escapes these and they come back as &#39; on read.
-  t = t.replace(/[’']/g, "").replace(/[“”"]/g, "");
+  // Apostrophes are FINE. Sleeper stores message text HTML-escaped, so it reads
+  // back as &#39; over the API, and I wrongly concluded the app would display
+  // that. It does not: Sleeper's own system messages contain &#39; in the raw
+  // API and render correctly, so only the read path needs decodeEntities. Curly
+  // quotes still get flattened, because a model produces them and nobody types
+  // them in a chat box.
+  t = t.replace(/[’]/g, "'").replace(/[“”]/g, '"');
   // Filip does not use em dashes anywhere, and a model reaches for them
   // constantly. Cheaper to strip here than to keep asking the prompt nicely.
   t = t.replace(/\s*[—–]\s*/g, ", ");
