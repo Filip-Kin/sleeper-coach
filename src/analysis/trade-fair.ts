@@ -101,6 +101,10 @@ export interface FairnessConfig extends TradeConfig {
   // Credit for this idea goes to the tradesv2 agent, whose version of this module
   // I clobbered by editing it while it worked. Its modelling was better than mine.
   surplusMaxLineupPts: number;
+  /** Remaining week numbers, for bye-aware lineup valuation. Empty = season totals. */
+  upcomingWeeks: number[];
+  /** Hard cap on the other side's gain, regardless of schedule dilution. */
+  maxTheirGainPts: number;
 }
 
 export const DEFAULT_FAIRNESS: FairnessConfig = {
@@ -117,6 +121,15 @@ export const DEFAULT_FAIRNESS: FairnessConfig = {
   minOwnGainPts: 0,
   rosterSlotCostPts: 5,
   surplusMaxLineupPts: 15,
+  // Weeks still to play. When present, lineup value is measured week by week
+  // with bye players removed, which is the only way to see a position dropping
+  // to ZERO eligible players. Absent, the old season-total behaviour is kept.
+  upcomingWeeks: [],
+  // A hard ceiling on how much the other side may gain, however little it is
+  // diluted by the schedule. Filip: "why not right, but of course in moderation,
+  // do not accept a plus 15 to them or something". Even a rival we never play
+  // again can knock us out of the playoffs or beat the teams we need to lose.
+  maxTheirGainPts: 15,
 };
 
 // How much a rival's gain actually costs us. Rises as the season shortens.
@@ -172,6 +185,39 @@ export interface TwoSidedEvaluation extends TradeEvaluation {
 // Score an offer from BOTH sides. `theirRoster` is the counterparty's current
 // roster; the same offer is applied in mirror to them (they receive what we
 // give, and give what we receive).
+/** Lineup value that knows about bye weeks.
+ *
+ *  WHY THE SEASON TOTAL IS NOT ENOUGH. bestLineup() picks the best ten players
+ *  and sums their rest-of-season projections, which quietly assumes everybody is
+ *  available every week. Our roster carried exactly one tight end, so in his bye
+ *  week the TE slot started NOBODY and scored zero, and no season-total model can
+ *  see that: the same 196.5 points are in the sum either way. cookieeater45
+ *  offered Mark Andrews for Parker Washington, worth +9.28 in that week alone,
+ *  and the engine read it as a flat zero.
+ *
+ *  Measuring per week with bye players removed prices the hole directly. For a
+ *  roster with no byes in the window this returns exactly what bestLineup does,
+ *  so it is a strict generalisation rather than a different metric. */
+export function byeAwareLineupTotal(
+  roster: TradePlayer[], weeks: readonly number[], slots: readonly string[] = STARTING_SLOTS,
+): number {
+  if (!weeks.length) return bestLineup(roster, slots).total;
+  let sum = 0;
+  for (const w of weeks) sum += bestLineup(roster.filter((p) => p.bye !== w), slots).total;
+  return Math.round((sum / weeks.length) * 10) / 10;
+}
+
+/** The same swap, valued week by week rather than in season totals. */
+export function byeAwareGain(
+  roster: TradePlayer[], offer: TradeOffer, weeks: readonly number[], slots: readonly string[] = STARTING_SLOTS,
+): number {
+  const goneNames = new Set(offer.give.map((p) => p.name.toLowerCase()));
+  const before = byeAwareLineupTotal(roster, weeks, slots);
+  const after = byeAwareLineupTotal(
+    [...roster.filter((p) => !goneNames.has(p.name.toLowerCase())), ...offer.receive], weeks, slots);
+  return Math.round((after - before) * 10) / 10;
+}
+
 export function evaluateTradeTwoSided(
   offer: TradeOffer,
   ourRoster: TradePlayer[],
@@ -202,8 +248,13 @@ export function evaluateTradeTwoSided(
     ...theirRoster.filter((p) => !theirNames.has(p.name.toLowerCase())),
     ...offer.give,
   ]).total;
-  const theirGain = Math.round((theirAfter - theirBefore) * 10) / 10;
-  const ourGain = ours.lineupDelta;
+  // Bye-aware where we know the remaining weeks, season totals otherwise. Both
+  // sides get the same treatment: their bye structure is as real as ours.
+  const weeks = cfg.upcomingWeeks ?? [];
+  const theirGain = weeks.length
+    ? byeAwareGain(theirRoster, { receive: offer.give, give: offer.receive }, weeks)
+    : Math.round((theirAfter - theirBefore) * 10) / 10;
+  const ourGain = weeks.length ? byeAwareGain(ourRoster, offer, weeks) : ours.lineupDelta;
   const edge = Math.round((ourGain - theirGain) * 10) / 10;
 
   const w = opponentWeight(cfg);
@@ -226,6 +277,16 @@ export function evaluateTradeTwoSided(
   const need = Math.round(requiredEdge(offer, cfg) * 10) / 10;
 
   const fairnessBlocks: string[] = [];
+  // A ceiling on their gain that dilution cannot argue away. Head-to-head
+  // weighting already discounts a rival we rarely play, and correctly drops to
+  // zero for one we never play again, but "we never play them" is not a licence
+  // to hand somebody a monster: they still take games off the teams we need to
+  // lose, and they can meet us in the playoffs where the schedule weight is
+  // irrelevant by construction.
+  if (theirGain > cfg.maxTheirGainPts) {
+    fairnessBlocks.push(
+      `it hands roster ${theirGain} points, past the ${cfg.maxTheirGainPts} ceiling on how strong we will make somebody else`);
+  }
   for (const p of offer.receive) {
     const why = refusedForInjury(p);
     if (why) fairnessBlocks.push(why);
@@ -239,9 +300,23 @@ export function evaluateTradeTwoSided(
   const unfilled = bestLineup(afterRoster).starters.filter((x) => x.player === null).map((x) => x.slot);
   if (unfilled.length) fairnessBlocks.push(`would leave ${unfilled.join(", ")} unfillable`);
 
+  // The one-sided reasons are written in SEASON TOTALS. Once the bye-aware
+  // numbers are in play they contradict the decision (they said "lineup gain 0"
+  // for a trade now worth +7.2), so drop the numeric ones and restate. Stale
+  // reporting next to a live number is how a good decision gets mistrusted, and
+  // how I misread the draft postmortem.
+  const numeric = /lineup gain|starting-lineup projection|reject margin|does not improve our lineup|already deep at/i;
   const reasons = [
-    ...ours.reasons,
-    `their lineup ${theirBefore.toFixed(1)} -> ${theirAfter.toFixed(1)} (${theirGain >= 0 ? "+" : ""}${theirGain})`,
+    ...ours.reasons.filter((r) => !weeks.length || !numeric.test(r)),
+    ...(weeks.length
+      ? [
+          `valued across weeks ${weeks[0]}-${weeks[weeks.length - 1]} with bye players removed, ` +
+          `so a week where a position has nobody eligible costs what it really costs`,
+          `our lineup ${ourGain >= 0 ? "+" : ""}${ourGain} per week averaged over that run`,
+        ]
+      : [`starting-lineup projection ${ours.before.toFixed(1)} -> ${ours.after.toFixed(1)} (${ourGain >= 0 ? "+" : ""}${ourGain})`]),
+    `their lineup ${theirGain >= 0 ? "+" : ""}${theirGain}` +
+      (weeks.length ? " on the same bye-aware basis" : ` (${theirBefore.toFixed(1)} -> ${theirAfter.toFixed(1)})`),
     `net of schedule: ${ourGain} - ${theirGain} x ${w.toFixed(2)} = ${netValue}, need ${need}`,
   ];
 

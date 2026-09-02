@@ -90,13 +90,17 @@ export function offerFromTransaction(
 
 // How many remaining regular-season weeks, and how many of those we play them.
 // Their gain is diluted by exactly this, so getting it wrong changes decisions.
-export async function scheduleContext(theirRosterId: number | null): Promise<{ remainingWeeks: number; headToHeadRemaining: number }> {
+export async function scheduleContext(theirRosterId: number | null): Promise<{ remainingWeeks: number; headToHeadRemaining: number; upcomingWeeks: number[] }> {
   const state = await sleeper.nflState();
   const league = await sleeper.league(config.leagueId);
   const playoffStart = league.settings.playoff_week_start ?? 16;
   const week = Math.max(1, state.week ?? 1);
   const remainingWeeks = Math.max(1, playoffStart - week);
-  if (theirRosterId === null) return { remainingWeeks, headToHeadRemaining: 0 };
+  // The actual week numbers, so lineup value can be measured week by week with
+  // bye players removed. A count alone cannot tell you which weeks have holes.
+  const upcomingWeeks: number[] = [];
+  for (let w = week; w < playoffStart; w++) upcomingWeeks.push(w);
+  if (theirRosterId === null) return { remainingWeeks, headToHeadRemaining: 0, upcomingWeeks };
   // Count real remaining meetings from the published matchups rather than
   // assuming an even schedule: an 8-team league does not always give exactly two.
   let h2h = 0;
@@ -110,7 +114,7 @@ export async function scheduleContext(theirRosterId: number | null): Promise<{ r
       // A week that is not published yet simply does not count.
     }
   }
-  return { remainingWeeks, headToHeadRemaining: h2h };
+  return { remainingWeeks, headToHeadRemaining: h2h, upcomingWeeks };
 }
 
 export async function evaluateLiveOffer(

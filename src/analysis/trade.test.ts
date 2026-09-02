@@ -195,22 +195,26 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
   t("the package cap allows the shapes a human actually offers", PACKAGE_MAX >= 2, `${PACKAGE_MAX}`);
   t("the search pool is bounded so the weekly run stays quick", PACKAGE_POOL <= 12, `${PACKAGE_POOL}`);
 
-  // A 2-for-1 that a one-for-one search cannot see: we are deep at WR and thin
-  // at RB, they are the reverse, so two spare receivers for one back helps both.
+  // A package a one-for-one search cannot see. We are WR-rich with a hole at RB2;
+  // they are RB-rich and WR-poor. Two spare receivers for a back helps us a lot
+  // and them a little, which is exactly the shape a human offers and a
+  // single-player search can never construct.
   const P = (name: string, position: string, points: number) => ({ name, position, points });
   const ours = [
-    P("RB1", "RB", 200), P("RB2", "RB", 60),
-    P("WR1", "WR", 210), P("WR2", "WR", 205), P("WR3", "WR", 200), P("WR4", "WR", 195), P("WR5", "WR", 190),
-    P("TE1", "TE", 150), P("QB1", "QB", 300), P("K1", "K", 120), P("DEF1", "DEF", 110),
+    P("QB1","QB",300), P("RB1","RB",280), P("RBbad","RB",60),
+    P("WRa","WR",250), P("WRb","WR",245), P("WRc","WR",240), P("WRd","WR",235), P("WRe","WR",230),
+    P("TE1","TE",190), P("K1","K",44), P("DEF1","DEF",10),
   ];
   const theirs = [
-    P("tRB1", "RB", 215), P("tRB2", "RB", 210), P("tRB3", "RB", 205),
-    P("tWR1", "WR", 120), P("tWR2", "WR", 100),
-    P("tTE1", "TE", 140), P("tQB1", "QB", 280), P("tK1", "K", 115), P("tDEF1", "DEF", 105),
+    P("tQB","QB",290), P("tRB1","RB",270), P("tRB2","RB",265), P("tRB3","RB",260),
+    P("tWRa","WR",90), P("tWRb","WR",80),
+    P("tTE","TE",185), P("tK","K",42), P("tDEF","DEF",8),
   ];
-  const onlySingles = proposeTrades(ours, [{ managerId: "2", teamName: "them", roster: theirs }], undefined, 20, 1);
-  const withPackages = proposeTrades(ours, [{ managerId: "2", teamName: "them", roster: theirs }], undefined, 20, 3);
-  t("packages find offers a one-for-one search cannot", withPackages.length >= onlySingles.length,
+  const rival = [{ managerId: "2", teamName: "them", roster: theirs }];
+  const onlySingles = proposeTrades(ours, rival, undefined, 20, 1);
+  const withPackages = proposeTrades(ours, rival, undefined, 20, 3);
+  t("packages find offers a one-for-one search cannot",
+    withPackages.length > onlySingles.length,
     `singles ${onlySingles.length}, packages ${withPackages.length}`);
   t("every generated package still helps the other side too",
     withPackages.every((p) => p.theirGain > 0));
@@ -247,6 +251,58 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
     wouldRefuse.map((p) => p.why).join(" | ").slice(0, 160));
   t("every proposal still gains the other side something",
     props.every((p) => p.theirGain > 0));
+}
+
+// --- bye-aware valuation ----------------------------------------------------
+// A season total cannot see a position with nobody eligible in some week. Our
+// roster carried exactly one tight end, so his bye week started NOBODY at TE and
+// scored zero, and the engine read a trade fixing that as a flat +0.
+{
+  const { byeAwareLineupTotal, byeAwareGain, evaluateTradeTwoSided, DEFAULT_FAIRNESS } = await import("./trade-fair.ts");
+  const P = (name: string, position: string, points: number, bye?: number) => ({ name, position, points, bye });
+  const oneTE = [
+    P("QB1","QB",300), P("RB1","RB",290), P("RB2","RB",255), P("RB3","RB",240),
+    P("WR1","WR",262), P("WR2","WR",229), P("WR3","WR",222), P("WR4","WR",212,7),
+    P("TE1","TE",196,6), P("K1","K",44), P("DEF1","DEF",10),
+  ];
+  const weeks = [5,6,7,8];
+
+  t("with no weeks given it matches the season total exactly",
+    byeAwareLineupTotal(oneTE, []) === (await import("./trade.ts")).bestLineup(oneTE).total);
+
+  t("a roster with no byes in the window is valued the same either way",
+    byeAwareLineupTotal(oneTE.map((p) => ({ ...p, bye: undefined })), weeks)
+      === byeAwareLineupTotal(oneTE.map((p) => ({ ...p, bye: undefined })), []));
+
+  const withTE2 = byeAwareGain(oneTE, { receive: [P("TE2","TE",162,13)], give: [P("WR4","WR",212,7)] }, weeks);
+  t("adding a second TE is worth real points when the only TE has a bye",
+    withTE2 > 0, `${withTE2}`);
+
+  // The same swap with no bye conflict anywhere is a wash, since neither player
+  // cracks the lineup: this is what the season-total model always said.
+  const noBye = oneTE.map((p) => ({ ...p, bye: undefined }));
+  const flat = byeAwareGain(noBye, { receive: [P("TE2","TE",162)], give: [P("WR4","WR",212)] }, weeks);
+  t("without a bye hole the same swap stays a wash", Math.abs(flat) < 0.05, `${flat}`);
+}
+
+// --- a ceiling on how strong we make somebody else ---------------------------
+{
+  const { evaluateTradeTwoSided, DEFAULT_FAIRNESS } = await import("./trade-fair.ts");
+  const P = (name: string, position: string, points: number) => ({ name, position, points });
+  const ours = [
+    P("QB1","QB",300), P("RB1","RB",290), P("RB2","RB",255), P("WR1","WR",262),
+    P("WR2","WR",229), P("TE1","TE",196), P("K1","K",44), P("DEF1","DEF",10), P("SPARE","WR",120),
+  ];
+  const theirs = [
+    P("tQB","QB",100), P("tRB1","RB",90), P("tRB2","RB",80), P("tWR1","WR",70),
+    P("tWR2","WR",60), P("tTE","TE",50), P("tK","K",20), P("tDEF","DEF",5), P("GEM","WR",55),
+  ];
+  // Never play them again, so dilution would otherwise wave anything through.
+  const cfg = { ...DEFAULT_FAIRNESS, headToHeadRemaining: 0, maxTheirGainPts: 15 };
+  const ev = evaluateTradeTwoSided({ receive: [P("GEM","WR",55)], give: [P("WR1","WR",262)] }, ours, theirs, cfg);
+  t("a huge gift to a rival is blocked even with no head-to-head left",
+    ev.fairnessBlocks.some((b) => /ceiling/i.test(b)) || ev.verdict === "reject",
+    `${ev.verdict} theirGain ${ev.theirGain}`);
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
