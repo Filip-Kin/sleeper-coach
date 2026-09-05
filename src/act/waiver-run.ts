@@ -21,7 +21,7 @@
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
-import { browserGql, addFreeAgent, submitWaiverClaim } from "../league/api.ts";
+import { browserGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta } from "../league/api.ts";
 import { loadRestOfSeason } from "../analysis/ros-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
 import {
@@ -86,13 +86,23 @@ async function main(): Promise<void> {
   const mine = rosters.find((r) => r.roster_id === rosterId);
   if (!mine || !mine.players?.length) throw new Error(`no roster ${rosterId} in league ${leagueId}`);
 
+  // Reflect trades we have already agreed to but that are still processing, so
+  // we do not, say, claim a tight end off waivers while a traded-for tight end
+  // sits in commish review. Failure here degrades to the current roster, never
+  // blocks the run.
+  const delta = await pendingRosterDelta(browserGql(), week).catch(() => ({ incoming: [], outgoing: [] }));
+  const myPlayerIds = applyRosterDelta(mine.players, delta);
+  if (delta.incoming.length || delta.outgoing.length) {
+    console.log(`  in-flight trade: +${delta.incoming.length} incoming, -${delta.outgoing.length} outgoing already reflected in the roster`);
+  }
+
   // Rest-of-season is the right currency for a keep/drop decision (a weekly
   // number makes a hurt starter look worthless).
   const ros = await loadRestOfSeason(season, week, league.scoring_settings);
 
   // Our roster as RailPlayers, on ROS points, carrying the stash flag the rails
   // depend on.
-  const roster: RailPlayer[] = mine.players.map((id) => {
+  const roster: RailPlayer[] = myPlayerIds.map((id) => {
     const r = ros.get(id);
     const dump = players[id];
     const name = dump?.full_name ?? (dump ? `${dump.first_name} ${dump.last_name}`.trim() : r?.name ?? id);
@@ -111,6 +121,10 @@ async function main(): Promise<void> {
 
   // Available = fantasy players on no roster in the league. Rank by ROS, take the
   // top slice.
+  // The global "taken" set is NOT adjusted by our pending trade: a player we are
+  // trading away is still rostered by the team receiving him, and one we are
+  // acquiring is still rostered (by them) until it processes. A trade frees
+  // nobody to waivers. Only OUR roster view (above) reflects the delta.
   const rostered = new Set(rosters.flatMap((r) => r.players ?? []));
   const availableRos = Array.from(ros.values())
     .filter((p) => !rostered.has(p.playerId) && p.points > 0)

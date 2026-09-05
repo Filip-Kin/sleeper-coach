@@ -8,6 +8,7 @@
 // unreachable from the running system.
 
 import { config } from "../config.ts";
+import { browserGql, pendingRosterDelta, applyRosterDelta, type Gql } from "../league/api.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadSeasonProjections } from "./projections.ts";
 import { rankByVor } from "./vor.ts";
@@ -90,6 +91,23 @@ function sideOf(tx: Tx, snap: LeagueSnapshot, rosterId: number): TradeOffer {
   return { receive, give };
 }
 
+/** snapshot() reflects the CURRENT roster. This applies trades we have agreed
+ *  to but that have not processed yet, so every "what do we have" decision
+ *  (proposing, evaluating an incoming offer, the trade brief) reasons about the
+ *  roster we are about to hold, not a stale one. Only OUR roster is adjusted;
+ *  the counterparties' current rosters are what we evaluate against. */
+export async function snapshotWithPending(gql: Gql = browserGql(), leg?: number): Promise<LeagueSnapshot> {
+  const snap = await snapshot();
+  const week = leg ?? Math.max(1, (await sleeper.nflState()).week ?? 1);
+  const delta = await pendingRosterDelta(gql, week).catch(() => ({ incoming: [], outgoing: [] }));
+  if (!delta.incoming.length && !delta.outgoing.length) return snap;
+  const currentIds = (await sleeper.rosters(config.leagueId)).find((r) => r.roster_id === snap.ourRosterId)?.players ?? [];
+  const effectiveIds = applyRosterDelta(currentIds, delta);
+  const rosterOf = new Map(snap.rosterOf);
+  rosterOf.set(snap.ourRosterId, effectiveIds.map((id) => snap.playerById.get(id) ?? { name: id, position: "", points: 0 }));
+  return { ...snap, rosterOf };
+}
+
 export function offerFromTransaction(
   tx: Tx, snap: LeagueSnapshot,
 ): { offer: TradeOffer; theirRosterId: number | null } {
@@ -143,7 +161,10 @@ export async function evaluateLiveOffer(
   tx: Tx,
   overrides: Partial<FairnessConfig> = {},
 ): Promise<{ evaluation: TwoSidedEvaluation | MultiSidedEvaluation; theirRosterId: number | null; isMultiParty: boolean }> {
-  const snap = await snapshot();
+  // Effective roster: reflects trades we have already agreed to but that are
+  // still processing, so a second incoming offer is judged against the roster
+  // we are about to hold, not the stale one.
+  const snap = await snapshotWithPending();
   const { offer, theirRosterId } = offerFromTransaction(tx, snap);
   const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
   const others = otherSides(tx, snap);

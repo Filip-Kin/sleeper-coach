@@ -321,6 +321,50 @@ export async function dropPlayers(
 }
 
 /** Completed trades involving a roster, so we can react when one processes. */
+/** Players moving on/off OUR roster from trades we have already agreed to but
+ *  that have not finished processing (proposed, and in commish review). All of
+ *  our decisions read the CURRENT roster, so without this the coach would, e.g.,
+ *  grab a tight end off waivers while a tight end we traded for sits in review.
+ *  Filip: "make sure trading takes into account trades that are processing so
+ *  if you already traded for a TE you are not trying to pick up another one."
+ *
+ *  Only trades WE consented to count: a bare proposal from a rival we have not
+ *  accepted changes nothing about what we will have. */
+export async function pendingRosterDelta(
+  gql: Gql, leg: number, rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<{ incoming: string[]; outgoing: string[] }> {
+  const incoming: string[] = [];
+  const outgoing: string[] = [];
+  const seen = new Set<string>();
+  for (const status of ["proposed", "processing", "in_progress"]) {
+    const body = await gql(
+      `{league_transactions_by_status(league_id:"${safeId(leagueId)}",status:"${status}",leg:${Math.trunc(leg)})` +
+      `{transaction_id status type roster_ids consenter_ids adds drops}}`,
+    ).catch(() => ({} as Record<string, unknown>));
+    const data = (body.data ?? {}) as Record<string, unknown>;
+    const raw = (data.league_transactions_by_status ?? []) as Record<string, unknown>[];
+    for (const t of raw) {
+      if (t.type !== "trade") continue;
+      const id = String(t.transaction_id ?? "");
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const consenters = (t.consenter_ids as number[]) ?? [];
+      if (!consenters.includes(rosterId)) continue; // we have not agreed to it
+      for (const [pid, rid] of Object.entries((t.adds ?? {}) as Record<string, number>)) if (rid === rosterId) incoming.push(pid);
+      for (const [pid, rid] of Object.entries((t.drops ?? {}) as Record<string, number>)) if (rid === rosterId) outgoing.push(pid);
+    }
+  }
+  return { incoming, outgoing };
+}
+
+/** Apply an incoming/outgoing delta to a list of player ids. Pure. */
+export function applyRosterDelta(players: string[], delta: { incoming: string[]; outgoing: string[] }): string[] {
+  const out = new Set(players);
+  for (const id of delta.outgoing) out.delete(id);
+  for (const id of delta.incoming) out.add(id);
+  return [...out];
+}
+
 export async function completedTrades(gql: Gql, leg: number, leagueId = config.leagueId): Promise<PendingTrade[]> {
   const out: PendingTrade[] = [];
   for (const status of ["complete", "processed"]) {

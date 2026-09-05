@@ -34,7 +34,7 @@ import { config } from "../config.ts";
 import { logEvent, recentEvents } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { browserGql, proposeTrade, outstandingOffers, listDms, sendDm, type Gql } from "./api.ts";
-import { snapshot, scheduleContext } from "../analysis/trade-wire.ts";
+import { snapshot, snapshotWithPending, scheduleContext } from "../analysis/trade-wire.ts";
 import { proposeTrades, giveEligibleForProposal, DEFAULT_FAIRNESS, type Proposal, type RivalRoster, type FairnessConfig } from "../analysis/trade-fair.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
 import { sleeper } from "../sleeper/client.ts";
@@ -107,7 +107,7 @@ export async function runProposer(state: ProposerState, gql: Gql = browserGql())
   }
   const busyRosters = new Set(open.flatMap((t) => t.rosterIds));
 
-  const snap = await snapshot();
+  const snap = await snapshotWithPending(gql);
   const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
   const rivals: RivalRoster[] = [];
   for (const [rosterId, roster] of snap.rosterOf) {
@@ -230,7 +230,7 @@ export interface TradeBrief {
  *  model to say it has nothing specific rather than invent something. */
 export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = browserGql()): Promise<TradeBrief> {
   void gql;
-  const snap = await snapshot();
+  const snap = await snapshotWithPending(gql);
   const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
   const cfg = DEFAULT_FAIRNESS;
 
