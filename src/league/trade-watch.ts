@@ -20,7 +20,7 @@ import {
   type Gql, type PendingTrade,
 } from "./api.ts";
 import { snapshot, offerFromTransaction, evaluateLiveOffer, scheduleContext } from "../analysis/trade-wire.ts";
-import { DEFAULT_FAIRNESS, type TwoSidedEvaluation, type Proposal } from "../analysis/trade-fair.ts";
+import { DEFAULT_FAIRNESS, type TradeVerdictSummary, type Proposal } from "../analysis/trade-fair.ts";
 import { pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS } from "./trade-propose.ts";
 import type { Database } from "bun:sqlite";
 import { newsAgeDays } from "../data/news.ts";
@@ -51,12 +51,12 @@ export interface TradeSides { receive: string[]; give: string[] }
  *  should be a little more critical." A dry "Rejected: below the floor" reads
  *  the same for a real close call and an obvious troll, and it should not. */
 export const BLATANT_OUR_GAIN_PTS = -30;
-export function isBlatantLowball(sides: TradeSides, ev: TwoSidedEvaluation): boolean {
+export function isBlatantLowball(sides: TradeSides, ev: TradeVerdictSummary): boolean {
   if (ev.verdict === "accept") return false;
   return sides.receive.length === 0 || ev.ourGain <= BLATANT_OUR_GAIN_PTS;
 }
 
-export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides, counter?: Proposal | null): string {
+export function tradeReplyText(ev: TradeVerdictSummary, sides: TradeSides, counter?: Proposal | null): string {
   const got = sides.receive.join(", ") || "nothing";
   const gave = sides.give.join(", ") || "nothing";
   // "My team", not "my starting lineup": the number now includes bye weeks and
@@ -67,6 +67,13 @@ export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides, counte
       `and ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain} to yours. Pleasure doing business.`;
   }
   const blatant = isBlatantLowball(sides, ev);
+  // A three-way trade carries per-opponent gains; name them, because the whole
+  // point of bundling legs is to keep any single roster's payday from standing
+  // out. "opponents" is only present on a multi-party evaluation.
+  const opp = (ev as { opponents?: { rosterId: number; theirGain: number }[] }).opponents;
+  const multiLine = opp && opp.length > 1
+    ? ` This is a ${opp.length + 1}-team trade and I see every leg: ${opp.map((o) => `roster ${o.rosterId} ${o.theirGain >= 0 ? "+" : ""}${o.theirGain}`).join(", ")}.`
+    : "";
   const blocked = ev.fairnessBlocks[0] ?? ev.railBlocks[0];
   // The joke never replaces the reason, it leads it: a rival who tried it
   // still gets told exactly what gave the probe away.
@@ -81,7 +88,7 @@ export function tradeReplyText(ev: TwoSidedEvaluation, sides: TradeSides, counte
       `I get ${counter.offer.receive.map((p) => p.name).join(" + ")}. That is +${counter.theirGain} to your team by my numbers. Accept it and we are done.`
     : ` I accept any trade that does not leave my team worse off.`;
   return `${head} Giving up ${gave} for ${got} moves my team ${ev.ourGain >= 0 ? "+" : ""}${ev.ourGain} ` +
-    `over the rest of the season, bye weeks and injury cover included, and yours ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain}. ` +
+    `over the rest of the season, bye weeks and injury cover included, and the other side ${ev.theirGain >= 0 ? "+" : ""}${ev.theirGain}.${multiLine} ` +
     `Net of how often we still play, that is ${ev.netValue} against the ${ev.requiredEdge} I need.${small}${tail}`;
 }
 
@@ -123,7 +130,7 @@ export async function handlePendingTrades(
 
     const tx = { adds: t.adds, drops: t.drops, roster_ids: t.rosterIds };
     await warnIfNewsStale();
-    const { evaluation: ev, theirRosterId } = await evaluateLiveOffer(tx);
+    const { evaluation: ev, theirRosterId, isMultiParty } = await evaluateLiveOffer(tx);
     const snap = await snapshot();
     const { offer } = offerFromTransaction(tx, snap);
     const sides: TradeSides = {
@@ -155,7 +162,11 @@ export async function handlePendingTrades(
     if (ev.verdict === "accept") {
       status = await acceptTrade(gql, t.transactionId, leg);
     } else {
-      if (db && theirRosterId !== null) {
+      // A counter is a 2-party propose_trade by construction, so it makes no
+      // sense against a three-way trade: we would be offering one rival a
+      // different deal than the tangle they proposed. Multi-party trades get a
+      // plain reject and an honest explanation, never a counter.
+      if (db && theirRosterId !== null && !isMultiParty) {
         try {
           const open = await outstandingOffers(gql, leg);
           const busy = open.some((o) => o.rosterIds.includes(theirRosterId));

@@ -15,7 +15,10 @@ import { loadNews, applyNews } from "../data/news.ts";
 import { loadPlayers } from "../data/players.ts";
 import { byeWeek } from "../data/byes.ts";
 import type { TradePlayer, TradeOffer } from "./trade.ts";
-import { evaluateTradeTwoSided, type FairnessConfig, DEFAULT_FAIRNESS, type TwoSidedEvaluation } from "./trade-fair.ts";
+import {
+  evaluateTradeTwoSided, evaluateTradeMultiSided, opponentWeight,
+  type FairnessConfig, DEFAULT_FAIRNESS, type TwoSidedEvaluation, type MultiSidedEvaluation, type OpponentSide,
+} from "./trade-fair.ts";
 
 export interface LeagueSnapshot {
   playerById: Map<string, TradePlayer>;
@@ -72,21 +75,39 @@ export async function snapshot(): Promise<LeagueSnapshot> {
 
 // Turn a Sleeper trade transaction into an offer from OUR perspective, and score
 // it. `adds`/`drops` map player_id -> roster_id receiving/losing him.
-export function offerFromTransaction(
-  tx: { adds?: Record<string, number> | null; drops?: Record<string, number> | null; roster_ids?: number[] },
-  snap: LeagueSnapshot,
-): { offer: TradeOffer; theirRosterId: number | null } {
+type Tx = { adds?: Record<string, number> | null; drops?: Record<string, number> | null; roster_ids?: number[] };
+
+/** Any single roster's own side of a transaction: what THEY give and receive,
+ *  regardless of who else is party to it or how many are. Lineup math is
+ *  roster-local, so this one function serves our side, one opponent, or every
+ *  opponent in a three-way trade. */
+function sideOf(tx: Tx, snap: LeagueSnapshot, rosterId: number): TradeOffer {
   const get = (id: string): TradePlayer => snap.playerById.get(id) ?? { name: id, position: "", points: 0 };
   const receive: TradePlayer[] = [];
   const give: TradePlayer[] = [];
-  for (const [id, rid] of Object.entries(tx.adds ?? {})) {
-    if (rid === snap.ourRosterId) receive.push(get(id));
-  }
-  for (const [id, rid] of Object.entries(tx.drops ?? {})) {
-    if (rid === snap.ourRosterId) give.push(get(id));
-  }
+  for (const [id, rid] of Object.entries(tx.adds ?? {})) if (rid === rosterId) receive.push(get(id));
+  for (const [id, rid] of Object.entries(tx.drops ?? {})) if (rid === rosterId) give.push(get(id));
+  return { receive, give };
+}
+
+export function offerFromTransaction(
+  tx: Tx, snap: LeagueSnapshot,
+): { offer: TradeOffer; theirRosterId: number | null } {
   const theirRosterId = (tx.roster_ids ?? []).find((r) => r !== snap.ourRosterId) ?? null;
-  return { offer: { receive, give }, theirRosterId };
+  return { offer: sideOf(tx, snap, snap.ourRosterId), theirRosterId };
+}
+
+/** Every roster in the transaction besides ours, each with their OWN give and
+ *  receive (never a mirror of our offer, which only holds for a 2-party trade).
+ *  A three-way trade needs this: roster 1 receiving two of our stars for
+ *  nothing has to be judged on its own terms, not folded into whatever roster
+ *  2's separate, fairer-looking leg does to the combined picture. */
+export function otherSides(tx: Tx, snap: LeagueSnapshot): { rosterId: number; offer: TradeOffer }[] {
+  const ids = new Set<number>();
+  for (const rid of Object.values(tx.adds ?? {})) ids.add(rid);
+  for (const rid of Object.values(tx.drops ?? {})) ids.add(rid);
+  ids.delete(snap.ourRosterId);
+  return [...ids].map((rosterId) => ({ rosterId, offer: sideOf(tx, snap, rosterId) }));
 }
 
 // How many remaining regular-season weeks, and how many of those we play them.
@@ -119,14 +140,45 @@ export async function scheduleContext(theirRosterId: number | null): Promise<{ r
 }
 
 export async function evaluateLiveOffer(
-  tx: { adds?: Record<string, number> | null; drops?: Record<string, number> | null; roster_ids?: number[] },
+  tx: Tx,
   overrides: Partial<FairnessConfig> = {},
-): Promise<{ evaluation: TwoSidedEvaluation; theirRosterId: number | null }> {
+): Promise<{ evaluation: TwoSidedEvaluation | MultiSidedEvaluation; theirRosterId: number | null; isMultiParty: boolean }> {
   const snap = await snapshot();
   const { offer, theirRosterId } = offerFromTransaction(tx, snap);
   const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  const others = otherSides(tx, snap);
+
+  // THE THREE-WAY CASE. A trade naming more than one other roster cannot be
+  // judged by picking the first one and ignoring the rest: on 2026-09-04 a real
+  // proposal gave up Christian McCaffrey and Jalen Hurts to one roster for
+  // NOTHING, bundled with a fairer-looking Nico Collins and Chase Brown for
+  // Quentin Johnston against a second roster. The old code only ever built
+  // `theirRoster` from the FIRST other roster in tx.roster_ids and evaluated
+  // that one leg alone, so the second roster's own gain was never computed at
+  // all, not misjudged, simply invisible. It happened to still reject, because
+  // the free-rider leg alone was severe enough, but a closer three-way trade
+  // could have slipped through with half the picture missing.
+  if (others.length > 1) {
+    const opponents: OpponentSide[] = [];
+    for (const o of others) {
+      const sched = await scheduleContext(o.rosterId);
+      opponents.push({
+        rosterId: o.rosterId,
+        roster: snap.rosterOf.get(o.rosterId) ?? [],
+        offer: o.offer,
+        weight: opponentWeight({ ...DEFAULT_FAIRNESS, ...sched, ...overrides }),
+      });
+    }
+    const sched = await scheduleContext(theirRosterId);
+    const cfg: FairnessConfig = { ...DEFAULT_FAIRNESS, ...sched, ...overrides };
+    return {
+      evaluation: evaluateTradeMultiSided(offer, ourRoster, opponents, cfg),
+      theirRosterId, isMultiParty: true,
+    };
+  }
+
   const theirRoster = theirRosterId === null ? [] : snap.rosterOf.get(theirRosterId) ?? [];
   const sched = await scheduleContext(theirRosterId);
   const cfg: FairnessConfig = { ...DEFAULT_FAIRNESS, ...sched, ...overrides };
-  return { evaluation: evaluateTradeTwoSided(offer, ourRoster, theirRoster, cfg), theirRosterId };
+  return { evaluation: evaluateTradeTwoSided(offer, ourRoster, theirRoster, cfg), theirRosterId, isMultiParty: false };
 }

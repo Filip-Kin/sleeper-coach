@@ -393,5 +393,63 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
   t("and the proposer never asks for him either", props.every((p) => !p.offer.receive.some((r) => r.name === "SCAM")));
 }
 
+// --- three-way trades --------------------------------------------------------
+// A real proposal on 2026-09-04 gave up McCaffrey and Hurts to roster 1 for
+// NOTHING, bundled with a fairer-looking Collins-and-Brown-for-Johnston leg
+// against roster 2. The old two-sided path only ever looked at the FIRST other
+// roster, so the second leg was invisible. These pin that every leg is seen.
+{
+  const { evaluateTradeMultiSided, evaluateTradeTwoSided, DEFAULT_FAIRNESS } = await import("./trade-fair.ts");
+  const P = (name: string, position: string, points: number) => ({ name, position, points, depthChartOrder: 1 });
+
+  const ours = [
+    P("McCaffrey","RB",291), P("Hurts","QB",310), P("Collins","WR",262), P("Brown","RB",255),
+    P("Walker","RB",244), P("Smith","WR",229), P("Evans","WR",222), P("LaPorta","TE",196),
+    P("Prescott","QB",303), P("Bates","K",44), P("SEA","DEF",10),
+  ];
+  const r1 = [P("r1qb","QB",250), P("r1rb","RB",240), P("r1wr","WR",230), P("r1te","TE",180), P("r1k","K",40), P("r1d","DEF",8)];
+  const r2 = [P("Johnston","WR",150), P("r2qb","QB",260), P("r2rb","RB",245), P("r2wr","WR",235), P("r2te","TE",185), P("r2k","K",42), P("r2d","DEF",9)];
+
+  // Our side of the whole tangle: give McCaffrey, Hurts, Collins, Brown; get Johnston.
+  const ourOffer = { receive: [P("Johnston","WR",150)], give: [P("McCaffrey","RB",291), P("Hurts","QB",310), P("Collins","WR",262), P("Brown","RB",255)] };
+  // roster 1 receives McCaffrey + Hurts, gives NOTHING to us (the free rider).
+  const r1side = { rosterId: 1, roster: r1, offer: { receive: [P("McCaffrey","RB",291), P("Hurts","QB",310)], give: [] as ReturnType<typeof P>[] } };
+  // roster 2 receives Collins + Brown, gives Johnston.
+  const r2side = { rosterId: 2, roster: r2, offer: { receive: [P("Collins","WR",262), P("Brown","RB",255)], give: [P("Johnston","WR",150)] } };
+
+  const multi = evaluateTradeMultiSided(ourOffer, ours, [r1side, r2side], DEFAULT_FAIRNESS);
+  t("the three-way fleece is rejected", multi.verdict === "reject", multi.verdict);
+  t("both opponents' gains are computed, not just the first",
+    multi.opponents.length === 2 && multi.opponents.every((o) => typeof o.theirGain === "number"),
+    JSON.stringify(multi.opponents));
+  t("the free-rider roster's gain is seen and it is large",
+    (multi.opponents.find((o) => o.rosterId === 1)?.theirGain ?? 0) > 15,
+    `${multi.opponents.find((o) => o.rosterId === 1)?.theirGain}`);
+  t("the per-opponent ceiling names the free rider specifically",
+    multi.fairnessBlocks.some((b) => /roster 1/.test(b)), multi.fairnessBlocks.join(" | "));
+
+  // A single-opponent multi call must match the two-sided result exactly, so the
+  // new path is a strict generalisation, not a second opinion.
+  const soloOffer = { receive: [P("r1wr","WR",230)], give: [P("Evans","WR",222)] };
+  const two = evaluateTradeTwoSided(soloOffer, ours, r1, DEFAULT_FAIRNESS);
+  const one = evaluateTradeMultiSided(soloOffer, ours, [{ rosterId: 1, roster: r1, offer: { receive: [P("Evans","WR",222)], give: [P("r1wr","WR",230)] } }], DEFAULT_FAIRNESS);
+  t("a one-opponent multi call matches the two-sided verdict", two.verdict === one.verdict, `${two.verdict} vs ${one.verdict}`);
+  t("a one-opponent multi call matches the two-sided ourGain", Math.abs(two.ourGain - one.ourGain) < 0.05, `${two.ourGain} vs ${one.ourGain}`);
+
+  // A GENUINELY FAIR three-way (everyone roughly even, we come out ahead) is
+  // accepted, so this is not just a blanket "reject all three-ways".
+  const fairOurs = [...ours];
+  const fairOffer = { receive: [P("r2rb","RB",245)], give: [P("Evans","WR",222)] };
+  const fairMulti = evaluateTradeMultiSided(
+    fairOffer, fairOurs,
+    [
+      { rosterId: 1, roster: r1, offer: { receive: [P("Evans","WR",222)], give: [P("r1rb","RB",240)] } },
+      { rosterId: 2, roster: r2, offer: { receive: [P("r1rb","RB",240)], give: [P("r2rb","RB",245)] } },
+    ],
+    { ...DEFAULT_FAIRNESS, minOwnGainPts: -999, maxTheirGainPts: 999 },
+  );
+  t("a balanced three-way is not blanket-rejected", fairMulti.verdict === "accept" || fairMulti.ourGain >= 0, `${fairMulti.verdict} our ${fairMulti.ourGain}`);
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -279,14 +279,18 @@ export function byeRelief(offer: TradeOffer, roster: TradePlayer[], cfg: Fairnes
   return relief;
 }
 
-export interface TwoSidedEvaluation extends TradeEvaluation {
+/** The fields every trade verdict shares, whether 2-party or N-party, so the
+ *  reply and logging code can take either without caring which. */
+export interface TradeVerdictSummary extends TradeEvaluation {
   ourGain: number; // our starting-lineup delta
-  theirGain: number; // the counterparty's starting-lineup delta
+  theirGain: number; // the counterparty's gain (combined, for a multi-party trade)
   edge: number; // ourGain - theirGain, kept for reporting
-  netValue: number; // ourGain - theirGain * opponentWeight; the number that decides
+  netValue: number; // ourGain - weighted their-gain; the number that decides
   requiredEdge: number; // the noise-scaled margin netValue had to beat
   fairnessBlocks: string[]; // non-empty forces a reject no matter how good ours looks
 }
+
+export interface TwoSidedEvaluation extends TradeVerdictSummary {}
 
 // Score an offer from BOTH sides. `theirRoster` is the counterparty's current
 // roster; the same offer is applied in mirror to them (they receive what we
@@ -322,6 +326,130 @@ export function byeAwareGain(
   const after = byeAwareLineupTotal(
     [...roster.filter((p) => !goneNames.has(p.name.toLowerCase())), ...offer.receive], weeks, slots);
   return Math.round((after - before) * 10) / 10;
+}
+
+/** One other roster's own side of a multi-party trade: what THEY give away and
+ *  what THEY receive, independent of who they trade with. Lineup math is
+ *  roster-local, so this is all a second (or third) opponent needs. */
+export interface OpponentSide {
+  rosterId: number;
+  roster: TradePlayer[];
+  offer: TradeOffer; // THEIR give/receive, not ours
+  /** Override for schedule dilution against this specific opponent. Defaults to
+   *  opponentWeight(cfg), which would otherwise apply the SAME head-to-head
+   *  count to every opponent in the trade; pass a per-opponent cfg's weight
+   *  when it is known, since a three-way trade can easily involve two rivals we
+   *  play a different number of times. */
+  weight?: number;
+}
+
+export interface MultiSidedEvaluation extends TradeVerdictSummary {
+  /** Each opponent's own gain, so a lopsided multi-way trade cannot hide one
+   *  free rider's payday behind another leg's fairer-looking exchange. */
+  opponents: { rosterId: number; theirGain: number }[];
+}
+
+/** N-party version of evaluateTradeTwoSided. A three-way (or more) trade is
+ *  common enough as a collusion vector that it needs its own evaluator rather
+ *  than pretending the first other roster is the only one: a real proposal
+ *  gave us up Christian McCaffrey and Jalen Hurts to one roster for NOTHING,
+ *  bundled with a fairer-looking Nico Collins and Chase Brown for Quentin
+ *  Johnston leg against a second roster, presumably so neither leg alone looked
+ *  as bad as the whole. Each opponent's own lineup delta is computed from THEIR
+ *  own give/receive, not from mirroring our offer, which is what makes this
+ *  correct for any number of parties: a roster's lineup math never depends on
+ *  who it traded with, only on which players left and arrived.
+ *
+ *  evaluateTradeTwoSided is untouched and still the entry point for a normal
+ *  2-party trade and for every outbound proposal we generate (which are always
+ *  exactly 2-party by construction), so nothing that already worked changes. */
+export function evaluateTradeMultiSided(
+  offer: TradeOffer,
+  ourRoster: TradePlayer[],
+  others: OpponentSide[],
+  cfg: FairnessConfig = DEFAULT_FAIRNESS,
+): MultiSidedEvaluation {
+  const tradeCfg: FairnessConfig = { ...cfg, rails: { ...cfg.rails, protectTopN: 0 } };
+  const ours = evaluateTrade(offer, ourRoster, tradeCfg);
+  const weeks = cfg.upcomingWeeks ?? [];
+
+  const opponents = others.map((o) => {
+    const theirGain = weeks.length
+      ? byeAwareGain(o.roster, o.offer, weeks)
+      : (() => {
+          const before = bestLineup(o.roster).total;
+          const giveNames = new Set(o.offer.give.map((p) => p.name.toLowerCase()));
+          const after = bestLineup([
+            ...o.roster.filter((p) => !giveNames.has(p.name.toLowerCase())),
+            ...o.offer.receive,
+          ]).total;
+          return Math.round((after - before) * 10) / 10;
+        })();
+    return { rosterId: o.rosterId, theirGain, weight: o.weight ?? opponentWeight(cfg) };
+  });
+
+  const ourGainLineup = weeks.length ? byeAwareGain(ourRoster, offer, weeks) : ours.lineupDelta;
+  const afterOurs = [
+    ...ourRoster.filter((p) => !offer.give.some((g) => g.name.toLowerCase() === p.name.toLowerCase())),
+    ...offer.receive,
+  ];
+  const depthDelta = weeks.length
+    ? Math.round((depthInsurance(afterOurs, cfg) - depthInsurance(ourRoster, cfg)) * 10) / 10
+    : 0;
+  const ourGain = Math.round((ourGainLineup + depthDelta) * 10) / 10;
+
+  const totalTheirGain = Math.round(opponents.reduce((s, o) => s + o.theirGain, 0) * 10) / 10;
+  const weightedTheirGain = opponents.reduce((s, o) => s + o.theirGain * o.weight, 0);
+  const slotCost = Math.max(0, offer.receive.length - offer.give.length) * cfg.rosterSlotCostPts;
+  const netValue = Math.round((ourGain - weightedTheirGain - slotCost) * 10) / 10;
+  const need = Math.round(requiredEdge(offer, cfg, ourRoster) * 10) / 10;
+  const edge = Math.round((ourGain - totalTheirGain) * 10) / 10;
+
+  const fairnessBlocks: string[] = [];
+  // The ceiling applies PER OPPONENT: bundling a free-rider leg with a fairer
+  // one must not let the free rider hide behind the average.
+  for (const o of opponents) {
+    if (o.theirGain > cfg.maxTheirGainPts) {
+      fairnessBlocks.push(
+        `it hands roster ${o.rosterId} ${o.theirGain} points, past the ${cfg.maxTheirGainPts} ceiling on how strong we will make somebody else`);
+    }
+  }
+  for (const p of offer.receive) {
+    const why = refusedForInjury(p) ?? refusedForDepth(p);
+    if (why) fairnessBlocks.push(why);
+  }
+  const unfilled = bestLineup(afterOurs).starters.filter((x) => x.player === null).map((x) => x.slot);
+  if (unfilled.length) fairnessBlocks.push(`would leave ${unfilled.join(", ")} unfillable`);
+  if (ourGain < cfg.minOwnGainPts) {
+    fairnessBlocks.push(`our own lineup gains only ${ourGain}, below the floor of ${cfg.minOwnGainPts}`);
+  }
+
+  const numeric = /lineup gain|starting-lineup projection|reject margin|does not improve our lineup|already deep at/i;
+  const reasons = [
+    ...ours.reasons.filter((r) => !weeks.length || !numeric.test(r)),
+    ...(weeks.length
+      ? [
+          `valued across weeks ${weeks[0]}-${weeks[weeks.length - 1]} with bye players removed, ` +
+          `so a week where a position has nobody eligible costs what it really costs`,
+          `our lineup ${ourGainLineup >= 0 ? "+" : ""}${ourGainLineup} per week averaged over that run` +
+            (depthDelta ? `, ${depthDelta >= 0 ? "+" : ""}${depthDelta} for injury cover at ${cfg.depthPositions.join("/")}` : ""),
+        ]
+      : [`starting-lineup projection ${ours.before.toFixed(1)} -> ${ours.after.toFixed(1)} (${ourGain >= 0 ? "+" : ""}${ourGain})`]),
+    // Named per roster, so a rival cannot obscure one leg's payday inside a
+    // combined number, which is exactly the shape of the attempt this exists for.
+    ...opponents.map((o) => `roster ${o.rosterId} lineup ${o.theirGain >= 0 ? "+" : ""}${o.theirGain}`),
+    `net of schedule: ${ourGain} - (${opponents.map((o) => `${o.theirGain}x${o.weight.toFixed(2)}`).join(" + ")}) = ${netValue}, need ${need}`,
+  ];
+
+  let verdict: TradeVerdict = "reject";
+  if (!ours.railBlocks.length && !fairnessBlocks.length && netValue >= need) verdict = "accept";
+  if (fairnessBlocks.length) reasons.unshift(...fairnessBlocks);
+
+  return {
+    ...ours, verdict, reasons, ourGain, theirGain: totalTheirGain,
+    opponents: opponents.map((o) => ({ rosterId: o.rosterId, theirGain: o.theirGain })),
+    edge, netValue, requiredEdge: need, fairnessBlocks,
+  };
 }
 
 export function evaluateTradeTwoSided(
