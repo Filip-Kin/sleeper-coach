@@ -172,11 +172,12 @@ test("em dashes are replaced, because a model reaches for them constantly", () =
 import { acceptLeagueChatRequests } from "./dm-watch.ts";
 import { acceptChatRequest } from "./api.ts";
 
-test("the request type is the undiscoverable one, not a guess", async () => {
+test("the request types are the undiscoverable ones, not a guess", async () => {
   // "dm", "chat", "friend" and "league_dm" all return an empty list happily.
-  // Only "dm_single" works, found by hooking XHR in the Sleeper web app.
+  // Only "dm_single" and "dm_group" work, found by hooking XHR in the app.
   const src = await Bun.file(new URL("./api.ts", import.meta.url)).text();
-  expect(src).toContain('request_type:"dm_single"');
+  expect(src).toContain('"dm_single"');
+  expect(src).toContain('"dm_group"');
 });
 
 test("only league mates get auto-accepted", async () => {
@@ -185,12 +186,16 @@ test("only league mates get auto-accepted", async () => {
   const seen: string[] = [];
   const gql = async (q: string) => {
     seen.push(q);
-    if (q.includes("inbound_requests")) {
+    // Distinguish an inbound_requests QUERY from an accept_request MUTATION:
+    // both embed the same request_type string, so matching on that alone made
+    // the accept call get misread as a second listing and loop forever.
+    if (q.includes('inbound_requests(request_type:"dm_single"')) {
       return { data: { inbound_requests: [
         { type_id: "1400921359709655040", requester_id: "1267685003886604288", requester_display_name: "Owen", type_description: "", created: 1 },
         { type_id: "1400921359709655041", requester_id: "9999999999999999999", requester_display_name: "Nobody", type_description: "", created: 1 },
       ] } };
     }
+    if (q.includes('inbound_requests(request_type:"dm_group"')) return { data: { inbound_requests: [] } };
     return { data: { accept_request: true } };
   };
   const realFetch = globalThis.fetch;
@@ -227,4 +232,44 @@ test("a thread already marked read is still answered", () => {
 test("we skip only when we genuinely spoke last or already answered", () => {
   expect(shouldReply([m({ messageId: "a", isUs: true })], 0, null).why).toBe("we spoke last");
   expect(shouldReply([m({ messageId: "a" })], 0, "a").why).toBe("already answered this message");
+});
+
+test("a group DM invite is accepted the same way a 1:1 invite is", async () => {
+  const gql = async (q: string) => {
+    if (q.includes('inbound_requests(request_type:"dm_group"')) {
+      return { data: { inbound_requests: [
+        { type_id: "1401775878806962176", requester_id: "1129924426755289088", requester_display_name: "cookieeater45", type_description: "", created: 1 },
+      ] } };
+    }
+    if (q.includes('inbound_requests(request_type:"dm_single"')) return { data: { inbound_requests: [] } };
+    return { data: { accept_request: true } };
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ json: async () => [{ user_id: "1129924426755289088" }] })) as never;
+  try {
+    const accepted = await acceptLeagueChatRequests(gql as never);
+    expect(accepted.map((a) => a.requesterId)).toEqual(["1129924426755289088"]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a broken request type does not block accepting the other", async () => {
+  const gql = async (q: string) => {
+    if (q.includes('inbound_requests(request_type:"dm_single"')) throw new Error("sleeper hiccup");
+    if (q.includes('inbound_requests(request_type:"dm_group"')) {
+      return { data: { inbound_requests: [
+        { type_id: "1401775878806962176", requester_id: "1129924426755289088", requester_display_name: "cookieeater45", type_description: "", created: 1 },
+      ] } };
+    }
+    return { data: { accept_request: true } };
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ json: async () => [{ user_id: "1129924426755289088" }] })) as never;
+  try {
+    const accepted = await acceptLeagueChatRequests(gql as never);
+    expect(accepted.length).toBe(1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

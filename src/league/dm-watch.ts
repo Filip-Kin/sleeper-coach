@@ -296,24 +296,32 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
  *  standing invitation to be probed by strangers. Rivals we already share a
  *  league with can message us in league chat anyway, so this grants nothing new. */
 export async function acceptLeagueChatRequests(gql: Gql): Promise<ChatRequest[]> {
-  let requests: ChatRequest[] = [];
-  try {
-    requests = await pendingChatRequests(gql);
-  } catch {
-    return []; // never let this block answering the threads we can already see
-  }
-  if (!requests.length) return [];
+  const leagueMates = await leagueMemberIds().catch(() => null);
+  if (!leagueMates) return []; // cannot verify membership, so accept nothing
 
-  const leagueMates = await leagueMemberIds();
   const accepted: ChatRequest[] = [];
-  for (const r of requests) {
-    if (!leagueMates.has(r.requesterId)) {
-      logEvent("coach", "dm-request-ignored", `Ignored a chat request from ${r.requesterName}, who is not in our league`, { requesterId: r.requesterId });
-      continue;
+  // Group invites (Filip: "it just got a group DM request... please try to make
+  // it happen") arrive under a different request_type than a 1:1 DM, found the
+  // same way dm_single was: not a guessable name, surfaced by hooking the
+  // Sleeper web app's own XHR calls. Same acceptance path, same league guard on
+  // the REQUESTER; a group can include people outside our league, which is fine,
+  // since the requester who invited us is the one being vetted.
+  for (const requestType of ["dm_single", "dm_group"] as const) {
+    let requests: ChatRequest[] = [];
+    try {
+      requests = await pendingChatRequests(gql, requestType);
+    } catch {
+      continue; // one broken request type must not block the other
     }
-    if (await acceptChatRequest(gql, r).catch(() => false)) {
-      accepted.push(r);
-      logEvent("coach", "dm-request-accepted", `Accepted a chat request from ${r.requesterName}`, { requesterId: r.requesterId });
+    for (const r of requests) {
+      if (!leagueMates.has(r.requesterId)) {
+        logEvent("coach", "dm-request-ignored", `Ignored a ${requestType} request from ${r.requesterName}, who is not in our league`, { requesterId: r.requesterId, requestType });
+        continue;
+      }
+      if (await acceptChatRequest(gql, r, requestType).catch(() => false)) {
+        accepted.push(r);
+        logEvent("coach", "dm-request-accepted", `Accepted a ${requestType} request from ${r.requesterName}`, { requesterId: r.requesterId, requestType });
+      }
     }
   }
   return accepted;

@@ -348,9 +348,15 @@ export interface ChatRequest {
   created: number;
 }
 
-export async function pendingChatRequests(gql: Gql): Promise<ChatRequest[]> {
+/** "dm_single" is a one-on-one DM invite; "dm_group" is a multi-person one
+ *  (found the same way as dm_single: it is not a guessable name, and hooking
+ *  the Sleeper web app's own XHR calls is what surfaced it). Both arrive the
+ *  same way and accept the same way, just with a different request_type. */
+export type ChatRequestType = "dm_single" | "dm_group";
+
+export async function pendingChatRequests(gql: Gql, requestType: ChatRequestType = "dm_single"): Promise<ChatRequest[]> {
   const body = await gql(
-    `{inbound_requests(request_type:"dm_single"){type_id requester_id requester_display_name type_description created}}`,
+    `{inbound_requests(request_type:"${requestType}"){type_id requester_id requester_display_name type_description created}}`,
   );
   const raw = (unwrap(body, "inbound_requests") ?? []) as Record<string, unknown>[];
   return raw.map((r) => ({
@@ -362,9 +368,9 @@ export async function pendingChatRequests(gql: Gql): Promise<ChatRequest[]> {
   })).filter((r) => r.typeId && r.requesterId);
 }
 
-export async function acceptChatRequest(gql: Gql, req: ChatRequest): Promise<boolean> {
+export async function acceptChatRequest(gql: Gql, req: ChatRequest, requestType: ChatRequestType = "dm_single"): Promise<boolean> {
   const body = await gql(
-    `mutation{accept_request(request_type:"dm_single",type_id:"${safeId(req.typeId)}",requester_id:"${safeId(req.requesterId)}")}`,
+    `mutation{accept_request(request_type:"${requestType}",type_id:"${safeId(req.typeId)}",requester_id:"${safeId(req.requesterId)}")}`,
   );
   return unwrap(body, "accept_request") === true;
 }
