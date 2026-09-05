@@ -60,6 +60,27 @@ export interface LineupResult {
 // the total. The naive "sort everyone by points and fill top down" is what gets
 // this wrong, by stranding a required slot. (See docs/in-season-plan.md, "The
 // lineup assignment, precisely".)
+// STREAMABLE POSITIONS. Kicker and defense are not scarce: any league has dozens
+// of each sitting on waivers, and the worst startable one scores about the same
+// as the best. So an EMPTY K or DEF slot is not worth zero points, it is worth
+// what a waiver streamer scores, because that is exactly what you would do.
+//
+// This matters because the whole trade engine is built on lineup deltas. Without
+// it, a rival can hand you a backup kicker and the model credits the points it
+// would fill a bye-week hole with (a hole you would have streamed for free), and
+// worse, credits YOU for making THEM give up their only kicker (a "loss" they
+// would also just stream away). On 2026-09-04 that produced an accepted trade
+// where we took two useless kickers for nothing, dropping two real players to do
+// it. Replacement level here collapses both phantom numbers to ~zero.
+//
+// Per-week season projections: a streamed kicker is ~38 over a season, a streamed
+// defense ~30. Deliberately a touch below a rostered starter so keeping your own
+// K/DEF is still marginally better, but nowhere near a full slot of value.
+const REPLACEMENT_POINTS: Record<string, number> = {
+  K: Number(process.env.REPLACEMENT_K ?? "38"),
+  DEF: Number(process.env.REPLACEMENT_DEF ?? "30"),
+};
+
 export function bestLineup(roster: TradePlayer[], slots: readonly string[] = STARTING_SLOTS): LineupResult {
   // Players best-first; ties are broken by original order, which is irrelevant
   // to the total.
@@ -82,7 +103,16 @@ export function bestLineup(roster: TradePlayer[], slots: readonly string[] = STA
   }
 
   const starters = slots.map((slot, idx) => ({ slot, player: filled[idx] ?? null }));
-  const total = Math.round(filled.reduce((s, p) => s + (p?.points ?? 0), 0) * 10) / 10;
+  // An unfilled K/DEF slot scores replacement (a streamer), not zero. An unfilled
+  // skill slot still scores zero: those are NOT freely replaceable, and an empty
+  // one is a real weekly hole, which the rest of the engine depends on seeing.
+  const total = Math.round(
+    slots.reduce((sum, slot, idx) => {
+      const p = filled[idx];
+      if (p) return sum + p.points;
+      return sum + (REPLACEMENT_POINTS[slot] ?? 0);
+    }, 0) * 10,
+  ) / 10;
   return { total, starters };
 }
 

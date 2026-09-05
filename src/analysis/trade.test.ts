@@ -451,5 +451,47 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
   t("a balanced three-way is not blanket-rejected", fairMulti.verdict === "accept" || fairMulti.ourGain >= 0, `${fairMulti.verdict} our ${fairMulti.ourGain}`);
 }
 
+// --- streamable K/DEF cannot be used to fleece us --------------------------
+// 2026-09-04: the coach ACCEPTED two backup kickers for nothing (+2.8 by the old
+// math), which at a full roster means dropping two real players so a rival can
+// scoop them. The +2.8 was a phantom: crediting a Jake-Bates-bye-week hole we
+// would have streamed, plus crediting us for the rivals shedding their only
+// kickers (also streamable). An empty K/DEF slot is worth a streamer, not zero.
+{
+  const { bestLineup } = await import("./trade.ts");
+  const { evaluateTradeMultiSided, DEFAULT_FAIRNESS } = await import("./trade-fair.ts");
+  const P = (name: string, position: string, points: number, bye?: number) => ({ name, position, points, bye, depthChartOrder: 1 });
+
+  // An empty kicker slot scores replacement, not 0.
+  const noK = [P("QB1","QB",300), P("RB1","RB",280), P("RB2","RB",250), P("WR1","WR",260), P("WR2","WR",230),
+    P("WR3","WR",220), P("TE1","TE",190), P("DEF1","DEF",30)];
+  const withK = [...noK, P("Bates","K",44)];
+  const emptyKtotal = bestLineup(noK).total;
+  const filledKtotal = bestLineup(withK).total;
+  t("an empty kicker slot scores a streamer, not zero", emptyKtotal > 30, `${emptyKtotal}`);
+  t("a real kicker is only marginally better than a streamer", filledKtotal - emptyKtotal < 10, `${filledKtotal - emptyKtotal}`);
+
+  // The full roster, mirroring ours: one kicker (Bates, bye 6), one defense.
+  const ours = [
+    P("Hurts","QB",310), P("McCaffrey","RB",291), P("Brown","RB",255), P("Collins","WR",262),
+    P("Smith","WR",229), P("Evans","WR",222), P("LaPorta","TE",196,6), P("Walker","RB",244),
+    P("Prescott","QB",303), P("Bates","K",44,6), P("SEA","DEF",10), P("Washington","WR",212),
+    P("Reed","WR",197), P("Metcalf","WR",183), P("Downs","WR",172), P("Etienne","RB",207),
+  ];
+  const r1 = [P("Myers","K",41), P("r1qb","QB",250), P("r1rb","RB",240), P("r1wr","WR",230), P("r1te","TE",180), P("r1d","DEF",8)];
+  const r2 = [P("Fairbairn","K",40), P("r2qb","QB",255), P("r2rb","RB",245), P("r2wr","WR",235), P("r2te","TE",185), P("r2d","DEF",9)];
+
+  // We receive both kickers, give nothing; each rival gives a kicker for nothing.
+  const ourOffer = { receive: [P("Myers","K",41), P("Fairbairn","K",40)], give: [] as ReturnType<typeof P>[] };
+  const multi = evaluateTradeMultiSided(ourOffer, ours, [
+    { rosterId: 1, roster: r1, offer: { receive: [], give: [P("Myers","K",41)] } },
+    { rosterId: 2, roster: r2, offer: { receive: [], give: [P("Fairbairn","K",40)] } },
+  ], { ...DEFAULT_FAIRNESS, upcomingWeeks: Array.from({length:15},(_,i)=>i+1), headToHeadRemaining: 2, remainingWeeks: 15 });
+  t("two backup kickers for nothing is REJECTED now", multi.verdict === "reject", `${multi.verdict} ourGain ${multi.ourGain}`);
+  t("our gain from two streamable kickers is ~zero", Math.abs(multi.ourGain) < 3, `${multi.ourGain}`);
+  t("the rivals are not credited a real loss for shedding streamable kickers",
+    multi.opponents.every((o) => Math.abs(o.theirGain) < 5), JSON.stringify(multi.opponents));
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
