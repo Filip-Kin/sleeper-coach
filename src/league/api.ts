@@ -299,6 +299,58 @@ export async function addFreeAgent(
   return { transactionId: String(r.transaction_id ?? ""), status: String(r.status ?? "") };
 }
 
+/** Drop players outright, no add. Used by the post-trade reconciliation loop to
+ *  get back under the roster limit. A free-agent transaction with only drops.
+ *
+ *  UNVERIFIED WRITE against Sleeper as of 2026-09-04: no trade has completed yet
+ *  to exercise it, and staging cannot (its other teams are orphans). The caller
+ *  alerts on the outcome either way, so a wrong shape surfaces loudly rather than
+ *  corrupting the roster silently. */
+export async function dropPlayers(
+  gql: Gql, playerIds: string[], rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<{ transactionId: string; status: string }> {
+  if (!playerIds.length) throw new Error("dropPlayers: nothing to drop");
+  for (const id of playerIds) safeId(id);
+  const kDrops = `[${playerIds.map((x) => `"${x}"`).join(",")}]`;
+  const vDrops = `[${playerIds.map(() => Math.trunc(rosterId)).join(",")}]`;
+  const body = await gql(
+    `mutation{league_create_transaction(type:"free_agent",league_id:"${safeId(leagueId)}",k_drops:${kDrops},v_drops:${vDrops}){transaction_id status}}`,
+  );
+  const r = (unwrap(body, "league_create_transaction") ?? {}) as { transaction_id?: string; status?: string };
+  return { transactionId: String(r.transaction_id ?? ""), status: String(r.status ?? "") };
+}
+
+/** Completed trades involving a roster, so we can react when one processes. */
+export async function completedTrades(gql: Gql, leg: number, leagueId = config.leagueId): Promise<PendingTrade[]> {
+  const out: PendingTrade[] = [];
+  for (const status of ["complete", "processed"]) {
+    const body = await gql(
+      `{league_transactions_by_status(league_id:"${safeId(leagueId)}",status:"${status}",leg:${Math.trunc(leg)})` +
+      `{transaction_id status type roster_ids consenter_ids adds drops created}}`,
+    ).catch(() => ({} as Record<string, unknown>));
+    const data = (body.data ?? {}) as Record<string, unknown>;
+    const raw = (data.league_transactions_by_status ?? []) as Record<string, unknown>[];
+    for (const t of raw) {
+      if (t.type !== "trade") continue;
+      out.push({
+        transactionId: String(t.transaction_id ?? ""), status: String(t.status ?? ""), type: "trade",
+        rosterIds: (t.roster_ids as number[]) ?? [], consenterIds: (t.consenter_ids as number[]) ?? [],
+        adds: (t.adds as Record<string, number>) ?? {}, drops: (t.drops as Record<string, number>) ?? {},
+        created: Number(t.created ?? 0),
+      });
+    }
+  }
+  return out;
+}
+
+/** Our current active roster (the players array) and IR, straight from REST. */
+export async function myRoster(rosterId = config.rosterId, leagueId = config.leagueId): Promise<{ players: string[]; reserve: string[] }> {
+  const res = await fetch(`https://api.sleeper.app/v1/league/${safeId(leagueId)}/rosters`, { signal: AbortSignal.timeout(10_000) });
+  const rosters = (await res.json()) as { roster_id: number; players?: string[]; reserve?: string[] | null }[];
+  const mine = rosters.find((r) => r.roster_id === rosterId);
+  return { players: mine?.players ?? [], reserve: mine?.reserve ?? [] };
+}
+
 export async function cancelWaiverClaim(
   gql: Gql, transactionId: string, leg: number, leagueId = config.leagueId,
 ): Promise<string> {

@@ -8,12 +8,14 @@ import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
 import { unreactedDrops } from "./analysis/waivers.ts";
-import { browserGql as leagueGql } from "./league/api.ts";
+import { browserGql as leagueGql, dropPlayers, completedTrades, myRoster } from "./league/api.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
 import { handleDms } from "./league/dm-watch.ts";
 import { assessVeto, DEFAULT_VETO } from "./league/veto.ts";
-import { snapshot } from "./analysis/trade-wire.ts";
-import { freezeState } from "./killswitch.ts";
+import { snapshot, scheduleContext } from "./analysis/trade-wire.ts";
+import { activeCapacity, overCapBy, chooseForcedDrops } from "./analysis/roster-fit.ts";
+import { DEFAULT_FAIRNESS } from "./analysis/trade-fair.ts";
+import { freezeState, assertWritesAllowed } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
 // shape: an infinite poll loop with durable SQLite state, each cycle wrapped so
@@ -380,6 +382,103 @@ async function reviewOthersTrades(leg: number): Promise<void> {
 }
 // #endregion
 
+// #region post-trade roster reconciliation and lineup re-solve
+// accept_trade only records consent; the drop-to-fit and the lineup fix happen
+// AFTER the trade processes, and nothing handled them. Filip: "when a trade
+// goes through and we need to remove a player, will it pick the correct one,
+// and will it fix our lineup?" These two functions are that yes.
+let reconcileBusy = false;
+
+/** If a completed trade (or anything else) left us over the 16-man limit, drop
+ *  the cheapest-to-lose players to get legal. Mechanism-agnostic: it fixes an
+ *  over-cap roster however it arose, which is more robust than betting on
+ *  Sleeper's exact accept-time drop flow, which we cannot rehearse. */
+async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void> {
+  if (reconcileBusy || draftActive()) return;
+  reconcileBusy = true;
+  try {
+    const league = await sleeper.league(config.leagueId);
+    const cap = activeCapacity(league.roster_positions);
+    const { players } = await myRoster();
+    const over = overCapBy(players.length, cap);
+    if (over === 0) return;
+
+    const snap = await snapshot();
+    const roster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+    const state = await sleeper.nflState();
+    const sched = await scheduleContext(null);
+    const cfg = { ...DEFAULT_FAIRNESS, ...sched };
+    const drops = chooseForcedDrops(roster, over, cfg);
+
+    if (drops.length < over) {
+      // Rails would not let us drop enough without cutting a stash or a
+      // never-drop. That is a human decision, not an automatic one.
+      logEvent("coach", "roster-overcap-stuck", `Over the roster cap by ${over} but only ${drops.length} legal drop(s); needs a human`, {
+        over, chose: drops.map((d) => d.name),
+      });
+      await sendAlert("Roster over cap, cannot auto-fix",
+        `We are ${over} over the ${cap}-man limit and the rails only allow dropping ${drops.length}: ${drops.map((d) => d.name).join(", ") || "none"}. Handle it in Sleeper.`).catch(() => {});
+      return;
+    }
+
+    logEvent("coach", "roster-reconcile", `Over cap by ${over}; dropping ${drops.map((d) => d.name).join(", ")}`, {
+      over, drops: drops.map((d) => ({ name: d.name, cost: d.cost })),
+    });
+    if (freezeState().frozen) {
+      await sendAlert("Roster over cap (frozen)", `Would drop ${drops.map((d) => d.name).join(", ")} but writes are frozen.`).catch(() => {});
+      return;
+    }
+    assertWritesAllowed("post-trade drop");
+
+    const idByName = snap.idByName;
+    const ids: string[] = [];
+    for (const d of drops) {
+      const id = idByName.get(d.name);
+      if (!id) { console.error(`[reconcile] no id for ${d.name}`); continue; }
+      ids.push(id);
+    }
+    try {
+      const res = await dropPlayers(gql, ids);
+      logEvent("coach", "roster-dropped", `Dropped ${drops.map((d) => d.name).join(", ")} to get under the cap`, { status: res.status, drops: drops.map((d) => d.name) });
+      // Roster changed: re-solve the lineup now rather than waiting for a timer.
+      await resolveLineupNow("a trade completed and the roster changed");
+    } catch (e) {
+      logEvent("coach", "roster-drop-failed", `Could not drop to get under the cap: ${e instanceof Error ? e.message : String(e)}`, { drops: drops.map((d) => d.name) });
+      await sendAlert("Post-trade drop failed", `Wanted to drop ${drops.map((d) => d.name).join(", ")} but the write failed: ${e instanceof Error ? e.message : String(e)}. Handle it in Sleeper.`).catch(() => {});
+    }
+  } finally {
+    reconcileBusy = false;
+  }
+}
+
+/** Re-solve and set the week's lineup immediately. Lineups are pure upside and
+ *  reversible until kickoff, so this needs no shadow phase. */
+async function resolveLineupNow(why: string): Promise<void> {
+  if (freezeState().frozen) return;
+  console.log(`[lineup] re-solving now: ${why}`);
+  const proc = Bun.spawn(["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"], { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" });
+  const code = await proc.exited;
+  if (code !== 0) console.error(`[lineup] re-solve exited ${code}`);
+}
+
+/** Notice a trade that has PROCESSED and react: reconcile the roster (which
+ *  re-solves the lineup if it drops anyone) and, even on an even trade that
+ *  needs no drop, re-solve the lineup so a newly acquired starter is in. */
+async function reactToCompletedTrades(gql: ReturnType<typeof leagueGql>, leg: number): Promise<void> {
+  if (draftActive()) return;
+  let trades;
+  try { trades = await completedTrades(gql, leg); } catch { return; }
+  const ours = trades.filter((t) => t.rosterIds.includes(config.rosterId) && !alreadyHandled(`done:${t.transactionId}`));
+  if (!ours.length) return;
+  for (const t of ours) markSeen(`done:${t.transactionId}`, "completed");
+  logEvent("coach", "trade-completed", `${ours.length} trade(s) involving us processed; reconciling roster and lineup`, {
+    transactions: ours.map((t) => t.transactionId),
+  });
+  await reconcileRoster(gql);
+  await resolveLineupNow("a trade involving us completed");
+}
+// #endregion
+
 async function pollOnce(): Promise<void> {
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
@@ -414,6 +513,12 @@ async function pollOnce(): Promise<void> {
   // dump for a human, because a wrong public veto poisons the league and the
   // vote mechanism is not yet observable to cast safely. See league/veto.ts.
   await reviewOthersTrades(round).catch((e) => console.error(`[veto] ${e instanceof Error ? e.message : String(e)}`));
+
+  // A completed trade means a roster change: drop to fit if over cap, and
+  // re-solve the lineup so the new players are actually started.
+  await reactToCompletedTrades(gql, round).catch((e) => console.error(`[reconcile] ${e instanceof Error ? e.message : String(e)}`));
+  // And a standing safety net: if we are ever over cap for any reason, fix it.
+  await reconcileRoster(gql).catch((e) => console.error(`[reconcile] ${e instanceof Error ? e.message : String(e)}`));
 
   // The coach answers its own DMs. Trade negotiation in this league happens in
   // chat, not the trade UI, so ignoring DMs meant ignoring half the game.
