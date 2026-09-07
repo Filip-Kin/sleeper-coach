@@ -228,6 +228,31 @@ export interface TradeBrief {
 
 /** Facts the DM reply is allowed to state. Empty is fine: the prompt tells the
  *  model to say it has nothing specific rather than invent something. */
+/** Every team's roster, grouped by position, keyed by owner name. This is
+ *  PUBLIC data (the Sleeper rosters endpoint), it was never actually hidden;
+ *  the coach only "could not see other teams" because the prompt told it to name
+ *  no player outside its own brief. With the real rosters in hand it can answer
+ *  "who has the deepest RB room" or "who finishes second" truthfully instead of
+ *  playing blind. Compact on purpose: names only, our team marked. */
+export async function leagueRostersContext(): Promise<string> {
+  const snap = await snapshot();
+  const users = (await fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/users`).then((r) => r.json())) as { user_id: string; display_name: string }[];
+  const nameOf = new Map(users.map((u) => [u.user_id, u.display_name]));
+  const lines: string[] = [];
+  for (const [rosterId, roster] of [...snap.rosterOf.entries()].sort((a, b) => a[0] - b[0])) {
+    const owner = nameOf.get(snap.ownerIdOf.get(rosterId) ?? "") ?? `roster ${rosterId}`;
+    const mine = rosterId === snap.ourRosterId ? " (MINE)" : "";
+    const byPos: Record<string, string[]> = {};
+    for (const p of roster) (byPos[p.position || "?"] ??= []).push(p.name);
+    const grouped = ["QB", "RB", "WR", "TE", "K", "DEF"]
+      .filter((pos) => byPos[pos]?.length)
+      .map((pos) => `${pos} ${byPos[pos]!.join(", ")}`)
+      .join("; ");
+    lines.push(`${owner}${mine}: ${grouped}`);
+  }
+  return lines.join("\n");
+}
+
 export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = browserGql()): Promise<TradeBrief> {
   void gql;
   const snap = await snapshotWithPending(gql);
