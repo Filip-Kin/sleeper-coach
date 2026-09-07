@@ -231,7 +231,7 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
     try {
       const rosterId = await rosterIdForUser(last.authorId);
       const [tb, rosters] = await Promise.all([tradeBriefFor(rosterId), leagueRostersContext()]);
-      brief = `LEAGUE ROSTERS (every team):\n${rosters}\n\nTRADE FACTS:\n${briefText(tb)}`;
+      brief = `LEAGUE ROSTERS AND ANALYSIS (every team, with rest-of-season projections, bye weeks, and the weeks each team is short a starter):\n${rosters}\n\nTRADE FACTS:\n${briefText(tb)}`;
       // If they asked for an offer, the offer goes out deterministically HERE,
       // and the model is told what happened. It never gets to decide.
       if (rosterId !== null && asksForCounter(last.text)) {

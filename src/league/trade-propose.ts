@@ -228,29 +228,47 @@ export interface TradeBrief {
 
 /** Facts the DM reply is allowed to state. Empty is fine: the prompt tells the
  *  model to say it has nothing specific rather than invent something. */
-/** Every team's roster, grouped by position, keyed by owner name. This is
- *  PUBLIC data (the Sleeper rosters endpoint), it was never actually hidden;
- *  the coach only "could not see other teams" because the prompt told it to name
- *  no player outside its own brief. With the real rosters in hand it can answer
- *  "who has the deepest RB room" or "who finishes second" truthfully instead of
- *  playing blind. Compact on purpose: names only, our team marked. */
+/** Full analysis of every team: rosters with rest-of-season projections and bye
+ *  weeks, plus the weeks each team drops below its starter needs. All PUBLIC,
+ *  all deterministic, handed to the coach so it can talk numbers and specific
+ *  bye-week holes about ANY team without a tool call. Filip: "it should have
+ *  all that information for every team at its fingertips." Tools were the other
+ *  option and are the wrong one here: the DM model runs sandboxed because the
+ *  input is a rival's message, and pre-computing keeps that guarantee while
+ *  giving the model trustworthy, already-correct facts instead of a fetch it
+ *  could get wrong or be tricked into. */
 export async function leagueRostersContext(): Promise<string> {
   const snap = await snapshot();
   const users = (await fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/users`).then((r) => r.json())) as { user_id: string; display_name: string }[];
   const nameOf = new Map(users.map((u) => [u.user_id, u.display_name]));
-  const lines: string[] = [];
+  const POS = ["QB", "RB", "WR", "TE", "K", "DEF"] as const;
+  // Dedicated starting slots a bye can leave empty (FLEX is flexible, ignored).
+  const need: Record<string, number> = { QB: 1, RB: 2, WR: 2, TE: 1, K: 1, DEF: 1 };
+
+  const blocks: string[] = [];
   for (const [rosterId, roster] of [...snap.rosterOf.entries()].sort((a, b) => a[0] - b[0])) {
     const owner = nameOf.get(snap.ownerIdOf.get(rosterId) ?? "") ?? `roster ${rosterId}`;
     const mine = rosterId === snap.ourRosterId ? " (MINE)" : "";
-    const byPos: Record<string, string[]> = {};
-    for (const p of roster) (byPos[p.position || "?"] ??= []).push(p.name);
-    const grouped = ["QB", "RB", "WR", "TE", "K", "DEF"]
-      .filter((pos) => byPos[pos]?.length)
-      .map((pos) => `${pos} ${byPos[pos]!.join(", ")}`)
-      .join("; ");
-    lines.push(`${owner}${mine}: ${grouped}`);
+    const byPos: Record<string, typeof roster> = {};
+    for (const p of roster) (byPos[p.position || "?"] ??= []).push(p);
+    const lines = POS.filter((pos) => byPos[pos]?.length).map((pos) =>
+      `  ${pos}: ` + byPos[pos]!
+        .slice().sort((a, b) => b.points - a.points)
+        .map((p) => `${p.name} (${Math.round(p.points)}${p.bye ? `, bye ${p.bye}` : ""})`)
+        .join(", "));
+
+    // Per-week starter holes from byes, weeks 1-14 (regular season pre-playoff).
+    const holes: string[] = [];
+    for (let w = 1; w <= 14; w++) {
+      const avail: Record<string, number> = {};
+      for (const p of roster) if (p.bye !== w) avail[p.position] = (avail[p.position] ?? 0) + 1;
+      const short = POS.filter((pos) => (avail[pos] ?? 0) < (need[pos] ?? 0))
+        .map((pos) => `${pos}=${avail[pos] ?? 0}/${need[pos] ?? 0}`);
+      if (short.length) holes.push(`wk${w} ${short.join(" ")}`);
+    }
+    blocks.push(`${owner}${mine}:\n${lines.join("\n")}` + (holes.length ? `\n  bye holes: ${holes.join("; ")}` : ""));
   }
-  return lines.join("\n");
+  return blocks.join("\n\n");
 }
 
 export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = browserGql()): Promise<TradeBrief> {
