@@ -33,7 +33,7 @@ import { logEvent } from "../log.ts";
 import { freezeState } from "../killswitch.ts";
 import { runAgent } from "../agent/runner.ts";
 import { listDms, threadMessages, sendDm, pendingChatRequests, acceptChatRequest, type Gql, type DmMessage, type ChatRequest } from "./api.ts";
-import { tradeBriefFor, briefText, leagueRostersContext, pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS } from "./trade-propose.ts";
+import { tradeBriefFor, briefText, leagueRostersContext, projectedFinishOrder, pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS } from "./trade-propose.ts";
 import { proposeTrade, outstandingOffers } from "./api.ts";
 import { scheduleContext } from "../analysis/trade-wire.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
@@ -230,8 +230,8 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
     let brief = "You have no roster information available, so do not name any player.";
     try {
       const rosterId = await rosterIdForUser(last.authorId);
-      const [tb, rosters] = await Promise.all([tradeBriefFor(rosterId), leagueRostersContext()]);
-      brief = `LEAGUE ROSTERS AND ANALYSIS (every team, with rest-of-season projections, bye weeks, and the weeks each team is short a starter):\n${rosters}\n\nTRADE FACTS:\n${briefText(tb)}`;
+      const [tb, rosters, finish] = await Promise.all([tradeBriefFor(rosterId), leagueRostersContext(), projectedFinishOrder()]);
+      brief = `YOUR COMPUTED FINISH PREDICTION (by projected roster strength: optimal bye-aware lineup plus injury cover, blended with record once games are played). State this order when asked where teams finish; do not improvise a different one:\n${finish}\n\nLEAGUE ROSTERS AND ANALYSIS (every team, with rest-of-season projections, bye weeks, and the weeks each team is short a starter):\n${rosters}\n\nTRADE FACTS:\n${briefText(tb)}`;
       // If they asked for an offer, the offer goes out deterministically HERE,
       // and the model is told what happened. It never gets to decide.
       if (rosterId !== null && asksForCounter(last.text)) {

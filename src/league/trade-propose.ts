@@ -35,7 +35,7 @@ import { logEvent, recentEvents } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { browserGql, proposeTrade, outstandingOffers, listDms, sendDm, type Gql } from "./api.ts";
 import { snapshot, snapshotWithPending, scheduleContext } from "../analysis/trade-wire.ts";
-import { proposeTrades, giveEligibleForProposal, DEFAULT_FAIRNESS, type Proposal, type RivalRoster, type FairnessConfig } from "../analysis/trade-fair.ts";
+import { proposeTrades, giveEligibleForProposal, byeAwareLineupTotal, depthInsurance, DEFAULT_FAIRNESS, type Proposal, type RivalRoster, type FairnessConfig } from "../analysis/trade-fair.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
 import { sleeper } from "../sleeper/client.ts";
 
@@ -228,6 +228,48 @@ export interface TradeBrief {
 
 /** Facts the DM reply is allowed to state. Empty is fine: the prompt tells the
  *  model to say it has nothing specific rather than invent something. */
+/** The coach's OWN projected finish order, computed, not guessed. Ranks every
+ *  team by projected points-for from its optimal bye-aware starting lineup over
+ *  the remaining season (byeAwareLineupTotal), blended with current record once
+ *  games have been played. Filip: "actually compute who is 2nd and 3rd." Without
+ *  this the model picked a different 2nd/3rd every run off whichever two stars
+ *  caught its eye; the computed order is stable and defensible (two stars do not
+ *  fill a ten-slot lineup, which is why the star-heavy teams rank lower than they
+ *  look). Fed into the brief as the coach's official prediction. */
+export async function projectedFinishOrder(): Promise<string> {
+  const snap = await snapshot();
+  const [users, rosters, state] = await Promise.all([
+    fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/users`).then((r) => r.json()) as Promise<{ user_id: string; display_name: string }[]>,
+    fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/rosters`).then((r) => r.json()) as Promise<{ roster_id: number; settings?: { wins?: number; losses?: number; fpts?: number } }[]>,
+    sleeper.nflState(),
+  ]);
+  const nameOf = new Map(users.map((u) => [u.user_id, u.display_name]));
+  const week = Math.max(1, state.week ?? 1);
+  const remaining: number[] = [];
+  for (let w = week; w <= 15; w++) remaining.push(w);
+  const settingsOf = new Map(rosters.map((r) => [r.roster_id, r.settings ?? {}]));
+
+  const rows = [...snap.rosterOf.entries()].map(([rid, roster]) => {
+    const owner = nameOf.get(snap.ownerIdOf.get(rid) ?? "") ?? `roster ${rid}`;
+    const st = settingsOf.get(rid) ?? {};
+    // Strength = optimal starting lineup projected week by week with bye players
+    // removed (bye coverage), PLUS injury cover: the value of the bench as
+    // insurance at each position, same as the trade engine scores a team. A
+    // roster that survives a starter going down is genuinely stronger over a
+    // season than one whose projection is all in its starters.
+    const lineup = byeAwareLineupTotal(roster as never, remaining);
+    const cover = depthInsurance(roster as never, DEFAULT_FAIRNESS);
+    const projPerSeason = Math.round(lineup + cover);
+    // Actual results pull once they exist; fpts is 0 preseason, so early on this
+    // is pure projected strength, which is right.
+    const score = projPerSeason + (st.fpts ?? 0) + (st.wins ?? 0) * 5;
+    return { rid, owner: rid === snap.ourRosterId ? `${owner} (you, CoachClaude)` : owner, proj: projPerSeason, cover: Math.round(cover), wins: st.wins ?? 0, losses: st.losses ?? 0, score };
+  }).sort((a, b) => b.score - a.score);
+
+  return rows.map((r, i) =>
+    `${i + 1}. ${r.owner} (projected strength ${r.proj}, incl. ${r.cover} of injury cover${r.wins || r.losses ? `, record ${r.wins}-${r.losses}` : ""})`).join("\n");
+}
+
 /** Full analysis of every team: rosters with rest-of-season projections and bye
  *  weeks, plus the weeks each team drops below its starter needs. All PUBLIC,
  *  all deterministic, handed to the coach so it can talk numbers and specific
