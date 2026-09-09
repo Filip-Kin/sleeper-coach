@@ -14,10 +14,8 @@
 //   - pick landed = a pick appears at the pick_no we sent
 // The agent plans between picks; on the clock we act fast and deterministically.
 //
-//   bun run src/draft/run.ts [draftId] [--rehearse] [--seat=N] [--open-room]
+//   bun run src/draft/run.ts [draftId] [--rehearse] [--seat=N]
 //
-// --open-room points the shared browser at the draft room once, for whoever is
-// watching over noVNC. Nothing is read back from it.
 
 import { unlinkSync } from "node:fs";
 import { config, vonaConfig } from "../config.ts";
@@ -39,7 +37,6 @@ import { loadNews, newsFor, applyNews, type NewsEntry } from "../data/news.ts";
 import { logEvent, logThink } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 
-const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
 // Pause between announcing our intent and picking, so the announcer's voice
 // leads the pick. Safe: the draft clock is 90s+, and if the announcer is dead
@@ -55,15 +52,12 @@ const THINK_PAUSE_MS = Number(process.env.THINK_PAUSE_MS ?? 5000);
 const argv = process.argv.slice(2);
 const draftId = argv.find((a) => !a.startsWith("--")) ?? config.draftId;
 const rehearse = argv.includes("--rehearse");
-const openRoom = argv.includes("--open-room");
 const seat = Number(argv.find((a) => a.startsWith("--seat="))?.split("=")[1] ?? "0"); // 0-indexed CLAIM
-const roomUrl = `https://sleeper.com/draft/nfl/${draftId}`;
 
-// Two transports. Public reads go straight to the endpoint (no token, no
-// browser serialisation); anything user-scoped or mutating carries the session
-// token by running inside the logged-in page.
+// Two transports. Public reads go straight to the endpoint with no token;
+// anything user-scoped or mutating carries the session token (league/token.ts).
 const pub = publicDraftGql;
-const auth = browserGql(API);
+const auth = browserGql();
 
 let draft: DraftInfo = await getDraft(pub, draftId);
 const teams = draft.teams;
@@ -71,11 +65,6 @@ const rounds = draft.rounds;
 console.log(`[draft-run] draft ${draftId}: ${teams}x${rounds}=${teams * rounds} picks, ${draft.pickTimer}s clock, status ${draft.status}${draft.leagueId ? "" : " (mock)"}`);
 
 await Bun.write(DRAFT_LOCK, String(draftId)); // daemon: hands off the browser
-
-if (openRoom) {
-  await fetch(`${API}/goto`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: roomUrl }) })
-    .catch((e: unknown) => console.log(`[draft-run] open-room failed: ${e instanceof Error ? e.message : String(e)}`));
-}
 
 // Rehearsal: claim a seat (position variety via --seat) before setting the queue.
 if (rehearse) {
