@@ -1,4 +1,5 @@
 import { SLEEPER_API } from "../config.ts";
+import { withRestFallback, leagueRosters, getLeague, sportInfo, matchupLegsRaw, leagueUsers } from "./graphql.ts";
 import type {
   League,
   LeagueUser,
@@ -54,18 +55,24 @@ async function getRoot<T>(path: string, attempt = 0): Promise<T> {
 // #endregion
 
 // #region endpoints
+// League reads go to GraphQL first (sleeper/graphql.ts) because the REST
+// copies sit behind a five-minute CDN cache, and fall back to REST if the
+// undocumented endpoint ever fails. Same return shapes either way, so callers
+// do not care which path answered.
 export const sleeper = {
   user: (usernameOrId: string) => get<SleeperUser>(`/user/${usernameOrId}`),
 
-  league: (leagueId: string) => get<League>(`/league/${leagueId}`),
+  league: (leagueId: string) =>
+    withRestFallback("league", () => getLeague(leagueId), () => get<League>(`/league/${leagueId}`)),
 
   leagueUsers: (leagueId: string) =>
-    get<LeagueUser[]>(`/league/${leagueId}/users`),
+    withRestFallback("leagueUsers", () => leagueUsers(leagueId), () => get<LeagueUser[]>(`/league/${leagueId}/users`)),
 
-  rosters: (leagueId: string) => get<Roster[]>(`/league/${leagueId}/rosters`),
+  rosters: (leagueId: string) =>
+    withRestFallback("rosters", () => leagueRosters(leagueId), () => get<Roster[]>(`/league/${leagueId}/rosters`)),
 
   matchups: (leagueId: string, week: number) =>
-    get<unknown[]>(`/league/${leagueId}/matchups/${week}`),
+    withRestFallback<unknown[]>("matchups", () => matchupLegsRaw(leagueId, week), () => get<unknown[]>(`/league/${leagueId}/matchups/${week}`)),
 
   // Completed and pending transactions for a scoring period (the "round").
   transactions: (leagueId: string, round: number) =>
@@ -78,7 +85,8 @@ export const sleeper = {
   // The full NFL player dump (~5MB). Cache it; refresh at most once a day.
   playersDump: () => get<PlayersMap>(`/players/nfl`),
 
-  nflState: () => get<NflState>(`/state/nfl`),
+  nflState: () =>
+    withRestFallback("nflState", () => sportInfo("nfl"), () => get<NflState>(`/state/nfl`)),
 
   // Season-long projections (includes ADP and a full projected stat line).
   seasonProjections: (season: string) =>

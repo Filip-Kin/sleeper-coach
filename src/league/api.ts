@@ -17,6 +17,7 @@
 // surface is here too.
 
 import { config } from "../config.ts";
+import { assertWritesAllowed } from "../killswitch.ts";
 
 export type Gql = (query: string) => Promise<Record<string, unknown>>;
 
@@ -410,7 +411,16 @@ export async function cancelWaiverClaim(
 export async function updateStarters(
   gql: Gql, starters: string[], rosterId = config.rosterId, leagueId = config.leagueId,
 ): Promise<string[]> {
-  for (const id of starters) if (id && id !== "0") safeId(id);
+  // The kill switch is checked at the chokepoint, same as the DOM setLineup:
+  // the lineup guard, the scheduled locks and a manual script all pass here.
+  assertWritesAllowed("set starters");
+  // A starter is a numeric player id, a 2-3 letter team code for a defense
+  // (SEA, KC), or "0" for an empty slot. safeId alone rejects the defenses.
+  for (const id of starters) {
+    if (!id || id === "0") continue;
+    if (/^[A-Z]{2,3}$/.test(id)) continue;
+    safeId(id);
+  }
   const list = `[${starters.map((x) => `"${x}"`).join(",")}]`;
   const body = await gql(
     `mutation{roster_update_starters(league_id:"${safeId(leagueId)}",roster_id:${Math.trunc(rosterId)},starters:${list}){roster_id starters}}`,

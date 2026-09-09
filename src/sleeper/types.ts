@@ -69,6 +69,20 @@ export interface RosterSettings {
   fpts_decimal: number;
 }
 
+/** The mini player record GraphQL league_rosters attaches per rostered
+ *  player. Live injury_status without the 14 MB player dump. */
+export interface RosterPlayerMini {
+  player_id: string;
+  first_name: string;
+  last_name: string;
+  position: Position | null;
+  fantasy_positions: Position[] | null;
+  team: string | null;
+  status: string | null;
+  injury_status: string | null;
+  news_updated: number | null;
+}
+
 export interface Roster {
   roster_id: number;
   owner_id: string | null;
@@ -77,6 +91,8 @@ export interface Roster {
   reserve: string[] | null;
   keepers: string[] | null;
   settings: RosterSettings;
+  /** Present when read over GraphQL (sleeper/graphql.ts); absent from REST. */
+  player_map?: Record<string, RosterPlayerMini>;
 }
 
 export interface DraftSettings {

@@ -9,6 +9,7 @@ import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
 import { unreactedDrops } from "./analysis/waivers.ts";
 import { browserGql as leagueGql, dropPlayers, completedTrades, myRoster } from "./league/api.ts";
+import { runLineupGuard } from "./act/lineup-guard.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
 import { handleDms } from "./league/dm-watch.ts";
 import { assessVeto, DEFAULT_VETO } from "./league/veto.ts";
@@ -483,6 +484,13 @@ async function pollOnce(): Promise<void> {
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
   if (draftActive()) return; // don't drive the browser mid-draft
+
+  // Is the lineup on the site still the optimal one? A starter ruled Out since
+  // the last lock, or a player back from Out, is fixed here, every poll, not at
+  // the next fixed lock. The reads are public GraphQL (no browser, no player
+  // dump), so this runs before the browser gate; only a needed write waits for
+  // the browser. See act/lineup-guard.ts.
+  await runLineupGuard({ browserReady }).catch((e) => console.error(`[lineup-guard] ${e instanceof Error ? e.message : String(e)}`));
 
   // TRADES COME FROM GRAPHQL, NOT REST. On 2026-09-02 a real offer sat live for
   // hours and the coach never saw it: GET /transactions/<week> does not list

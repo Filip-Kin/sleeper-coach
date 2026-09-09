@@ -38,6 +38,7 @@ import { snapshot, snapshotWithPending, scheduleContext } from "../analysis/trad
 import { proposeTrades, giveEligibleForProposal, byeAwareLineupTotal, depthInsurance, DEFAULT_FAIRNESS, type Proposal, type RivalRoster, type FairnessConfig } from "../analysis/trade-fair.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
 import { sleeper } from "../sleeper/client.ts";
+import type { RosterSettings } from "../sleeper/types.ts";
 
 /** Never have more than this many of our offers waiting for an answer. */
 export const MAX_OPEN_OFFERS = 2;
@@ -239,8 +240,8 @@ export interface TradeBrief {
 export async function projectedFinishOrder(): Promise<string> {
   const snap = await snapshot();
   const [users, rosters, state] = await Promise.all([
-    fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/users`).then((r) => r.json()) as Promise<{ user_id: string; display_name: string }[]>,
-    fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/rosters`).then((r) => r.json()) as Promise<{ roster_id: number; settings?: { wins?: number; losses?: number; fpts?: number } }[]>,
+    sleeper.leagueUsers(config.leagueId),
+    sleeper.rosters(config.leagueId),
     sleeper.nflState(),
   ]);
   const nameOf = new Map(users.map((u) => [u.user_id, u.display_name]));
@@ -251,7 +252,7 @@ export async function projectedFinishOrder(): Promise<string> {
 
   const rows = [...snap.rosterOf.entries()].map(([rid, roster]) => {
     const owner = nameOf.get(snap.ownerIdOf.get(rid) ?? "") ?? `roster ${rid}`;
-    const st = settingsOf.get(rid) ?? {};
+    const st: Partial<RosterSettings> = settingsOf.get(rid) ?? {};
     // Strength = optimal starting lineup projected week by week with bye players
     // removed (bye coverage), PLUS injury cover: the value of the bench as
     // insurance at each position, same as the trade engine scores a team. A
@@ -281,7 +282,7 @@ export async function projectedFinishOrder(): Promise<string> {
  *  could get wrong or be tricked into. */
 export async function leagueRostersContext(): Promise<string> {
   const snap = await snapshot();
-  const users = (await fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/users`).then((r) => r.json())) as { user_id: string; display_name: string }[];
+  const users = await sleeper.leagueUsers(config.leagueId);
   const nameOf = new Map(users.map((u) => [u.user_id, u.display_name]));
   const POS = ["QB", "RB", "WR", "TE", "K", "DEF"] as const;
   // Dedicated starting slots a bye can leave empty (FLEX is flexible, ignored).

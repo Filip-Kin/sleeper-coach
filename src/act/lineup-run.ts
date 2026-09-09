@@ -25,6 +25,9 @@ import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts
 import { buildRosterWeek } from "../analysis/roster-week.ts";
 import { solveLineup, startingSlots, starterIds } from "../analysis/lineup.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
+import { browserGql, updateStarters } from "../league/api.ts";
+import { leagueRosters } from "../sleeper/graphql.ts";
+import { overlayRosterStatus } from "./lineup-guard.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 
@@ -46,6 +49,24 @@ async function postLineup(ids: string[], leagueId: string): Promise<void> {
   });
   const j = (await res.json().catch(() => ({}))) as { error?: string };
   if (!res.ok || j.error) throw new Error(String(j.error ?? res.statusText));
+}
+
+// The write. GraphQL roster_update_starters first (one request, ~60 ms,
+// verified by an uncached league_rosters read-back), the DOM path only if that
+// fails. Verified live 2026-09-09: the mutation echoed the array and the
+// read-back matched. The DOM path stays as the fallback because it has months
+// of successful writes behind it and costs nothing to keep.
+async function writeStarters(ids: string[], leagueId: string, rosterId: number): Promise<"graphql" | "dom"> {
+  try {
+    await updateStarters(browserGql(), ids, rosterId, leagueId);
+    const back = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId)?.starters ?? [];
+    if (back.join(",") !== ids.join(",")) throw new Error(`read-back mismatch: site has ${back.join(",")}`);
+    return "graphql";
+  } catch (err) {
+    console.error(`GraphQL starters write failed (${err instanceof Error ? err.message : String(err)}); using the DOM path`);
+    await postLineup(ids, leagueId);
+    return "dom";
+  }
 }
 
 async function main(): Promise<void> {
@@ -85,10 +106,15 @@ async function main(): Promise<void> {
     throw new Error(`no roster ${rosterId} in league ${leagueId}, or it is empty`);
   }
 
-  const [players, weekProj] = await Promise.all([
-    loadPlayers({ forceRefresh: refresh }),
+  // --refresh used to force the 14 MB player dump for fresh injury statuses.
+  // The rosters read above is GraphQL now and carries player_map, a live
+  // injury_status per rostered player, so the dump is only names and
+  // positions and the cached copy is fine. Projections are still refreshed.
+  const [dump, weekProj] = await Promise.all([
+    loadPlayers(),
     loadWeekProjections(season, week, league.scoring_settings, { forceRefresh: refresh }),
   ]);
+  const players = overlayRosterStatus(dump, mine);
   const idx = byPlayerId(weekProj);
   const candidates = buildRosterWeek(mine.players, players, idx, week);
   const lineup = solveLineup(candidates, slots);
@@ -133,8 +159,9 @@ async function main(): Promise<void> {
 
   assertWritesAllowed(`set the week ${week} lineup`);
   const ids = starterIds(lineup);
+  let path: "graphql" | "dom" = "graphql";
   try {
-    await postLineup(ids, leagueId);
+    path = await writeStarters(ids, leagueId, rosterId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Read-back verification lives inside setLineup; a throw here means the write
@@ -143,8 +170,8 @@ async function main(): Promise<void> {
     await sendAlert("Lineup write failed", `Week ${week}, league ${leagueId}: ${msg}`);
     throw err;
   }
-  console.log(`\nLINEUP SET and verified for week ${week} (league ${leagueId}).`);
-  logEvent("coach", "lineup-set", `Week ${week} lineup set and verified, ${lineup.total.toFixed(1)} projected.`, { week, leagueId, ids });
+  console.log(`\nLINEUP SET and verified for week ${week} (league ${leagueId}) via ${path}.`);
+  logEvent("coach", "lineup-set", `Week ${week} lineup set and verified, ${lineup.total.toFixed(1)} projected.`, { week, leagueId, ids, path });
 }
 
 main()

@@ -322,10 +322,7 @@ export async function acceptLeagueChatRequests(gql: Gql): Promise<ChatRequest[]>
 
 /** Sleeper user ids of everyone in our league. */
 async function leagueMemberIds(): Promise<Set<string>> {
-  const res = await fetch(`https://api.sleeper.app/v1/league/${config.leagueId}/users`, {
-    signal: AbortSignal.timeout(10_000),
-  });
-  const users = (await res.json()) as { user_id: string }[];
+  const users = await sleeper.leagueUsers(config.leagueId);
   return new Set(users.map((u) => String(u.user_id)));
 }
 

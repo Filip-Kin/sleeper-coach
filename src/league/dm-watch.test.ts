@@ -172,6 +172,18 @@ test("em dashes are replaced, because a model reaches for them constantly", () =
 import { acceptLeagueChatRequests } from "./dm-watch.ts";
 import { acceptChatRequest } from "./api.ts";
 
+// leagueMemberIds reads league users GraphQL-first with a REST fallback, so the
+// mock answers both shapes: a GraphQL body for sleeper.app/graphql, the bare
+// array for the REST URL.
+function mockUsersFetch(ids: string[]): typeof fetch {
+  return (async (url: string | URL | Request) => {
+    const u = String(url instanceof Request ? url.url : url);
+    const body = u.includes("/graphql") ? { data: { league_users: ids.map((user_id) => ({ user_id, display_name: user_id })) } } : ids.map((user_id) => ({ user_id }));
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+}
+
+
 test("the request types are the undiscoverable ones, not a guess", async () => {
   // "dm", "chat", "friend" and "league_dm" all return an empty list happily.
   // Only "dm_single" and "dm_group" work, found by hooking XHR in the app.
@@ -199,7 +211,7 @@ test("only league mates get auto-accepted", async () => {
     return { data: { accept_request: true } };
   };
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => ({ json: async () => [{ user_id: "1267685003886604288" }] })) as never;
+  globalThis.fetch = mockUsersFetch(["1267685003886604288"]);
   try {
     const accepted = await acceptLeagueChatRequests(gql as never);
     expect(accepted.map((a) => a.requesterId)).toEqual(["1267685003886604288"]);
@@ -245,7 +257,7 @@ test("a group DM invite is accepted the same way a 1:1 invite is", async () => {
     return { data: { accept_request: true } };
   };
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => ({ json: async () => [{ user_id: "1129924426755289088" }] })) as never;
+  globalThis.fetch = mockUsersFetch(["1129924426755289088"]);
   try {
     const accepted = await acceptLeagueChatRequests(gql as never);
     expect(accepted.map((a) => a.requesterId)).toEqual(["1129924426755289088"]);
@@ -265,7 +277,7 @@ test("a broken request type does not block accepting the other", async () => {
     return { data: { accept_request: true } };
   };
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => ({ json: async () => [{ user_id: "1129924426755289088" }] })) as never;
+  globalThis.fetch = mockUsersFetch(["1129924426755289088"]);
   try {
     const accepted = await acceptLeagueChatRequests(gql as never);
     expect(accepted.length).toBe(1);
