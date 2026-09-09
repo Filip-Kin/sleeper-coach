@@ -1,21 +1,33 @@
 #!/usr/bin/env bun
 // Autonomous draft orchestrator.
 //
-// ALL draft state comes from the live browser DOM + our own local record — never
-// the Sleeper picks API, which lags badly during a live draft (that lag caused
-// mistimed turns, duplicate QB/TE past the cap, and a missed pick). Specifically:
-//   - turn        = our pick button is live (DOM), debounced past the kickoff flash
-//   - available   = the draft room's player list (DOM), full names
-//   - our roster  = tracked LOCALLY as we pick (zero lag), seeded from the board
-//   - rival picks = scraped from the board cells (DOM)
-//   - pick landed = our cell count on the board grew (DOM)
+// ALL draft state comes from Sleeper GraphQL plus our own local record. The
+// 2026 draft ran off the draft-room DOM because REST /draft/<id>/picks lags by
+// up to a day during a live draft (that lag caused mistimed turns, duplicate
+// QB/TE past the cap, and a missed pick). GraphQL draft_picks is the feed the
+// room itself renders from, so the DOM is no longer needed:
+//   - turn        = get_draft status is "drafting" and the lowest open pick_no
+//                   belongs to our draft_order slot
+//   - available   = our value board minus draft_picks, filtered to active players
+//   - our roster  = tracked LOCALLY as we pick (zero lag), seeded from the picks
+//   - rival picks = draft_picks, with full names from the pick metadata
+//   - pick landed = a pick appears at the pick_no we sent
 // The agent plans between picks; on the clock we act fast and deterministically.
 //
-//   bun run src/draft/run.ts [draftId] [--rehearse] [--seat=N]
+//   bun run src/draft/run.ts [draftId] [--rehearse] [--seat=N] [--open-room]
+//
+// --open-room points the shared browser at the draft room once, for whoever is
+// watching over noVNC. Nothing is read back from it.
 
 import { unlinkSync } from "node:fs";
 import { config, vonaConfig } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
+import { browserGql } from "../league/api.ts";
+import {
+  publicDraftGql, getDraft, draftPicks, draftQueue, updateDraftQueue, draftPickPlayer, reactToDraftPick,
+  draftAutopickers, activePlayers, availableIds, clockState, claimDraftSlot, updateDraftStatus,
+  pickRound, pickSlot, type DraftInfo, type LivePick, type ClockState,
+} from "../league/draft-api.ts";
 import { runAgent } from "../agent/runner.ts";
 import { loadSeasonProjections } from "../analysis/projections.ts";
 import { rankByVor, type RankedPlayer } from "../analysis/vor.ts";
@@ -29,7 +41,7 @@ import { sendAlert } from "../alert.ts";
 
 const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
-// Pause between announcing our intent and clicking, so the announcer's voice
+// Pause between announcing our intent and picking, so the announcer's voice
 // leads the pick. Safe: the draft clock is 90s+, and if the announcer is dead
 // this is just a short fixed wait, never an actual block.
 const ANNOUNCE_LEAD_MS = Number(process.env.ANNOUNCE_LEAD_MS ?? 6000);
@@ -43,40 +55,47 @@ const THINK_PAUSE_MS = Number(process.env.THINK_PAUSE_MS ?? 5000);
 const argv = process.argv.slice(2);
 const draftId = argv.find((a) => !a.startsWith("--")) ?? config.draftId;
 const rehearse = argv.includes("--rehearse");
+const openRoom = argv.includes("--open-room");
 const seat = Number(argv.find((a) => a.startsWith("--seat="))?.split("=")[1] ?? "0"); // 0-indexed CLAIM
 const roomUrl = `https://sleeper.com/draft/nfl/${draftId}`;
 
-async function api(path: string, body?: unknown): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API}${path}`, {
-    method: body ? "POST" : "GET",
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  return (await res.json()) as Record<string, unknown>;
-}
+// Two transports. Public reads go straight to the endpoint (no token, no
+// browser serialisation); anything user-scoped or mutating carries the session
+// token by running inside the logged-in page.
+const pub = publicDraftGql;
+const auth = browserGql(API);
 
-const draft = await sleeper.draft(draftId);
-const teams = draft.settings.teams;
-const rounds = draft.settings.rounds;
-console.log(`[draft-run] draft ${draftId}: ${teams}x${rounds}=${teams * rounds} picks, ${draft.settings.pick_timer}s clock`);
+let draft: DraftInfo = await getDraft(pub, draftId);
+const teams = draft.teams;
+const rounds = draft.rounds;
+console.log(`[draft-run] draft ${draftId}: ${teams}x${rounds}=${teams * rounds} picks, ${draft.pickTimer}s clock, status ${draft.status}${draft.leagueId ? "" : " (mock)"}`);
 
 await Bun.write(DRAFT_LOCK, String(draftId)); // daemon: hands off the browser
 
-async function ensureRoom(): Promise<void> {
-  const u = String((await api("/eval", { expr: "location.href" })).result ?? "");
-  if (!u.includes(String(draftId))) {
-    await api("/goto", { url: roomUrl });
-    await Bun.sleep(2500);
-  }
+if (openRoom) {
+  await fetch(`${API}/goto`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: roomUrl }) })
+    .catch((e: unknown) => console.log(`[draft-run] open-room failed: ${e instanceof Error ? e.message : String(e)}`));
 }
-await api("/goto", { url: roomUrl });
-await Bun.sleep(3000);
 
 // Rehearsal: claim a seat (position variety via --seat) before setting the queue.
 if (rehearse) {
   console.log(`[draft-run] rehearse: claiming seat ${seat + 1}`);
-  await api("/click", { text: "CLAIM", nth: seat }).catch(() => {});
-  await Bun.sleep(2500);
+  try {
+    draft = await claimDraftSlot(auth, draftId, seat + 1);
+  } catch (e) {
+    console.log(`[draft-run] rehearse: claim failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+// If Sleeper has us on autopick it drafts off the queue the instant we are on
+// the clock, before this loop can act. Say so up front rather than discovering
+// it as a string of "did NOT register" alerts.
+{
+  const auto = await draftAutopickers(pub, draftId).catch(() => [] as string[]);
+  if (auto.includes(config.userId)) {
+    console.log("[draft-run] WARNING: we are on Sleeper autopick; turn it off in the room or the queue picks for us");
+    if (!rehearse) await sendAlert("Draft: autopick is ON", "Sleeper lists us as an autopicker. Turn it off in the draft room or the queue picks ahead of the coach.");
+  }
 }
 
 // Value the board by THIS league's live scoring settings (full PPR).
@@ -88,7 +107,7 @@ console.log(`[draft-run] scoring: ${scoringLabel} (rec ${rec})`);
 const rawProjections = await loadSeasonProjections(config.season, scoring);
 
 // The news layer. Projections and ADP feeds cannot see a pending suspension or
-// a PUP list, so scale points by the dossier BEFORE value is computed — that way
+// a PUP list, so scale points by the dossier BEFORE value is computed, that way
 // VOR, positional tiers and VONA survival all agree on what a player is worth.
 // Only facts with a stated absence move a player; everything else is advisory
 // text the agent reads on the shortlist (see src/data/news.ts).
@@ -96,22 +115,36 @@ const { updatedAt: newsAt, byKey: news } = await loadNews();
 const { adjusted: projections, changed: newsChanged } = applyNews(rawProjections, news);
 console.log(`[draft-run] news: ${news.size} entries (updated ${newsAt ?? "unknown"}), ${newsChanged.length} players devalued`);
 for (const c of newsChanged) console.log(`[draft-run]   ${c.status.toUpperCase()} ${c.name}: ${c.from.toFixed(0)} -> ${c.to.toFixed(0)}pts`);
-if (news.size === 0) console.log("[draft-run] WARNING: no news dossier loaded — drafting on numbers alone");
+if (news.size === 0) console.log("[draft-run] WARNING: no news dossier loaded, drafting on numbers alone");
 logEvent("coach", "news-loaded", `News dossier: ${news.size} entries, ${newsChanged.length} players devalued.`, { updatedAt: newsAt, changed: newsChanged });
 
-// The static value board — VOR under our scoring. It does NOT depend on who's
+// The static value board, VOR under our scoring. It does NOT depend on who's
 // been drafted (availability is judged live from the DOM), so compute it once.
 const fullBoard: RankedPlayer[] = rankByVor(projections, league, rawProjections);
 const byName = new Map(fullBoard.map((b) => [b.name, b]));
+const byId = new Map(fullBoard.map((b) => [b.playerId, b]));
 
-// #region VONA — value over next available
+// The active-player universe, read once. It filters the board to players
+// Sleeper will actually let us draft; a retired or unsigned name in the
+// projections feed is otherwise a pick that errors on the clock. Best effort:
+// without it the board alone decides, which is what the DOM loop did too.
+let activeIds: Set<string> | null = null;
+try {
+  const active = await activePlayers(pub);
+  activeIds = new Set(active.map((p) => p.playerId));
+  const offBoard = fullBoard.filter((b) => !/^[A-Z]{2,3}$/.test(b.playerId) && !activeIds!.has(b.playerId)).length;
+  console.log(`[draft-run] active players: ${active.length} (${offBoard} board names not active, ignored)`);
+} catch (e) {
+  console.log(`[draft-run] WARNING: get_active_players failed (${e instanceof Error ? e.message : String(e)}); availability from the board alone`);
+}
+
+// #region VONA: value over next available
 // Resolve draft slot -> Sleeper username, once, so the opponent survival prior
 // can tell WHICH known manager picks in the gap before our next turn. Best
 // effort: if a lookup fails we simply skip that seat's nudge.
 const slotUsername = new Map<number, string>();
 if (vonaConfig.enabled && vonaConfig.oppNudge > 0) {
-  for (const [userId, slot] of Object.entries(draft.draft_order ?? {})) {
-    if (typeof slot !== "number") continue;
+  for (const [userId, slot] of Object.entries(draft.draftOrder ?? {})) {
     try {
       const u = await sleeper.user(userId);
       if (u?.username) slotUsername.set(slot, u.username);
@@ -150,24 +183,53 @@ function rankAvailable(availableNames: Set<string>, round: number): VonaPlayer[]
 }
 // #endregion
 
-// #region live state (all DOM)
-interface State { onClock: boolean; available: { name: string; pos: string }[]; drafted: number }
+// #region live state (all GraphQL)
+interface BoardPick { round: number; slot: number; name: string; pos: string; pickNo: number; playerId: string }
+interface State {
+  onClock: boolean;
+  available: { name: string; pos: string }[];
+  drafted: number;
+  picks: BoardPick[];
+  clock: ClockState;
+  draft: DraftInfo;
+}
+
+// Every drafted pick, tagged with the drafting slot derived from its pick_no.
+// Names come from our board when the player is on it (so byName lookups for
+// byes work) and from the pick's own metadata otherwise. Full names, unlike
+// the abbreviated "B. Robinson" the board cells used to give us.
+function toBoardPicks(picks: LivePick[]): BoardPick[] {
+  return picks.map((p) => ({
+    round: pickRound(p.pickNo, teams),
+    slot: pickSlot(p.pickNo, teams),
+    name: byId.get(p.playerId)?.name ?? p.name,
+    pos: p.position || byId.get(p.playerId)?.position || "",
+    pickNo: p.pickNo,
+    playerId: p.playerId,
+  }));
+}
+
+// Who is still draftable: the board minus the picks, minus anyone Sleeper no
+// longer lists as active. Ordered by ADP so the top of the list reads like the
+// room's default sort, which is what the dashboard's "available" panel shows.
+function availableFrom(picks: LivePick[]): { name: string; pos: string }[] {
+  const drafted = new Set(picks.map((p) => p.playerId));
+  const ids = availableIds(byId.keys(), drafted, activeIds);
+  return fullBoard
+    .filter((b) => ids.has(b.playerId))
+    .sort((a, b) => a.adp - b.adp || b.vor - a.vor)
+    .map((b) => ({ name: b.name, pos: b.position }));
+}
+
 async function draftState(): Promise<State> {
-  const s = (await api("/draft-state")) as { onClock?: boolean; available?: { name: string; pos: string }[]; drafted?: number };
-  return { onClock: s.onClock === true, available: s.available ?? [], drafted: s.drafted ?? 0 };
+  const [d, picks] = await Promise.all([getDraft(pub, draftId), draftPicks(pub, draftId)]);
+  draft = d;
+  const clock = clockState(d, picks);
+  return { onClock: clock.onClock, available: availableFrom(picks), drafted: picks.length, picks: toBoardPicks(picks), clock, draft: d };
 }
 
-// Snake: which team slot drafts at (round, pick-in-round).
-function slotOf(round: number, pickInRound: number): number {
-  return round % 2 === 1 ? pickInRound : teams - pickInRound + 1;
-}
-
-// Every drafted pick, scraped live from the board DOM, tagged with the drafting
-// slot derived from its round.pick label. Names here are abbreviated ("B.
-// Robinson") — fine for rival tracking; our own roster we keep in full locally.
-async function boardPicks(): Promise<{ round: number; slot: number; name: string; pos: string }[]> {
-  const r = (await api("/board-picks")) as { picks?: { round: number; pickInRound: number; name: string; pos: string }[] };
-  return (r.picks ?? []).map((p) => ({ round: p.round, slot: slotOf(p.round, p.pickInRound), name: p.name, pos: p.pos }));
+async function boardPicks(): Promise<BoardPick[]> {
+  return toBoardPicks(await draftPicks(pub, draftId));
 }
 // #endregion
 
@@ -178,24 +240,22 @@ let lastReasoning = "";
 let myDraftSlot: number | null = null;
 let agentBackoffUntil = 0; // pause agent calls after an error (limit hit, etc.)
 
-// Our slot, resolved once from the (static) draft order — not the picks feed.
+// Our slot, resolved once from the draft order. Null until the commissioner
+// sets the order, which is why this re-reads get_draft until it appears.
 async function resolveSlot(): Promise<void> {
   if (myDraftSlot != null) return;
-  const d = await sleeper.draft(draftId);
-  const slot = d.draft_order?.[config.userId];
+  const d = await getDraft(pub, draftId);
+  draft = d;
+  const slot = d.draftOrder?.[config.userId];
   if (typeof slot === "number") myDraftSlot = slot;
 }
 
-// #region our roster — tracked LOCALLY as we pick (full names, zero API lag)
+// #region our roster: tracked LOCALLY as we pick (full names, zero API lag)
 const myDrafted: { name: string; position: string }[] = [];
 function localCounts(): Record<string, number> {
   const c: Record<string, number> = {};
   for (const d of myDrafted) if (d.position) c[d.position] = (c[d.position] ?? 0) + 1;
   return c;
-}
-// How many cells the board shows for our slot (DOM truth for "did our pick land").
-async function myBoardCount(): Promise<number> {
-  return (await boardPicks()).filter((p) => p.slot === myDraftSlot).length;
 }
 // #endregion
 
@@ -205,7 +265,7 @@ const QUEUE_DEPTH = 8;
 // dead). Built ONLY from the live-available set, kept short, balanced RB/WR, and
 // never DEF/K (Sleeper autopicks down the queue, so a queued defense would
 // surface early; left out, its native ADP autopick fills the tail late).
-function buildQueue(counts: Record<string, number>, availSet: Set<string>): string[] {
+function buildQueue(counts: Record<string, number>, availSet: Set<string>): RankedPlayer[] {
   const live = availSet.size ? fullBoard.filter((b) => availSet.has(b.name)) : fullBoard;
   const rbs = live.filter((b) => b.position === "RB");
   const wrs = live.filter((b) => b.position === "WR");
@@ -219,45 +279,53 @@ function buildQueue(counts: Record<string, number>, availSet: Set<string>): stri
   }
   const te = (counts["TE"] ?? 0) >= 1 ? [] : live.filter((b) => b.position === "TE").slice(0, 1);
   const qb = (counts["QB"] ?? 0) >= 1 ? [] : live.filter((b) => b.position === "QB").slice(0, 1);
-  return [...out, ...te, ...qb].map((b) => b.name);
+  return [...out, ...te, ...qb];
 }
 
 // Push the backstop queue. Reads a fresh live-available set itself, and is only
-// ever called OFF the clock (start + right after we pick) — never mid-clock.
+// ever called OFF the clock (start + right after we pick), never mid-clock.
+// update_draft_queue REPLACES the queue (verified on a mock draft 2026-09-09:
+// it echoes back exactly the ids sent), so there is no stale tail to clear.
 async function pushQueue(): Promise<void> {
   const s = await draftState();
   const q = buildQueue(localCounts(), new Set(s.available.map((a) => a.name)));
   if (q.length) {
-    await api("/queue", { players: q }).catch(() => {});
+    const names = q.map((b) => b.name);
+    let pushed: string[] = [];
+    try {
+      pushed = await updateDraftQueue(auth, draftId, q.map((b) => b.playerId));
+    } catch (e) {
+      console.log(`[draft-run] queue push failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     // Log what we actually pushed. The dashboard previously had to reconstruct
     // the queue from the lagging picks feed and label it an estimate, because
     // nothing recorded it. During the 2026 draft Filip could not see what the
     // engine intended to do, which was the clearest UX failure of the night.
-    logEvent("coach", "queue", `Backstop queue: ${q.join(", ")}`, { queue: q });
+    logEvent("coach", "queue", `Backstop queue: ${names.join(", ")}`, { queue: names, playerIds: q.map((b) => b.playerId), pushed: pushed.length });
   }
 }
 
 // Log every NEW board pick once, so downstream consumers (the Discord announcer)
-// have the full draft — who took whom, in which round — to make pick-specific
+// have the full draft, who took whom, in which round, to make pick-specific
 // commentary. Names here are the board's abbreviated form ("B. Robinson").
 const seenBoardPicks = new Set<string>();
-function logNewBoardPicks(picks: { round: number; slot: number; name: string; pos: string }[]): void {
+function logNewBoardPicks(picks: BoardPick[]): void {
   for (const p of picks) {
     const key = `${p.round}.${p.slot}.${p.name}`;
     if (seenBoardPicks.has(key)) continue;
     seenBoardPicks.add(key);
     const mine = p.slot === myDraftSlot;
-    logEvent("coach", "board-pick", `${mine ? "WE" : `Team ${p.slot}`} drafted ${p.name} (${p.pos}) in R${p.round}`, { round: p.round, slot: p.slot, name: p.name, pos: p.pos, mine });
+    logEvent("coach", "board-pick", `${mine ? "WE" : `Team ${p.slot}`} drafted ${p.name} (${p.pos}) in R${p.round}`, { round: p.round, slot: p.slot, name: p.name, pos: p.pos, mine, pickNo: p.pickNo, playerId: p.playerId });
   }
 }
 
-// #region emoji troll — react on Sleeper when a rival snipes a player we wanted
+// #region emoji troll: react on Sleeper when a rival snipes a player we wanted
 const TROLL = process.env.TROLL !== "0"; // on by default; TROLL=0 disables
 const reactedPicks = new Set<string>(); // keyed by "round.slot.name"
 function lastName(n: string): string {
   return (n.trim().split(/\s+/).slice(-1)[0] ?? n).toLowerCase();
 }
-async function maybeTroll(picks: { round: number; slot: number; name: string; pos: string }[]): Promise<void> {
+async function maybeTroll(picks: BoardPick[]): Promise<void> {
   if (!TROLL || myDraftSlot == null || plan.length === 0) return;
   const top3 = plan.slice(0, 3).map(lastName);
   const top8 = plan.slice(0, 8).map(lastName);
@@ -268,8 +336,12 @@ async function maybeTroll(picks: { round: number; slot: number; name: string; po
     if (!top8.includes(ln)) continue;
     reactedPicks.add(key);
     const emoji = top3.includes(ln) ? "crying" : "shock";
-    const ok = (await api("/react", { player: p.name, emoji }).catch(() => ({ ok: false }))) as { ok?: boolean };
-    logEvent("coach", "troll", `Reacted ${emoji} to ${p.name} (${p.pos}) — one I wanted.`, { player: p.name, emoji, landed: ok.ok === true });
+    // The reaction lands on the pick number, and the response carries the
+    // pick's reactions map, so "landed" is read back rather than assumed.
+    const landed = await reactToDraftPick(auth, draftId, p.pickNo, emoji)
+      .then((r) => (r.reactions[config.userId] ?? []).includes(emoji))
+      .catch(() => false);
+    logEvent("coach", "troll", `Reacted ${emoji} to ${p.name} (${p.pos}), one I wanted.`, { player: p.name, emoji, landed, pickNo: p.pickNo });
     return; // one per pass, never a burst
   }
 }
@@ -314,7 +386,7 @@ async function readGuidance(): Promise<string> {
   }
 }
 
-async function refreshPlan(available: { name: string; pos: string }[], recent: { round: number; slot: number; name: string; pos: string }[]): Promise<void> {
+async function refreshPlan(available: { name: string; pos: string }[], recent: BoardPick[]): Promise<void> {
   await resolveSlot();
   const roster = myDrafted.map((d) => `${d.name} (${d.position})`);
   const availSet0 = new Set(available.map((a) => a.name));
@@ -334,21 +406,21 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
   const availNames = new Set(board.map((b) => b.name));
   const have = roster.length ? `Your roster so far: ${roster.join(", ")}.` : "Your roster is empty.";
   // Sleeper's injury_status is close to noise in preseason, so when the dossier
-  // says the tag is soft we show the reporting INSTEAD of the bare tag — the
+  // says the tag is soft we show the reporting INSTEAD of the bare tag, the
   // agent was previously fading healthy studs off a blanket "Questionable".
   const tagOf = (r: (typeof board)[number]): string => {
     const n: NewsEntry | undefined = newsFor(news, r.name);
     if (!n) return r.injuryStatus ? ` [${r.injuryStatus}]` : "";
     // "soft" exists to cancel a scary tag. With no tag to cancel it is just context.
     if (n.status === "soft") {
-      return r.injuryStatus ? ` [${r.injuryStatus} — NOISE: ${n.note}]` : ` [${n.note}]`;
+      return r.injuryStatus ? ` [${r.injuryStatus}, NOISE: ${n.note}]` : ` [${n.note}]`;
     }
     return `${r.injuryStatus ? ` [${r.injuryStatus}]` : ""} [${n.status.toUpperCase()}: ${n.note}]`;
   };
   const shortlist = board
     .map((r, i) => {
       const bye = byeWeek(r.team);
-      return `${i + 1}. ${r.name} — ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} VONA ${r.vona.toFixed(0)} surv ${Math.round(r.pSurvive * 100)}% ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier} bye${bye ?? "?"}${tagOf(r)}`;
+      return `${i + 1}. ${r.name}: ${r.position}${r.posRank} ${r.team}, ${r.points.toFixed(0)}pts VOR ${r.vor.toFixed(0)} VONA ${r.vona.toFixed(0)} surv ${Math.round(r.pSurvive * 100)}% ADP ${r.adp >= 999 ? "-" : r.adp.toFixed(0)} T${r.tier} bye${bye ?? "?"}${tagOf(r)}`;
     })
     .join("\n");
   // Bye-week concentration on the roster we've built so far. Stacking starters
@@ -359,7 +431,7 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
     .map(([wk, n]) => `week ${wk}: ${n}`)
     .join(", ");
   const heavyByes = [...myByes.entries()].filter(([, n]) => n >= 3).map(([wk]) => wk);
-  // Players who probably won't make it back to us — flag the run risk explicitly.
+  // Players who probably won't make it back to us, flag the run risk explicitly.
   const goneSoon = board.filter((r) => r.pSurvive < 0.35).slice(0, 8);
   const goneStr = goneSoon.length
     ? `Likely GONE before your next pick (draft these now or lose them): ${goneSoon.map((r) => `${r.name} (${r.position}, ${Math.round(r.pSurvive * 100)}%)`).join("; ")}.`
@@ -390,14 +462,14 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
       `Everything below is an input to that decision, not an instruction. ` +
       `The list is ranked by VONA (value over next available: value now minus what you can still get at that position when the pick snakes back to you). ` +
       `VOR is raw value, "surv" is the chance the player is still there at your next pick, VONA is the value you forfeit by waiting. ` +
-      `VONA is a good default and you should usually take the top of it, but you are the only one who can see news, tiers, a run developing and the shape of your roster — ` +
+      `VONA is a good default and you should usually take the top of it, but you are the only one who can see news, tiers, a run developing and the shape of your roster, ` +
       `so depart from it when you have a real football reason, and say what that reason is:\n${shortlist}\n\n` +
       (goneStr ? `${goneStr}\n\n` : "") +
       `Reading the tags: "bye N" is that player's bye week. A bracket marked NOISE means Sleeper flags him but the ` +
-      `reporting says he is fine — do NOT downgrade him for it. RISK or OUT means a real chance of missing games, and ` +
+      `reporting says he is fine, do NOT downgrade him for it. RISK or OUT means a real chance of missing games, and ` +
       `his points above are ALREADY reduced for it, so do not penalise him twice. WATCH is a knock worth knowing but ` +
       `no value change. A note marked UPSIDE is an opportunity the projections have not caught up with yet.\n\n` +
-      (byeStr ? `Your roster's bye weeks so far — ${byeStr}.\n` : "") +
+      (byeStr ? `Your roster's bye weeks so far: ${byeStr}.\n` : "") +
       (heavyByes.length
         ? `You already have three or more players on the week ${heavyByes.join(" and ")} bye. Break the tie AWAY from that bye unless the player is clearly the best pick.\n\n`
         : "\n") +
@@ -405,7 +477,7 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
         ? `\n=== GUIDANCE FROM YOUR MANAGER, written during this draft. This OVERRIDES the general strategy advice below wherever they conflict. Follow it unless it would leave a mandatory starting slot unfilled: ===\n${guidance}\n===\n\n`
         : "") +
       `Build the strongest STARTING lineup. Prioritise RB and WR heavily early (you start 2 RB, 2 WR, and 2 FLEX). ` +
-      `Because RB is scarcer and fills your FLEX, build real RB depth — aim for about five RBs by the end — and don't ` +
+      `Because RB is scarcer and fills your FLEX, build real RB depth, aim for about five RBs by the end, and don't ` +
       `stack more than about five WRs unless a WR is clearly the best value. You need only ONE tight end: do NOT reach ` +
       `for a TE, and never plan a second TE until the very last rounds; a TE is worth an early pick only if it is clearly ` +
       `the best value AND you have none. Take exactly ONE QB in this 1-QB league and only from the mid rounds; do NOT ` +
@@ -413,7 +485,7 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
       `Anticipate RB/WR runs and respect tiers over raw rank. ` +
       `First write two or three sentences of reasoning about the board, runs, and roster needs. Then on a new line write "PICKS:" followed by up to 8 exact names ` +
       `from the list above, semicolon-separated, YOUR CHOICE FIRST and the rest as fallbacks in order if someone is taken before the click lands.\n` +
-      `Your reasoning MUST justify the FIRST name on that list. If your reasoning talks you into a different player, change the LIST, not the reasoning — ` +
+      `Your reasoning MUST justify the FIRST name on that list. If your reasoning talks you into a different player, change the LIST, not the reasoning, ` +
       `the first name is what actually gets drafted, and a mismatch means we draft someone you argued against.`,
   });
   if (res.error || !res.text.trim()) {
@@ -438,26 +510,31 @@ async function refreshPlan(available: { name: string; pos: string }[], recent: {
   logEvent("coach", "plan", `Plan @R${round}: ${plan.slice(0, 4).join(", ")}`, { reasoning: lastReasoning, plan, roster });
 }
 
-// Initial plan + backstop queue (read the live board once).
+// Initial plan + backstop queue (read the live board once). The existing
+// queue is logged first so a leftover from a previous session is visible.
 {
   const s0 = await draftState();
-  await refreshPlan(s0.available, await boardPicks());
+  const existing = await draftQueue(auth, draftId).catch(() => [] as string[]);
+  if (existing.length) console.log(`[draft-run] existing queue: ${existing.map((id) => byId.get(id)?.name ?? id).join(", ")}`);
+  await refreshPlan(s0.available, s0.picks);
   await pushQueue();
 }
 
 // Rehearsal: start the draft ourselves once the queue is set.
-if (rehearse) {
+if (rehearse && draft.status === "pre_draft") {
   console.log("[draft-run] rehearse: starting draft");
-  await api("/click", { selector: ".start-draft-button" }).catch(() => {});
-  await Bun.sleep(4000);
+  try {
+    draft = await updateDraftStatus(auth, draftId, "drafting");
+  } catch (e) {
+    console.log(`[draft-run] rehearse: start failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 // Resolve our slot before picking anything. draft_order is null until the
 // commissioner randomises the order, which in this league happens about fifteen
-// minutes before kickoff — so wait it out (up to 30 min) rather than the old
-// 60s. Proceeding without a slot is not harmless: myBoardCount() filters board
-// cells by our slot, so every pick we made would look like it never landed and
-// fire a pick-failed alert each round.
+// minutes before kickoff, so wait it out (up to 30 min) rather than the old
+// 60s. Proceeding without a slot is not harmless: on-clock detection compares
+// the open pick's slot to ours, so without a slot we never pick at all.
 {
   const slotDeadline = Date.now() + 30 * 60_000;
   let waited = 0;
@@ -471,12 +548,12 @@ if (rehearse) {
 }
 console.log(`[draft-run] our draft slot: ${myDraftSlot ?? "unresolved"}`);
 if (myDraftSlot == null) {
-  console.log("[draft-run] WARNING: slot unresolved — pick confirmation and VONA next-pick math are both degraded");
-  if (!rehearse) await sendAlert("Draft: slot unresolved", "draft_order never appeared. The coach will still pick, but pick confirmation is unreliable — watch the room.");
+  console.log("[draft-run] WARNING: slot unresolved, pick confirmation and VONA next-pick math are both degraded");
+  if (!rehearse) await sendAlert("Draft: slot unresolved", "draft_order never appeared. The coach will still pick, but pick confirmation is unreliable, watch the room.");
 }
 
 // Seed our local roster from any picks already on the board at our slot (e.g.
-// keepers), so round counting starts from reality.
+// keepers, or a restart mid-draft), so round counting starts from reality.
 for (const p of (await boardPicks()).filter((p) => p.slot === myDraftSlot)) {
   myDrafted.push({ name: p.name, position: p.pos });
 }
@@ -491,10 +568,7 @@ let lastBoardAt = 0;
 // for half a minute before we noticed: the thinking face appeared ~30s late and
 // the whole turn looked sluggish. The plan is only read at decision time, so a
 // refresh that lands late simply applies to the next pick instead.
-function kickRefresh(
-  available: { name: string; pos: string }[],
-  recent: { round: number; slot: number; name: string; pos: string }[],
-): void {
+function kickRefresh(available: { name: string; pos: string }[], recent: BoardPick[]): void {
   if (refreshInFlight) return;
   refreshInFlight = true;
   void refreshPlan(available, recent)
@@ -507,7 +581,6 @@ function kickRefresh(
 }
 
 for (;;) {
-  await ensureRoom();
   await resolveSlot();
   if (myDraftSlot == null) { await Bun.sleep(1500); continue; }
   if (myDrafted.length >= rounds) {
@@ -516,25 +589,39 @@ for (;;) {
   }
   const round = myDrafted.length + 1;
   const counts = localCounts();
-  const { onClock, available, drafted } = await draftState();
-  const globalPick = drafted + 1;
+  const state = await draftState().catch((e: unknown) => {
+    console.log(`[draft-run] state read failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  });
+  if (!state) { await Bun.sleep(1500); continue; }
+  const { onClock, available, drafted } = state;
+  const globalPick = state.clock.pickNo ?? drafted + 1;
+
+  // The feed knows when the draft is over, which the DOM never told us. Stop
+  // here rather than waiting forever for a pick that cannot come.
+  if (state.draft.status === "complete") {
+    console.log(`[draft-run] draft is complete with ${myDrafted.length} of our picks recorded`);
+    break;
+  }
 
   if (Date.now() - lastBoardAt > 5000) { logBoard(globalPick, round, available); lastBoardAt = Date.now(); }
 
   if (!onClock) {
-    const picks = await boardPicks();
-    logNewBoardPicks(picks);
-    await maybeTroll(picks).catch(() => {});
-    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) kickRefresh(available, picks);
+    logNewBoardPicks(state.picks);
+    await maybeTroll(state.picks).catch(() => {});
+    if (Date.now() > agentBackoffUntil && Date.now() - lastRefresh > 20_000) kickRefresh(available, state.picks);
     await Bun.sleep(1500);
     continue;
   }
 
-  // Our button is live — debounce to reject the kickoff flash / a turn passing
-  // in the same instant. Only a stable on-clock is genuinely our turn.
+  // The open pick is ours. Re-read once before acting so a pause or a pick
+  // that lands in the same instant (an autopick for us, a keeper) cannot make
+  // us send a pick_no that is no longer open.
   await Bun.sleep(700);
   const confirm = await draftState();
-  if (!confirm.onClock) continue;
+  if (!confirm.onClock || confirm.clock.pickNo == null) continue;
+  const pickNo = confirm.clock.pickNo;
+  logNewBoardPicks(confirm.picks);
 
   // Tell the face we are on the clock the MOMENT the button goes live, not when
   // the decision is done. pick-intent fires after all the thinking has already
@@ -616,7 +703,7 @@ for (;;) {
         let pick: VonaPlayer = eligible[planRank - 1]!;
         // Sole veto over the agent's call: refuse to pile a fourth player onto
         // one bye week when a comparable alternative exists. Mechanical, easily
-        // checked, and a model cannot be trusted to never slip on it — mock #1
+        // checked, and a model cannot be trusted to never slip on it, mock #1
         // put four players on week 10.
         if (byeLoad(pick) >= vonaConfig.byeStackMax) {
           const alt = eligible
@@ -647,7 +734,7 @@ for (;;) {
       } else {
         // No usable plan (agent errored, backed off, or named someone outside
         // the bound). Fall back to the value board, and here bye spreading acts
-        // as a tie-break since nothing intelligent is watching — but only once
+        // as a tie-break since nothing intelligent is watching, but only once
         // the week is genuinely crowded. Two players sharing a bye is a bench
         // swap, so below byeSoftMin we just take the best available and move on.
         const nearTop = byeLoad(vonaTop) >= vonaConfig.byeSoftMin
@@ -692,30 +779,38 @@ for (;;) {
   const reasoningForPick =
     lastReasoning && lastReasoning.toLowerCase().includes(lastName(target.name)) ? lastReasoning : undefined;
   logEvent("coach", "pick-intent", `On the clock (R${round}): taking ${target.name} (${target.position}).`, { target: target.name, position: target.position, team: target.team, bye: byeWeek(target.team), round, adp: target.adp, reasoning: reasoningForPick });
-  await Bun.sleep(ANNOUNCE_LEAD_MS); // let the announcer's voice lead the click
+  await Bun.sleep(ANNOUNCE_LEAD_MS); // let the announcer's voice lead the pick
   const t0 = Date.now();
   try {
-    await api("/pick", { player: target.name });
+    const r = await draftPickPlayer(auth, draftId, target.playerId, pickNo);
+    if (r.playerId !== target.playerId) console.log(`[draft-run] pick ${pickNo} answered with ${r.name} (${r.playerId}), not ${target.name}`);
   } catch (e) {
     console.log(`[draft-run] pick error: ${e instanceof Error ? e.message : String(e)}`);
   }
-  // Confirm the pick landed by OUR cell count on the board growing (DOM truth;
-  // works for both visible picks and out-of-window DEF/K, and for back-to-back).
-  // Window is deliberately generous. At 16 tries (~13s) test mock #2 timed out
-  // on a pick that had in fact landed, logged a miss, fired a pick-failed alert
-  // and re-clicked; the board was just slow to reflect it. ~24s still leaves
-  // most of a 90s clock, and a double-pick was never possible anyway — a landed
-  // pick takes our button off the clock, so the retry path exits first.
-  let landed = false;
+  // Confirm the pick landed by a pick appearing at OUR pick_no in the feed. The
+  // mutation answers with the pick itself, but the feed is what everyone else
+  // sees, so that is what we trust. Window is deliberately generous: at 16
+  // tries (~13s) a DOM-era mock timed out on a pick that had in fact landed,
+  // logged a miss, fired a pick-failed alert and re-clicked. ~24s still leaves
+  // most of a 90s clock, and a double-pick is not possible: a landed pick
+  // closes our pick_no, so the retry path exits first.
+  let landed: BoardPick | undefined;
   for (let i = 0; i < 30; i++) {
-    if ((await myBoardCount()) > myDrafted.length) { landed = true; break; }
+    landed = (await boardPicks().catch(() => [] as BoardPick[])).find((p) => p.pickNo === pickNo);
+    if (landed) break;
     await Bun.sleep(800);
   }
   if (landed) {
-    myDrafted.push({ name: target.name, position: target.position });
+    // Record what the board says we took. If Sleeper autopicked for us in the
+    // same instant it can differ from the target, and the roster count must
+    // follow the board, not our intent.
+    if (landed.playerId !== target.playerId) {
+      console.log(`[draft-run] pick ${pickNo} landed as ${landed.name} (${landed.pos}), not our target ${target.name}`);
+    }
+    myDrafted.push({ name: landed.name, position: landed.pos || target.position });
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`[draft-run] our R${round} = ${target.name} (${secs}s)`);
-    logEvent("coach", "draft-pick", `Our R${round} pick: ${target.name} (${target.position})`, { target: target.name, reasoning: lastReasoning, seconds: Number(secs) });
+    console.log(`[draft-run] our R${round} = ${landed.name} (${secs}s)`);
+    logEvent("coach", "draft-pick", `Our R${round} pick: ${landed.name} (${landed.pos || target.position})`, { target: target.name, picked: landed.name, playerId: landed.playerId, pickNo, reasoning: lastReasoning, seconds: Number(secs) });
     await pushQueue().catch(() => {});
     // Also non-blocking. At the turn of a snake we pick twice in a row, so an
     // awaited refresh here ate the second clock.
@@ -723,7 +818,7 @@ for (;;) {
   } else {
     console.log(`[draft-run] our R${round} did NOT register (target ${target.name})`);
     logEvent("coach", "pick-miss", `Our R${round} target ${target.name} didn't register.`, { target: target.name });
-    if (!rehearse) await sendAlert("Draft: pick may have failed", `Round ${round} target ${target.name} didn't register — check the draft.`);
+    if (!rehearse) await sendAlert("Draft: pick may have failed", `Round ${round} target ${target.name} didn't register. Check the draft.`);
     await Bun.sleep(1500);
   }
 }
