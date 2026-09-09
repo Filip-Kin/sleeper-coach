@@ -1,116 +1,95 @@
 #!/usr/bin/env bun
-// The `act` CLI: a thin client of the browser-server's local HTTP API. This is
-// the only surface that touches the Sleeper account. Claude calls these as its
-// hands. All browser work happens in the browser-server process.
+// The `act` CLI: the hands on the Sleeper account, every one a GraphQL call
+// with the session token. Claude and Filip call these; the daemon's jobs call
+// the same league/api.ts helpers directly.
 //
-//   act login-check                    is the browser logged in?
-//   act dom [url]                      dump DOM facts (selector discovery)
-//   act goto <url>                     navigate the persistent browser
-//   act shot [name]                    screenshot the current page
-//   act pick <player>                  draft a player
-//   act queue <p1;p2;...>              set the autopick draft queue
-//   act lineup <id1,id2,...>           set the week's starters
-//   act trade-respond <txid> accept|reject [leagueId]
-//   act trade-send <json>              send a trade offer (json includes leagueId)
-//   act trade-capture [leagueId] [outfile]   dump the trades-page DOM to a file
-//   act import-session [file]          transplant a logged-in session
+//   act token import <token|->        save a fresh session token (stdin with -), then verify it with `me`
+//   act token check                   does `me` answer, and when does the JWT expire
+//   act login-check                   same check; exits 0 LOGGED_IN or 3 LOGGED_OUT
+//   act lineup <id1,id2,...>          set the week's starters (order = league slot order)
+//   act trade-respond <txid> accept|reject <week> [leagueId]
+//   act trade-send <json>             propose a trade; json is a ProposalSpec (adds/drops maps of player_id -> roster_id)
+//
+// The browser commands (pick, queue, shot, dom, goto, console, import-session,
+// trade-capture) went with the browser on 2026-09-09.
 
-const API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
+import { config } from "../config.ts";
+import { acceptTrade, probeToken, proposeTrade, rejectTrade, tokenGql, updateStarters, type ProposalSpec } from "../league/api.ts";
+import { assessToken, jwtExpiry, TOKEN_FILE, writeToken } from "../league/token.ts";
+
 const [command, ...args] = process.argv.slice(2);
 
-async function call(path: string, body?: unknown): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API}${path}`, {
-    method: body ? "POST" : "GET",
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok || j.error) throw new Error(String(j.error ?? res.statusText));
-  return j;
+async function readTokenArg(arg: string | undefined): Promise<string> {
+  if (!arg) throw new Error("usage: act token import <token|->");
+  const raw = arg === "-" ? await Bun.stdin.text() : arg;
+  const tok = raw.trim();
+  if (!tok) throw new Error("empty token");
+  if (tok.split(".").length !== 3) throw new Error("that does not look like a JWT (expected three dot-separated parts)");
+  return tok;
+}
+
+async function checkToken(): Promise<boolean> {
+  const verdict = assessToken(await probeToken(), Date.now());
+  console.log(`token: ${verdict.summary}`);
+  if (verdict.alert) console.log(verdict.alert);
+  return verdict.usable;
 }
 
 async function main(): Promise<void> {
   switch (command) {
+    case "token": {
+      const [sub, value] = args;
+      if (sub === "import") {
+        const tok = await readTokenArg(value);
+        // Verify BEFORE writing, so a typo cannot overwrite a working token.
+        const body = await tokenGql({ token: tok })("{me{user_id display_name}}");
+        const me = (body.data as { me?: { user_id?: string; display_name?: string } } | undefined)?.me;
+        if (!me?.user_id) throw new Error("me returned nothing for that token");
+        if (me.user_id !== config.userId) {
+          throw new Error(`that token belongs to ${me.display_name ?? me.user_id}, not ${config.username} (${config.userId})`);
+        }
+        writeToken(tok);
+        const exp = jwtExpiry(tok);
+        console.log(`saved ${TOKEN_FILE} (mode 600) for ${me.display_name ?? me.user_id}; expires ${exp ? new Date(exp).toISOString() : "unknown"}`);
+        break;
+      }
+      if (sub === "check") {
+        process.exit((await checkToken()) ? 0 : 3);
+      }
+      throw new Error("usage: act token import <token|-> | act token check");
+    }
     case "login-check": {
-      const ok = (await call("/login-check")).loggedIn === true;
+      const ok = await checkToken();
       console.log(ok ? "LOGGED_IN" : "LOGGED_OUT");
       process.exit(ok ? 0 : 3);
     }
-    case "console": {
-      const q = args[0] === "clear" ? "/console?clear=1&n=100" : "/console?n=100";
-      const arr = ((await call(q)).logs as string[]) ?? [];
-      console.log(arr.length ? arr.join("\n") : "(no console messages)");
-      break;
-    }
-    case "on-clock": {
-      const on = (await call("/on-clock")).onClock === true;
-      console.log(on ? "ON_CLOCK" : "NOT_ON_CLOCK");
-      process.exit(on ? 0 : 3);
-    }
-    case "dom": {
-      console.log(JSON.stringify(await call("/dom", args[0] ? { url: args[0] } : {}), null, 2));
-      break;
-    }
-    case "goto": {
-      console.log((await call("/goto", { url: args[0] })).url);
-      break;
-    }
-    case "shot": {
-      console.log(`saved ${(await call("/shot", { name: args[0] ?? "current" })).path}`);
-      break;
-    }
-    case "pick": {
-      const player = args.join(" ").trim();
-      if (!player) throw new Error("usage: act pick <player name>");
-      await call("/pick", { player });
-      console.log(`picked ${player}`);
-      break;
-    }
-    case "queue": {
-      const players = args.join(" ").split(";").map((s) => s.trim()).filter(Boolean);
-      await call("/queue", { players });
-      console.log(`queued ${players.length} players`);
-      break;
-    }
     case "lineup": {
       const ids = (args[0] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-      await call("/lineup", { ids });
-      console.log(`set lineup: ${ids.length} starters`);
+      if (!ids.length) throw new Error("usage: act lineup <id1,id2,...>");
+      const back = await updateStarters(tokenGql(), ids);
+      console.log(`set lineup: ${back.length} starters (${back.join(",")})`);
       break;
     }
     case "trade-respond": {
-      const [txid, decision, leagueId] = args;
-      if (!txid || (decision !== "accept" && decision !== "reject")) throw new Error("usage: act trade-respond <txid> accept|reject [leagueId]");
-      await call("/trade-respond", { txid, decision, ...(leagueId ? { leagueId } : {}) });
-      console.log(`${decision}ed trade ${txid}`);
+      const [txid, decision, week, leagueId] = args;
+      const leg = Number(week);
+      if (!txid || (decision !== "accept" && decision !== "reject") || !Number.isInteger(leg)) {
+        throw new Error("usage: act trade-respond <txid> accept|reject <week> [leagueId]");
+      }
+      const fn = decision === "accept" ? acceptTrade : rejectTrade;
+      const status = await fn(tokenGql(), txid, leg, leagueId ?? config.leagueId);
+      console.log(`${decision}ed trade ${txid}: ${status}`);
       break;
     }
     case "trade-send": {
-      const spec = JSON.parse(args.join(" ") || "{}");
-      await call("/trade-send", { spec });
-      console.log("trade sent");
+      const spec = JSON.parse(args.join(" ") || "{}") as ProposalSpec & { leagueId?: string };
+      const { leagueId, ...rest } = spec;
+      const r = await proposeTrade(tokenGql(), rest, leagueId ?? config.leagueId);
+      console.log(`trade sent: ${r.transactionId} ${r.status}`);
       break;
-    }
-    case "trade-capture": {
-      // A leagueId is a long number; anything else is the output file path.
-      const leagueId = args.find((a) => /^\d{12,}$/.test(a));
-      const outfile = args.find((a) => !/^\d{12,}$/.test(a)) ?? `trade-dom-${Date.now()}.json`;
-      const { dom } = await call("/trade-capture", leagueId ? { leagueId } : {});
-      await Bun.write(outfile, JSON.stringify(dom, null, 2));
-      console.log(`wrote trades-page DOM to ${outfile}`);
-      break;
-    }
-    case "import-session": {
-      const file = args[0] ?? "/data/sleeper-coach/session.json";
-      const raw = (await Bun.file(file).json()) as Record<string, unknown>;
-      const entries = (raw.localStorage && typeof raw.localStorage === "object" ? raw.localStorage : raw) as Record<string, string>;
-      const cookies = Array.isArray(raw.cookies) ? raw.cookies : undefined;
-      const ok = (await call("/import-session", { entries, cookies })).ok === true;
-      console.log(ok ? "SESSION_OK" : "SESSION_FAILED");
-      process.exit(ok ? 0 : 5);
     }
     default:
-      console.log("commands: login-check | dom [url] | goto <url> | shot [name] | pick <player> | queue <p1;p2> | lineup <ids> | trade-respond <txid> accept|reject [leagueId] | trade-send <json> | trade-capture [leagueId] [outfile] | import-session [file]");
+      console.log("commands: token import <token|-> | token check | login-check | lineup <ids> | trade-respond <txid> accept|reject <week> [leagueId] | trade-send <json>");
       process.exit(command ? 1 : 0);
   }
 }

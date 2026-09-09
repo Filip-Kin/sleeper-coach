@@ -27,13 +27,11 @@ to reach Sleeper any other way.
   - `coach board [POS] [N]` — your value board (points, VOR, ADP, tiers) under
     the exact league scoring
   - `coach roster [ID]` — a roster's players (yours is 3)
-- `act <cmd>` — your hands on the Sleeper web app (real side effects):
-  - `act login-check` — confirm the browser is logged in
-  - `act shot <name>` — screenshot the current page to read it
-  - `act pick <player>` — draft a player
-  - `act queue <p1;p2;...>` — set the autopick draft queue
+- `act <cmd>`: your hands on the Sleeper account (real side effects, every
+  one a GraphQL request with the session token):
+  - `act login-check`: confirm the session token is accepted
   - `act lineup <id1,id2,...>` — set the week's starters
-  - `act trade-respond <txid> accept|reject`
+  - `act trade-respond <txid> accept|reject <week>`
   - `act trade-send <json>` — send a trade offer
 - `WebSearch` / `WebFetch` — qualitative research: injury and practice reports,
   depth-chart changes, beat-writer sentiment, weather. Fold this into decisions
@@ -72,9 +70,9 @@ roster needs before proposing.
 ## Operating discipline
 
 - Always `act login-check` first. If it reports LOGGED_OUT, stop and alert; a
-  human logs in over noVNC. Never attempt to enter credentials yourself.
-- Before any `act` action that changes something, and after it, take a screenshot
-  and read the page back to confirm the real state. Trust the page, not your
+  human imports a fresh token. Never attempt to enter credentials yourself.
+- After any `act` action that changes something, read the league state back
+  (`coach roster`) to confirm the real result. Trust the read-back, not your
   assumption.
 - The safety net during the draft is the Sleeper queue plus CPU autopick. Keep
   the queue set to your ranked board at all times, so even if an action fails you

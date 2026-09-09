@@ -21,7 +21,7 @@
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
-import { browserGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta } from "../league/api.ts";
+import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta } from "../league/api.ts";
 import { streamNeeds, pickStreamer } from "../analysis/streaming.ts";
 import { chooseForcedDrops } from "../analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
@@ -37,7 +37,6 @@ import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 
-const BROWSER_API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 const MAX_CANDIDATES = 40; // consider the top-40 available by ROS; the tail is noise
 
 function flag(name: string): boolean { return process.argv.includes(`--${name}`); }
@@ -93,7 +92,7 @@ async function main(): Promise<void> {
   // we do not, say, claim a tight end off waivers while a traded-for tight end
   // sits in commish review. Failure here degrades to the current roster, never
   // blocks the run.
-  const delta = await pendingRosterDelta(browserGql(), week).catch(() => ({ incoming: [], outgoing: [] }));
+  const delta = await pendingRosterDelta(tokenGql(), week).catch(() => ({ incoming: [], outgoing: [] }));
   const myPlayerIds = applyRosterDelta(mine.players, delta);
   if (delta.incoming.length || delta.outgoing.length) {
     console.log(`  in-flight trade: +${delta.incoming.length} incoming, -${delta.outgoing.length} outgoing already reflected in the roster`);
@@ -324,7 +323,7 @@ async function main(): Promise<void> {
   // any other move. Still at most ONE per cycle: this league runs rolling
   // priority, not FAAB, so a successful claim costs our place in the queue.
   assertWritesAllowed(`perform week ${week} waiver moves`);
-  const gql = browserGql();
+  const gql = tokenGql();
   const resolve = (name: string): string => {
     const id = idByName.get(name);
     if (!id) throw new Error(`no player id for "${name}"; refusing to guess on a roster write`);

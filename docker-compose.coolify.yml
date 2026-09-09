@@ -8,7 +8,6 @@ services:
     build: .
     ports:
       - "127.0.0.1:8770:8770" # dashboard (Phase D)
-      - "127.0.0.1:6081:6080" # noVNC (takeover view)
     volumes:
       - /data/sleeper-coach:/data/sleeper-coach
     restart: unless-stopped

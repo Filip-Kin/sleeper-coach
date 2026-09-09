@@ -163,7 +163,6 @@
         <button data-tab="board">Value board</button>
         <button data-tab="roster">My roster</button>
         <button data-tab="activity">Activity</button>
-        <button id="takeoverBtn" title="Open the browser takeover in a new tab">Takeover ↗</button>
       </div>
       <div class="tabwrap" id="tab-plan"></div>
       <div class="tabwrap" id="tab-coachview" style="display:none"></div>
@@ -177,7 +176,6 @@
 const $ = (s) => document.querySelector(s);
 const stream = $("#stream");
 let sessionId = localStorage.getItem("coach-session") || null;
-let novncUrl = null;
 
 function addMsg(cls, text) {
   const d = document.createElement("div");
@@ -309,7 +307,7 @@ $("#chatForm").addEventListener("submit", (e) => { e.preventDefault();
   else { $("#chatInput").value = ""; send(v); } });
 $("#newBtn").addEventListener("click", () => { sessionId = null; localStorage.removeItem("coach-session"); stream.innerHTML=""; setMode("ask"); });
 
-// tabs (Takeover is not a tab; it opens the noVNC view in a new tab)
+// tabs
 document.querySelectorAll(".tabs button[data-tab]").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button[data-tab]").forEach(x=>x.classList.remove("on")); b.classList.add("on");
   for (const t of ["plan","coachview","board","roster","activity"]) $("#tab-"+t).style.display = (t===b.dataset.tab)?"":"none";
@@ -383,9 +381,6 @@ async function renderActivity() {
     }).join("") : "<p style='color:var(--muted);padding:14px'>No activity yet. The coach and engineer log everything here.</p>";
   } catch (e) { $("#tab-activity").innerHTML = "<p style='color:var(--bad);padding:14px'>activity error</p>"; }
 }
-$("#takeoverBtn").addEventListener("click", () => {
-  window.open(novncUrl || "https://coach-vnc.filipkin.com/vnc.html?autoconnect=1&resize=scale", "_blank");
-});
 
 // #region draft plan view (Problem 2): what the coach is about to do
 // Read-only, off the Sleeper API + the engine's own log. Plan AGE is the headline
@@ -510,8 +505,6 @@ async function loadState() {
     $("#tab-roster").innerHTML = s.roster.length ? "<table><tbody>"
       + s.roster.map(p=>`<tr><td>${p.name}${p.injury?` <span class='inj'>${p.injury}</span>`:""}</td><td>${p.pos}</td><td>${p.team}</td></tr>`).join("")
       + "</tbody></table>" : "<p style='color:var(--muted);padding:14px'>Roster empty (pre-draft).</p>";
-    // takeover opens this URL (with the VNC password baked in) in a new tab
-    novncUrl = s.novncUrl;
   } catch (e) { $("#leagueSub").textContent = "state error: " + e; }
 }
 loadState();

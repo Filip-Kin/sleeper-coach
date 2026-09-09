@@ -18,7 +18,7 @@ import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import {
-  browserGql, fetchWeek, fetchMyLegs, fetchLeaguePicks, submitPick, setTiebreaker,
+  tokenGql, fetchWeek, fetchMyLegs, fetchLeaguePicks, submitPick, setTiebreaker,
   currentLegId, type PickemGame, type Gql,
 } from "./client.ts";
 import {
@@ -51,7 +51,7 @@ function tiebreakerGame(games: PickemGame[], rivalGameIds: string[]): PickemGame
 }
 
 async function main(): Promise<void> {
-  const gql: Gql = browserGql();
+  const gql: Gql = tokenGql();
   const leagueId = config.pickemLeagueId;
   const rosterId = config.pickemRosterId;
 

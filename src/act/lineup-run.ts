@@ -3,15 +3,16 @@
 // the entry point the Thursday and Sunday lock timers invoke.
 //
 //   bun run src/act/lineup-run.ts               # dry run: compute + print, no write
-//   bun run src/act/lineup-run.ts --live        # set the lineup via the DOM-verified path
+//   bun run src/act/lineup-run.ts --live        # set the lineup and verify it by reading it back
 //   bun run src/act/lineup-run.ts --week 3      # a specific week (default: the current NFL week)
 //   bun run src/act/lineup-run.ts --live --refresh   # force-refresh caches first (inactive checks)
 //
-// Dry run touches only the read-only public API and writes nothing. --live posts
-// the ordered starter ids to the browser-server's /lineup, which drives the DOM
-// and verifies the result by reading it back (never from the rosters API, which
-// served a stale starters array for minutes on 2026-08-30). The kill switch
-// (src/killswitch.ts) can freeze all writes with a single file on the volume.
+// Dry run touches only the read-only public API and writes nothing. --live sends
+// the ordered starter ids with roster_update_starters over GraphQL and verifies
+// the result by reading it back through the uncached GraphQL league_rosters
+// (never the REST rosters API, which served a stale starters array for minutes
+// on 2026-08-30). The kill switch (src/killswitch.ts) can freeze all writes
+// with a single file on the volume.
 //
 // Lineups are pure upside and reversible until kickoff, so they automate first
 // and without a shadow phase (per the in-season plan). The one expensive mistake
@@ -25,13 +26,11 @@ import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts
 import { buildRosterWeek } from "../analysis/roster-week.ts";
 import { solveLineup, startingSlots, starterIds } from "../analysis/lineup.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
-import { browserGql, updateStarters } from "../league/api.ts";
+import { tokenGql, updateStarters } from "../league/api.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import { overlayRosterStatus } from "./lineup-guard.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
-
-const BROWSER_API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
 
 function flag(name: string): boolean {
   return process.argv.includes(`--${name}`);
@@ -41,32 +40,15 @@ function opt(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-async function postLineup(ids: string[], leagueId: string): Promise<void> {
-  const res = await fetch(`${BROWSER_API}/lineup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ids, leagueId }),
-  });
-  const j = (await res.json().catch(() => ({}))) as { error?: string };
-  if (!res.ok || j.error) throw new Error(String(j.error ?? res.statusText));
-}
-
-// The write. GraphQL roster_update_starters first (one request, ~60 ms,
-// verified by an uncached league_rosters read-back), the DOM path only if that
-// fails. Verified live 2026-09-09: the mutation echoed the array and the
-// read-back matched. The DOM path stays as the fallback because it has months
-// of successful writes behind it and costs nothing to keep.
-async function writeStarters(ids: string[], leagueId: string, rosterId: number): Promise<"graphql" | "dom"> {
-  try {
-    await updateStarters(browserGql(), ids, rosterId, leagueId);
-    const back = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId)?.starters ?? [];
-    if (back.join(",") !== ids.join(",")) throw new Error(`read-back mismatch: site has ${back.join(",")}`);
-    return "graphql";
-  } catch (err) {
-    console.error(`GraphQL starters write failed (${err instanceof Error ? err.message : String(err)}); using the DOM path`);
-    await postLineup(ids, leagueId);
-    return "dom";
-  }
+// The write. GraphQL roster_update_starters (one request, ~60 ms), verified by
+// an uncached league_rosters read-back. Verified live 2026-09-09: the mutation
+// echoed the array and the read-back matched. The DOM fallback that used to sit
+// behind this went with the browser; a failed write now alerts and exits
+// non-zero, and the daemon's lineup guard retries on its own schedule.
+async function writeStarters(ids: string[], leagueId: string, rosterId: number): Promise<void> {
+  await updateStarters(tokenGql(), ids, rosterId, leagueId);
+  const back = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId)?.starters ?? [];
+  if (back.join(",") !== ids.join(",")) throw new Error(`read-back mismatch: site has ${back.join(",")}`);
 }
 
 async function main(): Promise<void> {
@@ -99,7 +81,7 @@ async function main(): Promise<void> {
 
   // Membership only: which players are on our roster. This reads the rosters API
   // `players` array, which is safe - the stale-cache problem was specifically
-  // the `starters` array, and the write is verified against the DOM regardless.
+  // the `starters` array, and the write is verified by a GraphQL read-back regardless.
   const rosters = await sleeper.rosters(leagueId);
   const mine = rosters.find((r) => r.roster_id === rosterId);
   if (!mine || !mine.players?.length) {
@@ -150,8 +132,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  // A partial lineup must never be written: setLineup cannot start an empty slot,
-  // and an unfilled slot in-season is a real problem for a human, not the coach.
+  // A partial lineup must never be written: an empty slot in-season is a real
+  // problem for a human, not the coach.
   if (lineup.unfilled.length) {
     await sendAlert("Lineup has an unfillable slot", `Week ${week}: ${lineup.unfilled.join(", ")} could not be filled from the roster. No lineup was set.`);
     throw new Error(`refusing to set a partial lineup (unfilled: ${lineup.unfilled.join(", ")})`);
@@ -159,19 +141,18 @@ async function main(): Promise<void> {
 
   assertWritesAllowed(`set the week ${week} lineup`);
   const ids = starterIds(lineup);
-  let path: "graphql" | "dom" = "graphql";
   try {
-    path = await writeStarters(ids, leagueId, rosterId);
+    await writeStarters(ids, leagueId, rosterId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Read-back verification lives inside setLineup; a throw here means the write
-    // did not land as intended. Change nothing further, log loudly, alert.
+    // A throw here means the write did not take as intended (or the read-back
+    // disagreed). Change nothing further, log loudly, alert.
     logEvent("coach", "lineup-failed", `Week ${week} lineup write failed: ${msg}`, { week, leagueId, ids });
     await sendAlert("Lineup write failed", `Week ${week}, league ${leagueId}: ${msg}`);
     throw err;
   }
-  console.log(`\nLINEUP SET and verified for week ${week} (league ${leagueId}) via ${path}.`);
-  logEvent("coach", "lineup-set", `Week ${week} lineup set and verified, ${lineup.total.toFixed(1)} projected.`, { week, leagueId, ids, path });
+  console.log(`\nLINEUP SET and verified for week ${week} (league ${leagueId}).`);
+  logEvent("coach", "lineup-set", `Week ${week} lineup set and verified, ${lineup.total.toFixed(1)} projected.`, { week, leagueId, ids });
 }
 
 main()

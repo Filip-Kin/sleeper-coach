@@ -8,7 +8,7 @@
 // unreachable from the running system.
 
 import { config } from "../config.ts";
-import { browserGql, pendingRosterDelta, applyRosterDelta, type Gql } from "../league/api.ts";
+import { tokenGql, pendingRosterDelta, applyRosterDelta, type Gql } from "../league/api.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadSeasonProjections } from "./projections.ts";
 import { rankByVor } from "./vor.ts";
@@ -96,7 +96,7 @@ function sideOf(tx: Tx, snap: LeagueSnapshot, rosterId: number): TradeOffer {
  *  (proposing, evaluating an incoming offer, the trade brief) reasons about the
  *  roster we are about to hold, not a stale one. Only OUR roster is adjusted;
  *  the counterparties' current rosters are what we evaluate against. */
-export async function snapshotWithPending(gql: Gql = browserGql(), leg?: number): Promise<LeagueSnapshot> {
+export async function snapshotWithPending(gql: Gql = tokenGql(), leg?: number): Promise<LeagueSnapshot> {
   const snap = await snapshot();
   const week = leg ?? Math.max(1, (await sleeper.nflState()).week ?? 1);
   const delta = await pendingRosterDelta(gql, week).catch(() => ({ incoming: [], outgoing: [] }));

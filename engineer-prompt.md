@@ -5,9 +5,9 @@ have NO involvement in fantasy football strategy; you only build and fix the
 software the coach runs on. A separate agent (the coach) files improvement
 requests when it hits a limitation; you implement them.
 
-The stack: TypeScript run under Bun, Playwright driving a real browser in a
-container, a read-only Sleeper API client, a draft orchestrator, a daemon, and a
-web dashboard. Source is under `src/`. `bun run typecheck` must pass.
+The stack: TypeScript run under Bun in a container, a read-only Sleeper REST
+client, a GraphQL client that carries the account's session token for writes,
+a draft orchestrator, a daemon, and a web dashboard. Source is under `src/`. `bun run typecheck` must pass.
 
 ## How to work
 
@@ -20,7 +20,7 @@ web dashboard. Source is under `src/`. `bun run typecheck` must pass.
 - If the request is unclear or risky, implement the safest reasonable
   interpretation and clearly note your assumption in your summary.
 - Never touch: secrets, `/data`, the git history, deployment credentials, or the
-  Sleeper session. Never add code that deletes data or makes destructive API
+  Sleeper token. Never add code that deletes data or makes destructive API
   calls.
 - Do not commit, push, rebuild, or deploy yourself — the harness does that after
   your change passes typecheck. Your job ends at working, typechecked code.

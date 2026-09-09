@@ -33,7 +33,7 @@ import { Database } from "bun:sqlite";
 import { config } from "../config.ts";
 import { logEvent, recentEvents } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
-import { browserGql, proposeTrade, outstandingOffers, listDms, sendDm, type Gql } from "./api.ts";
+import { tokenGql, proposeTrade, outstandingOffers, listDms, sendDm, type Gql } from "./api.ts";
 import { snapshot, snapshotWithPending, scheduleContext } from "../analysis/trade-wire.ts";
 import { proposeTrades, giveEligibleForProposal, byeAwareLineupTotal, depthInsurance, DEFAULT_FAIRNESS, type Proposal, type RivalRoster, type FairnessConfig } from "../analysis/trade-fair.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
@@ -84,11 +84,11 @@ export interface ProposeResult {
 /** Decide without sending, and WITHOUT recording a cooldown. A dry run that
  *  wrote the cooldown row would make the next real run skip the offer it had
  *  just chosen. */
-export async function dryRunProposer(state: ProposerState, gql: Gql = browserGql()): Promise<ProposeResult> {
+export async function dryRunProposer(state: ProposerState, gql: Gql = tokenGql()): Promise<ProposeResult> {
   return runProposer({ ...state, dry: true }, gql);
 }
 
-export async function runProposer(state: ProposerState, gql: Gql = browserGql()): Promise<ProposeResult> {
+export async function runProposer(state: ProposerState, gql: Gql = tokenGql()): Promise<ProposeResult> {
   const db = state.db;
   const now = state.now ?? Date.now();
   ensureTable(db);
@@ -314,7 +314,7 @@ export async function leagueRostersContext(): Promise<string> {
   return blocks.join("\n\n");
 }
 
-export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = browserGql()): Promise<TradeBrief> {
+export async function tradeBriefFor(theirRosterId: number | null, gql: Gql = tokenGql()): Promise<TradeBrief> {
   void gql;
   const snap = await snapshotWithPending(gql);
   const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
