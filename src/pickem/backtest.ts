@@ -10,7 +10,7 @@
 // look-ahead bias, because a line stamped after the game started could contain
 // the result. That filter drops about 3% of games and the edge survives it.
 
-import { browserGql, fetchWeek, type PickemGame } from "./client.ts";
+import { tokenGql, fetchWeek, type PickemGame } from "./client.ts";
 
 const CACHE = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-history.json`;
 const SEASONS = (process.env.PICKEM_BACKTEST_SEASONS ?? "2024,2025").split(",");
@@ -25,7 +25,7 @@ async function load(): Promise<PickemGame[]> {
       return rows;
     }
   }
-  const gql = browserGql();
+  const gql = tokenGql();
   const out: PickemGame[] = [];
   for (const season of SEASONS) {
     for (let week = 1; week <= 18; week++) {

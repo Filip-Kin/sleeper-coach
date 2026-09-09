@@ -5,7 +5,7 @@
 // Everything here is read-only. Submission lives in src/pickem/run.ts.
 
 import { config } from "../config.ts";
-import { browserGql, fetchWeek, fetchMyLegs, fetchLeaguePicks, currentLegId, type PickemGame, type Gql } from "../pickem/client.ts";
+import { tokenGql, fetchWeek, fetchMyLegs, fetchLeaguePicks, currentLegId, type PickemGame, type Gql } from "../pickem/client.ts";
 import { decide, safePick, isPickable, inFinalWindow, bestTiebreaker, gradePick, scorePicks, FINAL_WINDOW_MIN } from "../pickem/strategy.ts";
 import { fetchMarketLines } from "../pickem/odds.ts";
 
@@ -96,7 +96,7 @@ export async function pickemView(weekArg?: number): Promise<PickemView> {
 
   if (cache && cache.week === week && Date.now() - cache.at < TTL_MS) return cache.view;
 
-  const gql: Gql = browserGql();
+  const gql: Gql = tokenGql();
   const [sleeperGames, myLegs, leaguePicks, nameOf, market] = await Promise.all([
     fetchWeek(gql, week),
     fetchMyLegs(gql, leagueId, rosterId),

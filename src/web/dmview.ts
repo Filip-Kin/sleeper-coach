@@ -8,7 +8,7 @@
 // coach's job.
 
 import { config } from "../config.ts";
-import { browserGql, listDms, threadMessages, type Gql } from "../league/api.ts";
+import { tokenGql, listDms, threadMessages, type Gql } from "../league/api.ts";
 
 export interface DmMessageView {
   id: string;
@@ -38,7 +38,7 @@ interface Cached { at: number; view: DmView }
 let cache: Cached | null = null;
 const TTL_MS = 20_000;
 
-export async function dmView(gql: Gql = browserGql()): Promise<DmView> {
+export async function dmView(gql: Gql = tokenGql()): Promise<DmView> {
   if (cache && Date.now() - cache.at < TTL_MS) return cache.view;
 
   const threads = await listDms(gql, 25);

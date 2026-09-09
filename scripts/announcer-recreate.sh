@@ -2,10 +2,9 @@
 # Rebuild the announcer image and recreate ONLY the announcer container.
 #
 # WHY THIS EXISTS. The announcer and the coach are two services in one Coolify
-# compose project, so a Coolify deploy recreates BOTH. That would kill the headed
-# browser holding the Sleeper session and any running draft, which is
-# unacceptable on a draft day. This rebuilds and swaps the announcer alone and
-# never touches the coach.
+# compose project, so a Coolify deploy recreates BOTH. That would kill any
+# running draft, which is unacceptable on a draft day. This rebuilds and swaps
+# the announcer alone and never touches the coach.
 #
 #   ./scripts/announcer-recreate.sh [env KEY=VALUE ...]
 #

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Container entrypoint. Runs the Xvfb + x11vnc + websockify stack under a tiny
-# supervisor (so any of them dying restarts), ensures the Claude CLI is present
-# in the persistent HOME, then execs the daemon in the foreground. If the
-# daemon exits, the container exits and Docker's restart policy takes over.
-# Cloned from the proven pit-podcast entrypoint.
+# Container entrypoint. Ensures the Claude CLI is present in the persistent
+# HOME, runs the web dashboard under a tiny supervisor (so it restarts if it
+# dies), then execs the daemon in the foreground. If the daemon exits, the
+# container exits and Docker's restart policy takes over.
+#
+# The Xvfb, x11vnc, websockify and browser-server processes that used to start
+# here went with the browser on 2026-09-09. The Sleeper session is a token file
+# on the volume now (see README, "The Sleeper token").
 
 set -u
-
-cleanup_x_state() { rm -f /tmp/.X99-lock /tmp/.X11-unix/X99; }
 
 supervise() {
     local name=$1; shift
@@ -16,22 +17,12 @@ supervise() {
             echo "[entrypoint] starting ${name}"
             "$@"
             echo "[entrypoint] ${name} exited rc=$?, restarting in 2s"
-            [ "${name}" = "xvfb" ] && cleanup_x_state
             sleep 2
         done
     ) &
 }
 
-mkdir -p "${HOME}" /data/sleeper-coach/profile /data/sleeper-coach/shots
-
-cleanup_x_state
-supervise xvfb Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset
-
-for i in $(seq 1 40); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.25; done
-
-supervise x11vnc x11vnc -display :99 -rfbport 5900 \
-    -passwd "${WEB_PASS:-changeme}" -forever -quiet -noxdamage
-supervise websockify websockify --web /usr/share/novnc 6080 localhost:5900
+mkdir -p "${HOME}"
 
 # Install the native Claude CLI into the persistent HOME on first start, so the
 # auto-updater works across container recreates (guest-claude pattern).
@@ -41,11 +32,7 @@ if [ ! -x "${HOME}/.local/bin/claude" ]; then
 fi
 export PATH="${HOME}/.local/bin:${PATH}"
 
-# Persistent headed browser (visible over noVNC, holds the Sleeper session,
-# exposes CDP for the act commands to attach to).
-supervise browser-server bun run /app/src/act/browser-server.ts
-
-# Web dashboard in the background (Phase D wires the UI); daemon in foreground.
+# Web dashboard in the background; daemon in foreground.
 if [ -f /app/src/web/server.ts ]; then
     supervise web bun run /app/src/web/server.ts
 fi

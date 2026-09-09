@@ -1,8 +1,7 @@
 # The announcer service: a lightweight image (Bun + ffmpeg + Piper local TTS +
 # local whisper.cpp STT + the Claude CLI) that tails the coach's activity log,
 # speaks the draft picks into a Discord voice channel, and (when LISTENER_ENABLED
-# is on) listens and fires back comebacks. No Playwright/browser stack, unlike
-# the main coach image.
+# is on) listens and fires back comebacks.
 
 # #region whisper.cpp builder
 # Build the whisper-cli speech-to-text binary in a throwaway stage so the build
@@ -77,8 +76,6 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 
-# Browsers are never used here; skip the Playwright download during install.
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 

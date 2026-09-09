@@ -8,7 +8,9 @@ import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
 import { unreactedDrops } from "./analysis/waivers.ts";
-import { browserGql as leagueGql, dropPlayers, completedTrades, myRoster } from "./league/api.ts";
+import { tokenGql as leagueGql, dropPlayers, completedTrades, myRoster, pendingTrades } from "./league/api.ts";
+import { assessToken } from "./league/token.ts";
+import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
 import { handleDms } from "./league/dm-watch.ts";
@@ -28,8 +30,9 @@ import { freezeState, assertWritesAllowed } from "./killswitch.ts";
 const STATE_DIR = process.env.COACH_STATE ?? "/data/sleeper-coach";
 const DB_PATH = process.env.COACH_DB ?? "/data/sleeper-coach/coach.db";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 90_000);
-// While the draft orchestrator owns the shared browser, the daemon must not
-// navigate it (auth checks / trade handling), or it hijacks the draft.
+// While the draft orchestrator is running it owns every write to the league,
+// so the daemon stands down (trade handling, scheduled jobs, auth checks) until
+// the lock file goes away.
 const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
 const draftActive = () => existsSync(DRAFT_LOCK);
 // Trades are the coach's call BY DESIGN, but the write path (respondTrade) is
@@ -70,46 +73,50 @@ function markSeen(txId: string, status: string): void {
 }
 
 // #region auth watch
-// The Sleeper session (a ~1-year JWT in the browser profile) should last the
-// season, but a server-side logout would silently break the coach's hands. So
-// we periodically confirm login and push an HA alert on any change, per Filip.
-const BROWSER_API = process.env.BROWSER_API ?? "http://127.0.0.1:9223";
+// The Sleeper session is a JWT (about a year; the one imported on 2026-09-09
+// expires 2027-08-06) read from ${STATE_DIR}/sleeper-token. Sleeper can revoke
+// it server-side and it does expire, so every AUTH_CHECK_MS the daemon asks
+// `me` and reads the exp claim. Missing, rejected, or inside 14 days of expiry
+// is alerted once a day with the exact refresh procedure. A network failure is
+// inconclusive: writes are held for that poll and nobody is paged.
 const AUTH_CHECK_MS = Number(process.env.AUTH_CHECK_MS ?? 30 * 60 * 1000);
-// Genuine session loss must be confirmed by several CONSECUTIVE definitive reads
-// before we ping Filip — the old check false-fired constantly, so the bar is
-// deliberately high. An inconclusive ("unknown") read never counts either way.
-const AUTH_FAIL_THRESHOLD = Number(process.env.AUTH_FAIL_THRESHOLD ?? 3);
+const AUTH_ALERT_MS = 24 * 60 * 60 * 1000;
 let lastAuthCheck = 0;
-let lastAuthOk = true;
-let authOutStreak = 0;
+let lastAuthAlert = 0;
+let authUsable = false;
+let authSummary = "unchecked";
 
-async function checkAuth(): Promise<void> {
-  lastAuthCheck = Date.now();
-  let state = "unknown";
-  try {
-    const res = await fetch(`${BROWSER_API}/auth`, { signal: AbortSignal.timeout(20_000) });
-    state = String(((await res.json()) as { state?: string }).state ?? "unknown");
-  } catch {
-    state = "unknown"; // browser-server unreachable — inconclusive, never alert
+async function checkAuth(): Promise<boolean> {
+  const now = Date.now();
+  const verdict = assessToken(await probeToken(), now);
+  if (verdict.inconclusive) {
+    // Re-probe on the next poll rather than trusting a stale verdict for 30 min.
+    lastAuthCheck = 0;
+    console.log(`[auth] ${verdict.summary}; holding writes this poll`);
+    return false;
   }
-  if (state === "ok") {
-    if (!lastAuthOk) logEvent("system", "auth-restored", "Sleeper session valid again.");
-    lastAuthOk = true;
-    authOutStreak = 0;
-    return;
+  lastAuthCheck = now;
+  if (verdict.usable && !authUsable && authSummary !== "unchecked") {
+    logEvent("system", "auth-restored", `Sleeper token usable again (${verdict.summary}).`);
   }
-  if (state === "logged_out" || state === "expired") {
-    authOutStreak++;
-    // Ping only after repeated confirmation, and only once per outage. This
-    // genuinely needs Filip: re-export/import a session.
-    if (authOutStreak >= AUTH_FAIL_THRESHOLD && lastAuthOk) {
-      lastAuthOk = false;
-      logEvent("system", "auth-lost", `Sleeper session ${state} (confirmed ${authOutStreak}x).`);
-      await sendAlert("Sleeper login lost", `The coach's Sleeper session is ${state}. Re-import a session so it can act on your team.`);
-    }
-    return;
+  if (!verdict.usable && (authUsable || authSummary === "unchecked")) {
+    logEvent("system", "auth-lost", `Sleeper token not usable: ${verdict.summary}.`);
   }
-  // "unknown": inconclusive — leave streak and lastAuthOk untouched, no alert.
+  authUsable = verdict.usable;
+  authSummary = verdict.summary;
+  if (verdict.alert && now - lastAuthAlert > AUTH_ALERT_MS) {
+    lastAuthAlert = now;
+    await sendAlert("Sleeper token needs attention", verdict.alert).catch(() => {});
+  }
+  return verdict.usable;
+}
+
+/** Can a write go out now? Answers from the last check, re-probing when it is
+ *  older than AUTH_CHECK_MS. Every job and every write path in this file is
+ *  gated on it. */
+async function tokenReady(): Promise<boolean> {
+  if (Date.now() - lastAuthCheck > AUTH_CHECK_MS) return checkAuth();
+  return authUsable;
 }
 // #endregion
 
@@ -245,7 +252,7 @@ async function pickemKickoffPass(): Promise<void> {
   if (draftActive()) return;
   const kickoffs = await cachedKickoffs();
   if (!pickemTriggerDue(kickoffs, Date.now(), lastPickemPass)) return;
-  if (!(await browserReady())) return; // retried on the next poll, nothing burned
+  if (!(await tokenReady())) return; // retried on the next poll, nothing burned
   lastPickemPass = Date.now();
   const next = Math.min(...kickoffs.filter((k) => k > Date.now()));
   const mins = Math.round((next - Date.now()) / 60_000);
@@ -260,38 +267,24 @@ async function pickemKickoffPass(): Promise<void> {
 }
 // #endregion
 
-/** Is the shared browser up? Every scheduled job drives it, and the container
- *  starts the daemon and browser-server together, so at boot a job can be due
- *  before Brave has finished launching. That failed pickem-slate 0.2s into its
- *  first deploy, and because a failed job is marked handled rather than retried,
- *  the day's run was simply lost. Cheap ping, short timeout, no navigation. */
-let browserWaitLogged = false;
-let browserReadyFlag = false;
-async function browserReady(): Promise<boolean> {
-  try {
-    const res = await fetch(`${BROWSER_API}/auth`, { signal: AbortSignal.timeout(5_000) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
+let heldJobsLogged = false;
 
 async function runDueJobs(): Promise<void> {
-  if (draftActive()) return; // never fight a draft for the shared browser
+  if (draftActive()) return; // the draft orchestrator owns the league while it runs
   const now = Date.now();
   const due = JOBS.map((job) => ({ job, v: isDue(job, now, lastRunOf(job.name)) }));
-  // Only pay for the readiness check when something actually wants to run, and
+  // Only pay for the token check when something actually wants to run, and
   // leave the occurrence UNMARKED so it is retried on the next poll instead of
-  // being burned by a startup race.
-  if (due.some((d) => d.v.due && d.v.occurrence !== null) && !(await browserReady())) {
-    if (!browserWaitLogged) {
+  // being burned while the token is missing or Sleeper is unreachable.
+  if (due.some((d) => d.v.due && d.v.occurrence !== null) && !(await tokenReady())) {
+    if (!heldJobsLogged) {
       const names = due.filter((d) => d.v.due).map((d) => d.job.name).join(", ");
-      console.log(`[schedule] browser not up yet; holding ${names} for the next poll`);
-      browserWaitLogged = true;
+      console.log(`[schedule] Sleeper token not usable (${authSummary}); holding ${names} for the next poll`);
+      heldJobsLogged = true;
     }
     return;
   }
-  browserWaitLogged = false;
+  heldJobsLogged = false;
   for (const { job, v } of due) {
     if (v.due && v.occurrence !== null) {
       await runJob(job, v.occurrence);
@@ -355,10 +348,11 @@ async function reactToDrops(week: number): Promise<void> {
 // #region veto review of other managers' trades
 const vetoSeen = new Set<string>();
 async function reviewOthersTrades(leg: number): Promise<void> {
-  if (!browserReadyFlag) return;
+  // Runs after pollOnce's token gate. It used to sit behind a browser-ready
+  // flag that nothing ever set to true, so the veto review never ran; it does
+  // now, and it only ever flags for a human (assessVeto never votes).
   let pend: { transactionId: string; rosterIds: number[]; adds: Record<string, number>; drops: Record<string, number>; consenterIds: number[] }[] = [];
   try {
-    const { pendingTrades } = await import("./league/api.ts");
     pend = await pendingTrades(leagueGql(), leg);
   } catch { return; }
   const others = pend.filter((t) => !t.rosterIds.includes(config.rosterId) && !vetoSeen.has(t.transactionId));
@@ -483,14 +477,14 @@ async function reactToCompletedTrades(gql: ReturnType<typeof leagueGql>, leg: nu
 async function pollOnce(): Promise<void> {
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
-  if (draftActive()) return; // don't drive the browser mid-draft
+  if (draftActive()) return; // the draft orchestrator owns the league while it runs
 
   // Is the lineup on the site still the optimal one? A starter ruled Out since
   // the last lock, or a player back from Out, is fixed here, every poll, not at
-  // the next fixed lock. The reads are public GraphQL (no browser, no player
-  // dump), so this runs before the browser gate; only a needed write waits for
-  // the browser. See act/lineup-guard.ts.
-  await runLineupGuard({ browserReady }).catch((e) => console.error(`[lineup-guard] ${e instanceof Error ? e.message : String(e)}`));
+  // the next fixed lock. The reads are public GraphQL (no token, no player
+  // dump), so this runs before the token gate; only a needed write waits for
+  // the token. See act/lineup-guard.ts.
+  await runLineupGuard({ tokenReady }).catch((e) => console.error(`[lineup-guard] ${e instanceof Error ? e.message : String(e)}`));
 
   // TRADES COME FROM GRAPHQL, NOT REST. On 2026-09-02 a real offer sat live for
   // hours and the coach never saw it: GET /transactions/<week> does not list
@@ -499,11 +493,10 @@ async function pollOnce(): Promise<void> {
   // league_transactions_by_status(status:"proposed") returns them, and
   // accept_trade / reject_trade respond without touching the trades-page DOM
   // that blocked this for weeks.
-  // The browser is shared and starts alongside the daemon, so at boot this runs
-  // before Brave is listening. Gating here rather than swallowing the connection
-  // error keeps a real outage visible: this is the same race that lost a
-  // scheduled pick'em pass, and it deserved one fix covering both paths, not two.
-  if (!(await browserReady())) return;
+  // Everything below needs the session token. Gating here rather than letting
+  // each call fail keeps a dead token visible in one place (the auth watch
+  // alerts) instead of as five different error lines per poll.
+  if (!(await tokenReady())) return;
 
   const gql = leagueGql();
   try {

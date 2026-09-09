@@ -8,9 +8,9 @@
 // cache-control: private, max-age=0, so it is live. The whole surface is
 // documented in the sleeper-graphql repo (Projects/sleeper-graphql).
 //
-// Only reads live here. Writes and anything user-scoped (DMs, trade responses,
-// starters) go through the browser passthrough in league/api.ts, which carries
-// the session token.
+// Only public reads live here. Writes and anything user-scoped (DMs, trade
+// responses, starters) go through tokenGql in league/api.ts, which is the same
+// POST with the session token added as an authorization header.
 
 import type { League, LeagueUser, NflState, Roster, RosterPlayerMini } from "./types.ts";
 

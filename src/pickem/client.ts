@@ -15,25 +15,13 @@
 // reads like the team or game is wrong when in fact the shape is wrong.
 
 import { config } from "../config.ts";
+import { tokenGql, browserGql, type Gql } from "../league/api.ts";
 
-export type Gql = (query: string) => Promise<Record<string, unknown>>;
-
-/** Calls GraphQL from inside the persistent browser, so the session token never
- *  leaves the profile and the request carries the site's own origin. A plain
- *  server-side fetch is not worth the risk here: Sleeper sits behind Cloudflare
- *  and the page-context path is already proven by every other write we make. */
-export function browserGql(api = process.env.BROWSER_API ?? "http://127.0.0.1:9223"): Gql {
-  return async (query: string) => {
-    const res = await fetch(`${api}/graphql`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query }),
-    });
-    const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok || j.error) throw new Error(`graphql transport: ${String(j.error ?? res.statusText)}`);
-    return (j.result ?? {}) as Record<string, unknown>;
-  };
-}
+// One transport for the whole coach: the token-carrying fetch in league/api.ts.
+// This file used to have its own copy of the browser passthrough; the alias is
+// re-exported so pick'em callers written against browserGql keep compiling.
+export { tokenGql, browserGql };
+export type { Gql };
 
 function unwrap(body: Record<string, unknown>, field: string): unknown {
   const errs = body.errors as { code?: string; message?: string }[] | undefined;

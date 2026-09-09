@@ -24,11 +24,11 @@ ANN=$(docker ps --format '{{.Names}}' | grep '^announcer' || true)
 [ -n "$ANN" ] && ok "announcer: $ANN" || note "no announcer container (draft still works, just silent)"
 [ -n "$COACH" ] || { echo; echo "cannot continue without the coach container"; exit 1; }
 
-echo "== sleeper session =="
-AUTH=$(docker exec "$COACH" curl -s --max-time 10 http://127.0.0.1:9223/auth 2>/dev/null || true)
+echo "== sleeper token =="
+AUTH=$(docker exec "$COACH" bash -lc 'cd /app && timeout 30 bun run src/act/cli.ts token check 2>&1' | head -1 || true)
 case "$AUTH" in
-  *'"ok"'*) ok "browser logged in ($AUTH)" ;;
-  *)        bad "browser auth not ok: ${AUTH:-no response}. Re-import a localStorage blob (act import-session)." ;;
+  *"token: ok"*) ok "$AUTH" ;;
+  *)             bad "${AUTH:-no response}. Import a fresh token: act token import - (see README, The Sleeper token)." ;;
 esac
 
 echo "== claude token =="
@@ -57,22 +57,18 @@ else:
 PY
 
 echo "== news dossier =="
-docker exec -i "$COACH" python3 - <<PY
-import json, datetime
-try:
-    d = json.load(open("$STATE/news.json"))
-except Exception as e:
-    print(f"  FAIL  news.json unreadable ({e}); the engine would draft on numbers alone"); raise SystemExit
-n = len(d.get("players", {}))
-up = d.get("updatedAt", "unknown")
-print(f"  OK    {n} entries, updated {up}")
-try:
-    age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(up.replace("Z", "+00:00"))).total_seconds() / 3600
-    if age > 8:
-        print(f"  WARN  dossier is {age:.1f}h old; re-sweep the news before launch")
-except Exception:
-    pass
-PY
+# bun, not python: the image no longer ships python3.
+docker exec "$COACH" bun -e '
+const f = "'"$STATE"'/news.json";
+let d;
+try { d = await Bun.file(f).json(); } catch (e) { console.log(`  FAIL  news.json unreadable (${e}); the engine would draft on numbers alone`); process.exit(0); }
+const n = Object.keys(d.players ?? {}).length;
+const up = d.updatedAt ?? "unknown";
+console.log(`  OK    ${n} entries, updated ${up}`);
+const age = (Date.now() - Date.parse(up)) / 3600000;
+if (Number.isFinite(age) && age > 8) console.log(`  WARN  dossier is ${age.toFixed(1)}h old; re-sweep the news before launch`);
+'
+
 
 echo "== state files =="
 if docker exec "$COACH" test -f "$STATE/draft-active"; then

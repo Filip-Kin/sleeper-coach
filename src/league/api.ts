@@ -15,23 +15,101 @@
 //
 // Trade negotiation in this league happens in DMs, not the trade UI, so the DM
 // surface is here too.
+//
+// TRANSPORT. Every call here is a direct HTTPS POST to https://sleeper.app/graphql
+// with the session token as an `authorization` header. Until 2026-09-09 the
+// same requests were relayed through a headed Brave (page.evaluate inside a
+// logged-in profile) on the theory that Cloudflare would block a server-side
+// fetch. Measured from the host with a bare fetch: me, my_dms and a no-op
+// roster_update_starters all answered errors: null. The browser, its Xvfb and
+// noVNC stack and the DOM code were then removed. Filip: "I want to get rid of
+// all dom manipulation since it seems we can do everything through graphql."
 
 import { config } from "../config.ts";
 import { assertWritesAllowed } from "../killswitch.ts";
+import { SLEEPER_GRAPHQL } from "../sleeper/graphql.ts";
+import { jwtExpiry, MissingTokenError, readToken, type TokenProbe } from "./token.ts";
 
 export type Gql = (query: string) => Promise<Record<string, unknown>>;
 
-export function browserGql(api = process.env.BROWSER_API ?? "http://127.0.0.1:9223"): Gql {
+/** Sleeper answered `code: "unauthorized"`: the token is missing server-side,
+ *  revoked or expired. Distinct from a transport failure so the daemon can
+ *  alert on it instead of retrying. */
+export class SleeperAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SleeperAuthError";
+  }
+}
+
+export interface TokenGqlOptions {
+  /** Explicit token; default reads SLEEPER_TOKEN then the state file, once,
+   *  on the first request. */
+  token?: string;
+  /** Where to read the token from when `token` is not given. */
+  tokenFile?: string;
+  endpoint?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+type GqlBody = { data?: Record<string, unknown>; errors?: { code?: string; message?: string }[] | null };
+
+/** A Gql that carries the session token. Returns the raw GraphQL body
+ *  ({data, errors}) so the helpers below keep unwrapping it as before. 15 s
+ *  timeout, one retry on 429 and 5xx, and a typed throw on a missing token or
+ *  an unauthorized answer. */
+export function tokenGql(opts: TokenGqlOptions = {}): Gql {
+  const endpoint = opts.endpoint ?? SLEEPER_GRAPHQL;
+  const doFetch = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? 15_000;
+  let token = opts.token;
   return async (query: string) => {
-    const res = await fetch(`${api}/graphql`, {
+    if (!token) token = readToken(opts.tokenFile); // throws MissingTokenError
+    const post = () => doFetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "content-type": "application/json", authorization: token as string },
       body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok || j.error) throw new Error(`graphql transport: ${String(j.error ?? res.statusText)}`);
-    return (j.result ?? {}) as Record<string, unknown>;
+    let res = await post();
+    if (res.status === 429 || res.status >= 500) {
+      await Bun.sleep(500);
+      res = await post();
+    }
+    if (!res.ok) throw new Error(`graphql transport: HTTP ${res.status}`);
+    const body = (await res.json().catch(() => ({}))) as GqlBody;
+    const unauthorized = (body.errors ?? []).find((e) => e.code === "unauthorized");
+    if (unauthorized) {
+      throw new SleeperAuthError(`graphql unauthorized: ${unauthorized.message ?? "the Sleeper token was rejected"}`);
+    }
+    return body as Record<string, unknown>;
   };
+}
+
+/** @deprecated The browser is gone. Same transport as tokenGql(); kept so
+ *  callers written against the passthrough keep compiling. */
+export const browserGql = (): Gql => tokenGql();
+
+/** One probe for the daemon's auth check: does `me` answer, and when does the
+ *  JWT expire. Never throws; every failure is a probe kind. */
+export async function probeToken(gql?: Gql): Promise<TokenProbe> {
+  let token: string;
+  try {
+    token = readToken();
+  } catch (err) {
+    if (err instanceof MissingTokenError) return { kind: "missing" };
+    return { kind: "error", message: err instanceof Error ? err.message : String(err) };
+  }
+  try {
+    const body = await (gql ?? tokenGql({ token }))("{me{user_id}}");
+    const me = (body.data as { me?: { user_id?: string } } | undefined)?.me;
+    if (!me?.user_id) return { kind: "error", message: "me returned no user_id" };
+    return { kind: "ok", expMs: jwtExpiry(token) };
+  } catch (err) {
+    if (err instanceof SleeperAuthError) return { kind: "unauthorized" };
+    return { kind: "error", message: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 function unwrap(body: Record<string, unknown>, field: string): unknown {

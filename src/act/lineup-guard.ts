@@ -5,12 +5,12 @@
 // it on the 90s periodic? Cheap deterministic check if any player is out, also
 // if previously out player is back in."
 //
-// It is cheap because the reads never touch the browser or the 14 MB player
-// dump. GraphQL league_rosters answers a bare POST in ~130 ms and its
-// player_map carries the live injury_status of every rostered player; the
-// week's projections are the 30-minute file cache. Only the write goes through
-// the browser passthrough (roster_update_starters), and only when the solved
-// lineup actually differs from the one on the site.
+// It is cheap because the reads never touch the 14 MB player dump. GraphQL
+// league_rosters answers a bare POST in ~130 ms and its player_map carries the
+// live injury_status of every rostered player; the week's projections are the
+// 30-minute file cache. Only the write needs the session token
+// (roster_update_starters), and only when the solved lineup actually differs
+// from the one on the site.
 //
 // Game lock. Once a player's game has kicked off Sleeper will not move him, in
 // or out, so a locked starter is pinned to his slot and a locked bench player
@@ -26,7 +26,7 @@ import { loadPlayers } from "../data/players.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import type { PlayersMap, Roster, ScoringSettings, SleeperPlayer } from "../sleeper/types.ts";
-import { browserGql, updateStarters } from "../league/api.ts";
+import { tokenGql, updateStarters } from "../league/api.ts";
 import { freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
@@ -165,15 +165,16 @@ async function leagueShape(): Promise<{ slots: string[]; scoring: ScoringSetting
   return leagueCache;
 }
 
-// A plan that failed to write is not retried every 90 s; and a browser outage
-// or freeze is said once an hour, not forty times.
+// A plan that failed to write is not retried every 90 s; and a dead token or a
+// freeze is said once an hour, not forty times.
 let lastFailure: { key: string; at: number } | null = null;
 let lastHeldNotice = 0;
 const RETRY_MS = 15 * 60_000;
 const NOTICE_MS = 60 * 60_000;
 
 export interface GuardDeps {
-  browserReady: () => Promise<boolean>;
+  /** Can a write go out right now? The daemon answers from its token check. */
+  tokenReady: () => Promise<boolean>;
   now?: number;
 }
 
@@ -211,17 +212,17 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     }
     return plan;
   }
-  if (!(await deps.browserReady())) {
+  if (!(await deps.tokenReady())) {
     if (now - lastHeldNotice > NOTICE_MS) {
       lastHeldNotice = now;
-      logEvent("coach", "lineup-held", `Lineup change wanted but the browser is down: ${summary}`, { week });
-      await sendAlert("Lineup change pending, browser down", summary).catch(() => {});
+      logEvent("coach", "lineup-held", `Lineup change wanted but the Sleeper token is not usable: ${summary}`, { week });
+      await sendAlert("Lineup change pending, Sleeper token not usable", summary).catch(() => {});
     }
     return plan;
   }
 
   try {
-    await updateStarters(browserGql(), plan.ids);
+    await updateStarters(tokenGql(), plan.ids);
     const back = (await leagueRosters(config.leagueId)).find((r) => r.roster_id === config.rosterId)?.starters ?? [];
     if (back.join(",") !== key) throw new Error(`read-back mismatch: site has ${back.join(",")}`);
     console.log(`[lineup-guard] week ${week} lineup changed: ${summary}`);

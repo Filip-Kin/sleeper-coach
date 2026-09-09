@@ -24,15 +24,6 @@ const REASONING_LOG = process.env.REASONING_LOG ?? "/data/sleeper-coach/reasonin
 
 const PORT = Number(process.env.WEB_PORT ?? 8770);
 const PUBLIC_DIR = new URL("../../public/", import.meta.url).pathname;
-// Build the noVNC embed URL, auto-supplying the VNC password from the server's
-// own env so the takeover tab connects with no prompt (behind Authelia + HTTPS).
-const NOVNC_BASE = process.env.NOVNC_BASE ?? "https://coach-vnc.filipkin.com/vnc.html";
-const NOVNC_URL = (() => {
-  const q = new URLSearchParams({ autoconnect: "1", resize: "scale" });
-  if (process.env.WEB_PASS) q.set("password", process.env.WEB_PASS);
-  return `${NOVNC_BASE}?${q.toString()}`;
-})();
-
 async function stateJson(): Promise<Response> {
   const [league, users, rosters, players] = await Promise.all([
     sleeper.league(config.leagueId),
@@ -57,7 +48,6 @@ async function stateJson(): Promise<Response> {
     team: { name: users.find((u) => u.user_id === me?.owner_id)?.metadata?.team_name ?? "--dangerously-skip-perms", rosterId: config.rosterId },
     roster: myPlayers,
     board: ranked.map((r) => ({ name: r.name, pos: `${r.position}${r.posRank}`, team: r.team, pts: r.points, vor: r.vor, adp: r.adp >= 999 ? null : r.adp, tier: r.tier, injury: r.injuryStatus })),
-    novncUrl: NOVNC_URL,
   });
 }
 

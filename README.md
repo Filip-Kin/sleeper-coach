@@ -7,16 +7,46 @@ wakeups for deadlines and a poller that wakes it when a trade offer arrives.
 
 ## The one hard constraint
 
-Sleeper's public API is **read-only**. There is no official way to set a
-lineup, make a draft pick, or accept, reject, or send a trade. So this project
-has two halves:
+Sleeper's public REST API is **read-only**. There is no official way to set a
+lineup, make a draft pick, or accept, reject, or send a trade. Sleeper's own
+web app does all of that through `https://sleeper.app/graphql`, and so does the
+coach: every write is a direct GraphQL request carrying the account's session
+token (`src/league/api.ts`). Public reads go to the same endpoint with no token
+(`src/sleeper/graphql.ts`). The full surface is documented in the
+`sleeper-graphql` project next to this one.
 
-- **Read + reason** (this repo, safe): everything analytical, wired to the live
-  league via the public API. No auth, no side effects.
-- **Act** (later, supervised): a headed browser on the NAS, driven by the agent
-  and watchable/seizable over noVNC, that performs the actual clicks. Sleeper's
-  own CPU-autopick plus a preset draft queue are the safety net if automation
-  stalls.
+Until 2026-09-09 those writes were relayed through a headed Brave in the
+container (Playwright, Xvfb, noVNC), on the theory that Cloudflare would block
+a server-side fetch. It does not: `me`, `my_dms` and a `roster_update_starters`
+all answered a bare fetch with the token. The browser stack was removed.
+
+## The Sleeper token
+
+The coach authenticates with the JWT the Sleeper web app keeps in
+`localStorage.token`. It lasts about a year (the one imported on 2026-09-09
+expires 2027-08-06). The daemon checks it every 30 minutes with `me` and reads
+the `exp` claim; if the token is missing, rejected, or inside 14 days of expiry
+it sends one alert a day with the procedure below.
+
+To refresh it:
+
+1. Log in at https://sleeper.com in any browser.
+2. Open DevTools, Application, Local Storage, `https://sleeper.com`, and copy
+   the value of the key `token`.
+3. On the NAS:
+
+   ```sh
+   docker exec -i $(docker ps --format '{{.Names}}' | grep '^sleeper-coach') \
+     bun run src/act/cli.ts token import -
+   ```
+
+   Paste the token and press Ctrl-D. The command verifies it with `me`, refuses
+   a token for any account other than Filip96, and writes
+   `/data/sleeper-coach/sleeper-token` with mode 600. `act token check` prints
+   the current state. `SLEEPER_TOKEN` in the environment overrides the file.
+
+Nothing here uses the `login` query: it needs the password and a captcha, and a
+yearly copy-paste is the better trade.
 
 ## The league (2026)
 
@@ -44,8 +74,8 @@ bun run coach players --refresh   # refresh the player cache
    first-pass value board, CLI.
 2. **Projection + real board** — points from this league's exact scoring,
    positional scarcity for 8-team PPR, ADP blend, qualitative news layer.
-3. **Mock-draft harness** — headed browser on NAS via noVNC; benchmark real
-   pick latency and rehearse takeover before the real draft.
+3. **Mock-draft harness**: rehearse the live draft against a mock draft room
+   before the real one.
 4. **Live draft dashboard** — reasoning stream, about-to-pick countdown with
    Pause / Take-over, and an input box to feed the agent info mid-draft.
 5. **In-season** — scheduled lineup + waiver wakeups, trade poller and
@@ -109,8 +139,12 @@ onto one dead week.
 ```
 src/
   config.ts            league / draft / user identifiers
-  sleeper/client.ts    read-only API client (no write path exists)
+  sleeper/client.ts    read-only REST client
+  sleeper/graphql.ts   public GraphQL reads (no token)
   sleeper/types.ts     typed API shapes
+  league/api.ts        token transport + every write (starters, waivers, trades, DMs)
+  league/token.ts      where the session token lives and the daemon's expiry check
+  act/cli.ts           `act`: token import/check, lineup, trade-respond, trade-send
   data/players.ts      cached player + injury dump (daily TTL)
   data/byes.ts         2026 bye week per team (static, ESPN-derived)
   data/news.ts         the qualitative news layer (see below)
