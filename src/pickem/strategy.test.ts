@@ -76,7 +76,8 @@ test("threshold is exactly one point, inclusive", () => {
 test("a locked, started or past game is not pickable", () => {
   expect(isPickable(game({ startTime: 5_000 }), 1_000)).toBe(true);
   expect(isPickable(game({ startTime: 500 }), 1_000)).toBe(false);
-  expect(isPickable(game({ startTime: 5_000, gradedLocked: true }), 1_000)).toBe(false);
+  // A frozen graded line is not a pick lock (2026-09-10, see isPickable).
+  expect(isPickable(game({ startTime: 5_000, gradedLocked: true }), 1_000)).toBe(true);
   expect(isPickable(game({ startTime: 5_000, status: "complete" }), 1_000)).toBe(false);
 });
 

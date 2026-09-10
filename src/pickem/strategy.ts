@@ -192,11 +192,17 @@ export function decideSlate(games: GameLine[]): Decision[] {
   return games.map(decide).filter((d): d is Decision => d !== null);
 }
 
-/** A pick is only worth submitting while the game can still be picked. Sleeper
- *  flips is_locked per GAME, not per week, and this pool's games run Wednesday
- *  through Monday, so there is no single weekly deadline to aim at. */
+/** A pick is only worth submitting while the game can still be picked: the
+ *  game has not started and Sleeper still reports it pre_game.
+ *
+ *  `pickem_spread.is_locked` is NOT a pick lock and must not be read as one.
+ *  It says the graded line is frozen, which is the precondition for our edge
+ *  (frozen graded line vs the live market). On 2026-09-09 it was true for all
+ *  16 week-1 games from Wednesday, so every pre-kickoff pass before NE@SEA saw
+ *  "0 still pickable", never applied the edge rule, and the pool graded our
+ *  provisional SEA -3.5 as a loss on a 13-10 game. A held pick re-submitted on
+ *  a locked-line pre_game Sunday game was accepted, which settles it. */
 export function isPickable(game: GameLine, now: number): boolean {
-  if (game.gradedLocked) return false;
   if (game.status && game.status !== "pre_game") return false;
   return game.startTime > now;
 }
