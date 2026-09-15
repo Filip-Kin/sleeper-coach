@@ -120,23 +120,6 @@ export function toLeague(row: Row): League {
   };
 }
 
-/** The REST /matchups row shape, from a matchup_legs_raw row. */
-export interface MatchupRow {
-  roster_id: number;
-  matchup_id: number | null;
-  starters: string[];
-  players: string[];
-  points: number | null;
-}
-export function toMatchup(row: Row): MatchupRow {
-  return {
-    roster_id: num(row.roster_id),
-    matchup_id: typeof row.matchup_id === "number" ? row.matchup_id : null,
-    starters: strList(row.starters) ?? [],
-    players: strList(row.players) ?? [],
-    points: typeof row.points === "number" ? row.points : null,
-  };
-}
 // #endregion
 
 // #region reads
@@ -170,15 +153,6 @@ export async function sportInfo(sport = "nfl"): Promise<NflState> {
   const info = data.sport_info;
   if (!info || typeof info !== "object") throw new Error("sleeper graphql: sport_info returned nothing");
   return toNflState(info as Row);
-}
-
-/** matchup_legs_raw: the same rows as REST /matchups without the 40 KB
- *  player_map. Sleeper's own description calls it the fast path. */
-export async function matchupLegsRaw(leagueId: string, round: number): Promise<MatchupRow[]> {
-  const data = await publicGql(
-    `{matchup_legs_raw(league_id:"${safeId(leagueId)}",round:${Math.trunc(round)}){roster_id matchup_id starters players points}}`,
-  );
-  return rows(data, "matchup_legs_raw").map(toMatchup);
 }
 
 export async function leagueUsers(leagueId: string): Promise<LeagueUser[]> {

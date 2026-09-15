@@ -1,5 +1,5 @@
 import { SLEEPER_API } from "../config.ts";
-import { withRestFallback, leagueRosters, getLeague, sportInfo, matchupLegsRaw, leagueUsers } from "./graphql.ts";
+import { withRestFallback, leagueRosters, getLeague, sportInfo, leagueUsers } from "./graphql.ts";
 import type {
   League,
   LeagueUser,
@@ -71,8 +71,15 @@ export const sleeper = {
   rosters: (leagueId: string) =>
     withRestFallback("rosters", () => leagueRosters(leagueId), () => get<Roster[]>(`/league/${leagueId}/rosters`)),
 
-  matchups: (leagueId: string, week: number) =>
-    withRestFallback<unknown[]>("matchups", () => matchupLegsRaw(leagueId, week), () => get<unknown[]>(`/league/${leagueId}/matchups/${week}`)),
+  // REST ONLY, deliberately. Sleeper does not compute points on the GraphQL
+  // matchup queries: matchup_legs_raw and matchup_legs both returned
+  // points: null for all 8 rosters on a finished week 1, with and without the
+  // session token, while REST had 163.32 and friends. The app scores a matchup
+  // client-side from player_map. Moving this read to GraphQL on 2026-09-09
+  // therefore blanked every score on the dashboard, because it also drops
+  // starters_points, players_points and custom_points, which web/seasonview.ts
+  // reads. This endpoint is also the least-cached REST one (s-maxage=60).
+  matchups: (leagueId: string, week: number) => get<unknown[]>(`/league/${leagueId}/matchups/${week}`),
 
   // Completed and pending transactions for a scoring period (the "round").
   transactions: (leagueId: string, round: number) =>

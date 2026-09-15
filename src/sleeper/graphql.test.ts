@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { toRoster, toNflState, toLeague, toMatchup, withRestFallback } from "./graphql.ts";
+import { toRoster, toNflState, toLeague, withRestFallback } from "./graphql.ts";
 
 describe("mappers", () => {
   test("toRoster keeps the REST shape and adds player_map", () => {
@@ -26,9 +26,6 @@ describe("mappers", () => {
     expect(l.roster_positions).toEqual(["QB", "BN"]);
     expect(l.scoring_settings.rec).toBe(1);
     expect(l.settings.playoff_week_start).toBe(15);
-  });
-  test("toMatchup keeps roster_id and matchup_id", () => {
-    expect(toMatchup({ roster_id: 2, matchup_id: 4, starters: ["a"], players: ["a", "b"], points: null })).toEqual({ roster_id: 2, matchup_id: 4, starters: ["a"], players: ["a", "b"], points: null });
   });
 });
 
