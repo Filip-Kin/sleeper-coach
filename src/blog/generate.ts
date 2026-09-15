@@ -11,6 +11,11 @@ import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import { buildStandings } from "../web/seasonview.ts";
+import { tokenGql, completedTrades } from "../league/api.ts";
+import { loadPlayers } from "../data/players.ts";
+import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
+import { buildRosterWeek } from "../analysis/roster-week.ts";
+import { solveLineup, startingSlots } from "../analysis/lineup.ts";
 import { runAgent } from "../agent/runner.ts";
 import { recentEvents } from "../log.ts";
 import { addPost } from "./store.ts";
@@ -36,11 +41,21 @@ async function teamName(): Promise<string> {
 }
 
 const NO_STRATEGY =
-  "This post is PUBLIC and other managers in the league will read it. Do NOT reveal any forward-looking " +
-  "strategy: no target players, no waiver-wire plans, no trade intentions, no weekly lineup plans, no ranking of " +
-  "who you want next. Only reflect on what has ALREADY happened. Write in first person as the team's AI coach: " +
-  "honest, plain, a little fun, a few short paragraphs. No headers or bullet lists. " +
+  "This post is PUBLIC and every other manager in the league reads it. Do NOT reveal forward-looking strategy: " +
+  "no players you are targeting, no waiver plans, no trade intentions, no who-you-want-next ranking. A plain " +
+  "projected score for next week is fine, that number is on everyone's screen already. " +
   "Never use em dashes; use a comma, a colon or a full stop instead.";
+
+// Funny was requested, and a model told only "be funny" writes stand-up. The
+// rule that actually works is: the jokes come from the real numbers, and the
+// team you are hardest on is your own. Filip: "make the blog post more funny,
+// maybe mention stuff about your opponents or the trades it did that week."
+const VOICE =
+  "Write in first person as the team's AI coach, for a public league blog. Be genuinely funny: dry, quick, a bit " +
+  "cocky when you have earned it. Every joke has to come off a real number or a real event in the notes below, " +
+  "never a made-up bit. Roast your rivals the way a friend does, by the scoreboard, and never meanly or about " +
+  "anything outside fantasy. Be hardest on yourself: if you left points on the bench or a trade you made looks " +
+  "bad now, say so first and without excuses. A few short paragraphs, no headers, no bullet lists.";
 
 interface Generated { title: string; body: string; week?: number }
 
@@ -101,10 +116,16 @@ async function weekReview(): Promise<Generated> {
     }[]>,
   ]);
   const ours = rosters.find((r) => r.roster_id === config.rosterId);
-  const pm = ours?.player_map ?? {};
+  // Names come from EVERY roster's player_map, not just ours. Built from ours
+  // alone, a player we traded away resolved to a bare numeric id, and the model
+  // wrote "I sent Cloud Nine a player for Mark Andrews" because that is
+  // genuinely all it had. A trade has two sides and the post should name both.
+  const pm: Record<string, { first_name: string; last_name: string; position: string | null }> = {};
+  for (const r of rosters) Object.assign(pm, r.player_map ?? {});
   const named = (id: string) => {
     const p = pm[id];
-    return p ? `${p.first_name} ${p.last_name} (${p.position})` : id;
+    if (p) return `${p.first_name} ${p.last_name}${p.position ? ` (${p.position})` : ""}`;
+    return /^[A-Z]{2,4}$/.test(id) ? `${id} defense` : `player ${id}`;
   };
   const nameOf = new Map(users.map((u) => [u.user_id, u.metadata?.team_name || u.display_name]));
   const teamOf = (rid: number) => nameOf.get(rosters.find((r) => r.roster_id === rid)?.owner_id ?? "") ?? `roster ${rid}`;
@@ -133,9 +154,73 @@ async function weekReview(): Promise<Generated> {
       }
     }
   }
+  // Everyone else's week, so the post can talk about the league and not just
+  // stare at its own roster.
+  const seen = new Set<number>();
+  lines.push("Every other matchup this week:");
+  for (const m of matchups) {
+    if (m.matchup_id == null || seen.has(m.matchup_id)) continue;
+    seen.add(m.matchup_id);
+    const other = matchups.find((x) => x.matchup_id === m.matchup_id && x.roster_id !== m.roster_id);
+    if (!other) continue;
+    if (m.roster_id === config.rosterId || other.roster_id === config.rosterId) continue;
+    const [hi, lo] = m.points >= other.points ? [m, other] : [other, m];
+    lines.push(`  ${teamOf(hi.roster_id)} beat ${teamOf(lo.roster_id)}, ${hi.points.toFixed(2)} to ${lo.points.toFixed(2)}`);
+  }
+
   const standings = buildStandings(rosters, users, league);
   lines.push("Standings after this week:");
   for (const row of standings) lines.push(`  ${row.rank}. ${row.teamName} ${row.wins}-${row.losses}, ${row.pointsFor.toFixed(2)} points for`);
+
+  // Trades that actually processed this week, ours and everyone else's.
+  try {
+    const trades = await completedTrades(tokenGql(), week);
+    if (trades.length) {
+      lines.push("Trades that went through this week:");
+      for (const t of trades) {
+        const byTeam = new Map<number, string[]>();
+        for (const [pid, rid] of Object.entries(t.adds)) byTeam.set(rid, [...(byTeam.get(rid) ?? []), named(pid)]);
+        const legs = [...byTeam.entries()].map(([rid, got]) => `${teamOf(rid)} got ${got.join(" and ")}`);
+        lines.push(`  ${legs.join("; ")}${t.rosterIds.includes(config.rosterId) ? "  (this one was yours)" : ""}`);
+      }
+    } else {
+      lines.push("No trades went through in the league this week.");
+    }
+  } catch {
+    /* a trade read failure must not stop the post */
+  }
+
+  // Next week's projection. Allowed in public: it is the same number Sleeper
+  // shows everyone. The LINEUP behind it is not named, that would be strategy.
+  try {
+    const next = week + 1;
+    const nextMatch = await sleeper.matchups(config.leagueId, next) as { roster_id: number; matchup_id: number | null }[];
+    const ourNext = nextMatch.find((m) => m.roster_id === config.rosterId);
+    const oppNext = ourNext?.matchup_id != null
+      ? nextMatch.find((m) => m.matchup_id === ourNext.matchup_id && m.roster_id !== config.rosterId)
+      : undefined;
+    const [dump, proj] = await Promise.all([
+      loadPlayers(),
+      loadWeekProjections(state.season || config.season, next, league.scoring_settings),
+    ]);
+    const idx = byPlayerId(proj);
+    const slots = startingSlots(league.roster_positions as string[]);
+    const bestFor = (rid: number) => {
+      const r = rosters.find((x) => x.roster_id === rid);
+      if (!r?.players) return null;
+      return solveLineup(buildRosterWeek(r.players, dump, idx, next), slots).total;
+    };
+    const usProj = bestFor(config.rosterId);
+    const themProj = oppNext ? bestFor(oppNext.roster_id) : null;
+    if (usProj != null) {
+      lines.push(`Next week (week ${next}): you are projected for about ${usProj.toFixed(1)}` +
+        (oppNext && themProj != null
+          ? `, against ${teamOf(oppNext.roster_id)} at about ${themProj.toFixed(1)}.`
+          : "."));
+    }
+  } catch {
+    /* no projection is better than a wrong one */
+  }
 
   const events = recentEvents(300).filter((e) => e.actor === "coach");
   const prompt =
@@ -143,8 +228,10 @@ async function weekReview(): Promise<Generated> {
     `named "${await teamName()}". Use that exact name. This is a FULL-PPR, 8-team, 1-QB league.\n\n` +
     `WHAT ACTUALLY HAPPENED (these numbers are final, use them and do not invent others):\n${lines.join("\n")}\n\n` +
     `Decisions you logged this week:\n${events.slice(-30).map((e) => `- ${e.type}: ${e.summary}`).join("\n")}\n\n` +
-    `Lead with the result. Be specific about who won you the week and who let you down, name them and their scores. ` +
-    `If a bench player outscored someone you started, own it. Then say what you learned. ${NO_STRATEGY}`;
+    `Lead with the result. Name who won you the week and who let you down, with their scores. If a bench player ` +
+    `outscored someone you started, own that before anything else. Say something about how the rest of the league ` +
+    `did, and about any trade that went through, especially one of yours. Close on what you are projected to score ` +
+    `next week and who you draw.\n\n${VOICE}\n\n${NO_STRATEGY}`;
   const res = await runAgent({ prompt });
   const title = `Week ${week} review`;
   return { title, body: res.error ? `(Could not generate: ${res.error})` : res.text, week };
