@@ -3,7 +3,7 @@ import { planLineup, parseTeamKickoffs, overlayRosterStatus, lockedPlayerIds } f
 import type { LineupPlayer } from "../analysis/lineup.ts";
 import type { PlayersMap } from "../sleeper/types.ts";
 
-const P = (playerId: string, position: string, points: number, injuryStatus: string | null = null, extra: Partial<LineupPlayer> = {}): LineupPlayer =>
+const P = (playerId: string, position: string, points: number, injuryStatus: string | null = null, extra: Partial<LineupPlayer> & { team?: string } = {}): LineupPlayer =>
   ({ playerId, name: `P${playerId}`, position, points, injuryStatus, onBye: false, inactive: false, ...extra }) as LineupPlayer;
 
 const SLOTS = ["QB", "RB", "RB", "WR", "FLEX", "K", "DEF"];

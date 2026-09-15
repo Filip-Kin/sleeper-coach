@@ -13,6 +13,10 @@ export interface BlogPost {
   date: string; // ISO
   type: string; // draft | week | note
   body: string; // markdown-ish plain text
+  /** Which NFL week a "week" post covers. This is the idempotency key for the
+   *  automatic publisher: the daemon asks "is week 3 already posted" every 90
+   *  seconds once the games end, and a title match would be too fragile. */
+  week?: number;
 }
 
 // House style, enforced rather than requested: no em dashes anywhere in
@@ -49,4 +53,10 @@ export function allPosts(): BlogPost[] {
     })
     .filter((p): p is BlogPost => p !== null);
   return posts.reverse();
+}
+
+/** Has a review for this week already been published? The automatic publisher
+ *  polls, so without this it would post a new review on every pass. */
+export function hasWeekPost(week: number, posts: BlogPost[] = allPosts()): boolean {
+  return posts.some((p) => p.type === "week" && p.week === week);
 }

@@ -12,6 +12,8 @@ import { tokenGql as leagueGql, dropPlayers, completedTrades, myRoster, pendingT
 import { assessToken } from "./league/token.ts";
 import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
+import { maybePublishWeekly } from "./blog/auto.ts";
+import { allPosts } from "./blog/store.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
 import { handleDms } from "./league/dm-watch.ts";
 import { assessVeto, DEFAULT_VETO } from "./league/veto.ts";
@@ -520,6 +522,20 @@ async function pollOnce(): Promise<void> {
   await reactToCompletedTrades(gql, round).catch((e) => console.error(`[reconcile] ${e instanceof Error ? e.message : String(e)}`));
   // And a standing safety net: if we are ever over cap for any reason, fix it.
   await reconcileRoster(gql).catch((e) => console.error(`[reconcile] ${e instanceof Error ? e.message : String(e)}`));
+
+  // The weekly review publishes itself once the week's games are over and the
+  // stat feed has stopped moving. Checked here rather than on a Tuesday timer
+  // because the week does not end at a fixed time. See blog/auto.ts.
+  await maybePublishWeekly({
+    posts: allPosts,
+    currentWeek: async () => Math.max(1, (await sleeper.nflState()).week || 1),
+    run: async (w) => {
+      const proc = Bun.spawn(["bun", "run", "src/blog/generate.ts", "week", String(w)], {
+        cwd: process.cwd(), stdout: "inherit", stderr: "inherit",
+      });
+      return proc.exited;
+    },
+  }).catch((e) => console.error(`[blog] ${e instanceof Error ? e.message : String(e)}`));
 
   // The coach answers its own DMs. Trade negotiation in this league happens in
   // chat, not the trade UI, so ignoring DMs meant ignoring half the game.
