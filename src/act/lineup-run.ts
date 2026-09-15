@@ -24,11 +24,11 @@ import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
 import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
 import { buildRosterWeek } from "../analysis/roster-week.ts";
-import { solveLineup, startingSlots, starterIds } from "../analysis/lineup.ts";
+import { startingSlots, availabilityOf } from "../analysis/lineup.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { tokenGql, updateStarters } from "../league/api.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
-import { overlayRosterStatus } from "./lineup-guard.ts";
+import { overlayRosterStatus, lockedPlayerIds, cachedTeamKickoffs, planLineup } from "./lineup-guard.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 
@@ -99,7 +99,24 @@ async function main(): Promise<void> {
   const players = overlayRosterStatus(dump, mine);
   const idx = byPlayerId(weekProj);
   const candidates = buildRosterWeek(mine.players, players, idx, week);
-  const lineup = solveLineup(candidates, slots);
+
+  // Players whose game has already kicked off are PINNED where they are.
+  // Without this the scheduled locks solve as though the whole roster were
+  // still movable: a Thursday player who banked 20 points and picked up an
+  // injury designation on Friday would be "benched" by the 11:00 Sunday lock,
+  // either throwing his score away or having Sleeper reject the whole write and
+  // leave the rest of the lineup unset. The 90-second guard has always pinned
+  // them; the locks did not, which was the last asymmetry between the two
+  // writers. planLineup also refuses to empty a slot the site has filled.
+  const locked = lockedPlayerIds(candidates, await cachedTeamKickoffs(), Date.now());
+  const plan = planLineup(mine.starters ?? [], candidates, slots, locked);
+  const byId = new Map(candidates.map((p) => [p.playerId, p]));
+  const chosen = plan.ids.map((id) => byId.get(id) ?? null);
+  const total = chosen.reduce((sum, p) => sum + (p?.points ?? 0), 0);
+  const excluded = candidates
+    .filter((p) => !plan.ids.includes(p.playerId))
+    .map((p) => ({ player: p, reason: availabilityOf(p).reason }))
+    .filter((e) => e.reason !== "");
 
   // Report, always.
   const froze = freezeState();
@@ -107,24 +124,26 @@ async function main(): Promise<void> {
   console.log(`  mode: ${live ? "LIVE (will write)" : "dry run (no write)"}${froze.frozen ? `  [FROZEN: ${froze.reason}]` : ""}`);
   console.log(`  slots: ${slots.join(", ")}`);
   console.log("  starters:");
-  for (const s of lineup.slots) {
-    const p = s.player;
-    console.log(`    ${s.slot.padEnd(5)} ${(p?.name ?? "(EMPTY)").padEnd(22)} ${p ? p.points.toFixed(1).padStart(6) : "     -"}`);
-  }
-  console.log(`  projected total: ${lineup.total.toFixed(1)}`);
-  if (lineup.excluded.length) {
+  chosen.forEach((p, i) => {
+    const pin = p && locked.has(p.playerId) ? "  (locked, game started)" : "";
+    console.log(`    ${slots[i]?.padEnd(5)} ${(p?.name ?? "(EMPTY)").padEnd(22)} ${p ? p.points.toFixed(1).padStart(6) : "     -"}${pin}`);
+  });
+  console.log(`  projected total: ${total.toFixed(1)}`);
+  if (excluded.length) {
     console.log("  zeroed out (not playing):");
-    for (const e of lineup.excluded) console.log(`    ${e.player.name} — ${e.reason}`);
+    for (const e of excluded) console.log(`    ${e.player.name}: ${e.reason}`);
   }
-  if (lineup.unfilled.length) {
-    console.log(`  UNFILLED SLOTS: ${lineup.unfilled.join(", ")} (not enough healthy bodies)`);
+  if (plan.unfilled.length) {
+    console.log(`  UNFILLED SLOTS: ${plan.unfilled.join(", ")} (not enough healthy bodies)`);
   }
+  if (!plan.changed) console.log("  already set on the site; nothing to write.");
 
-  logEvent("coach", "lineup-plan", `Week ${week} lineup, ${lineup.total.toFixed(1)} projected${live ? "" : " (dry run)"}`, {
-    week, leagueId, total: lineup.total,
-    starters: lineup.slots.map((s) => ({ slot: s.slot, name: s.player?.name ?? null, pts: s.player?.points ?? 0 })),
-    excluded: lineup.excluded.map((e) => ({ name: e.player.name, reason: e.reason })),
-    unfilled: lineup.unfilled,
+  logEvent("coach", "lineup-plan", `Week ${week} lineup, ${total.toFixed(1)} projected${live ? "" : " (dry run)"}`, {
+    week, leagueId, total,
+    starters: chosen.map((p, i) => ({ slot: slots[i] ?? "", name: p?.name ?? null, pts: p?.points ?? 0, locked: p ? locked.has(p.playerId) : false })),
+    excluded: excluded.map((e) => ({ name: e.player.name, reason: e.reason })),
+    unfilled: plan.unfilled,
+    changed: plan.changed,
   });
 
   if (!live) {
@@ -134,13 +153,20 @@ async function main(): Promise<void> {
 
   // A partial lineup must never be written: an empty slot in-season is a real
   // problem for a human, not the coach.
-  if (lineup.unfilled.length) {
-    await sendAlert("Lineup has an unfillable slot", `Week ${week}: ${lineup.unfilled.join(", ")} could not be filled from the roster. No lineup was set.`);
-    throw new Error(`refusing to set a partial lineup (unfilled: ${lineup.unfilled.join(", ")})`);
+  if (plan.unfilled.length) {
+    await sendAlert("Lineup has an unfillable slot", `Week ${week}: ${plan.unfilled.join(", ")} could not be filled from the roster. No lineup was set.`);
+    throw new Error(`refusing to set a partial lineup (unfilled: ${plan.unfilled.join(", ")})`);
+  }
+
+  // Nothing to do beats a pointless mutation on a live roster.
+  if (!plan.changed) {
+    console.log(`\nWeek ${week} lineup already correct; no write.`);
+    logEvent("coach", "lineup-unchanged", `Week ${week} lineup already correct, no write.`, { week, leagueId });
+    return;
   }
 
   assertWritesAllowed(`set the week ${week} lineup`);
-  const ids = starterIds(lineup);
+  const ids = plan.ids;
   try {
     await writeStarters(ids, leagueId, rosterId);
   } catch (err) {
@@ -151,8 +177,9 @@ async function main(): Promise<void> {
     await sendAlert("Lineup write failed", `Week ${week}, league ${leagueId}: ${msg}`);
     throw err;
   }
-  console.log(`\nLINEUP SET and verified for week ${week} (league ${leagueId}).`);
-  logEvent("coach", "lineup-set", `Week ${week} lineup set and verified, ${lineup.total.toFixed(1)} projected.`, { week, leagueId, ids });
+  const moved = plan.swaps.map((sw) => `${sw.slot}: ${sw.out} -> ${sw.in} (${sw.why})`).join("; ");
+  console.log(`\nLINEUP SET and verified for week ${week} (league ${leagueId}).${moved ? ` Changes: ${moved}` : ""}`);
+  logEvent("coach", "lineup-set", `Week ${week} lineup set and verified, ${total.toFixed(1)} projected.`, { week, leagueId, ids, swaps: plan.swaps });
 }
 
 main()

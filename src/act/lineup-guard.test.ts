@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { planLineup, parseTeamKickoffs, overlayRosterStatus } from "./lineup-guard.ts";
+import { planLineup, parseTeamKickoffs, overlayRosterStatus, lockedPlayerIds } from "./lineup-guard.ts";
 import type { LineupPlayer } from "../analysis/lineup.ts";
 import type { PlayersMap } from "../sleeper/types.ts";
 
@@ -114,5 +114,46 @@ describe("overlayRosterStatus", () => {
   });
   test("no player_map means the dump is returned as is", () => {
     expect(overlayRosterStatus(dump, {})).toBe(dump);
+  });
+});
+
+describe("lockedPlayerIds", () => {
+  const cands = [
+    { playerId: "a", team: "SF" },   // Thursday, already played
+    { playerId: "b", team: "CAR" },  // Sunday
+    { playerId: "c", team: "ZZZ" },  // no cached kickoff
+  ];
+  const kick = new Map([["SF", 1_000], ["CAR", 5_000]]);
+  test("only players whose game has kicked off are locked", () => {
+    const l = lockedPlayerIds(cands, kick, 2_000);
+    expect([...l]).toEqual(["a"]);
+  });
+  test("a team with no cached kickoff is treated as unlocked", () => {
+    expect(lockedPlayerIds(cands, kick, 9_999).has("c")).toBe(false);
+  });
+  test("nothing is locked before the first kickoff", () => {
+    expect(lockedPlayerIds(cands, kick, 500).size).toBe(0);
+  });
+});
+
+// The case the scheduled locks used to get wrong. A Thursday player banks his
+// points, then gets an injury tag on Friday. The 11:00 Sunday lock must not
+// try to bench him, because Sleeper will not move him and the points are real.
+describe("a player who already played is never benched by a later solve", () => {
+  const SLOTS = ["QB", "RB", "RB", "WR", "K", "DEF"];
+  const roster = [
+    P("q1", "QB", 20), P("thu", "RB", 19.6, "Out", { team: "SF" }),
+    P("r1", "RB", 17), P("r2", "RB", 15), P("w1", "WR", 13),
+    P("k1", "K", 8), P("SEA", "DEF", 7),
+  ];
+  const current = ["q1", "thu", "r1", "w1", "k1", "SEA"];
+  test("unlocked, the solver would bench the Out player", () => {
+    const plan = planLineup(current, roster, SLOTS, new Set());
+    expect(plan.ids).not.toContain("thu");
+  });
+  test("locked, he keeps his slot and his points", () => {
+    const plan = planLineup(current, roster, SLOTS, new Set(["thu"]));
+    expect(plan.ids[1]).toBe("thu");
+    expect(plan.changed).toBe(false);
   });
 });

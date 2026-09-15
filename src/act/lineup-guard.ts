@@ -118,6 +118,18 @@ export function parseTeamKickoffs(cache: { games?: { startTime?: number; label?:
   return out;
 }
 
+/** Players Sleeper will not move, because their game has kicked off. Shared
+ *  with the scheduled locks in lineup-run.ts: BOTH writers have to respect it,
+ *  or the 11:00 Sunday lock happily benches a Thursday player who has already
+ *  banked his points. Pure. */
+export function lockedPlayerIds(
+  candidates: { playerId: string; team: string }[], kickoffs: Map<string, number>, now: number,
+): Set<string> {
+  return new Set(
+    candidates.filter((p) => (kickoffs.get(p.team) ?? Number.POSITIVE_INFINITY) <= now).map((p) => p.playerId),
+  );
+}
+
 /** Lay the roster's live player_map (position, team, injury_status) over the
  *  cached player dump, so the solver benches on today's status, not the
  *  dump's. Pure; returns a new map. */
@@ -146,7 +158,7 @@ export function overlayRosterStatus(dump: PlayersMap, roster: Pick<Roster, "play
 // #endregion
 
 // #region io
-async function cachedTeamKickoffs(): Promise<Map<string, number>> {
+export async function cachedTeamKickoffs(): Promise<Map<string, number>> {
   try {
     const f = Bun.file(KICKOFF_CACHE);
     if (!(await f.exists())) return new Map();
@@ -196,7 +208,7 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     cachedTeamKickoffs(),
   ]);
   const candidates = buildRosterWeek(mine.players, overlayRosterStatus(dump, mine), byPlayerId(weekProj), week);
-  const locked = new Set(candidates.filter((p) => (kickoffs.get(p.team) ?? Number.POSITIVE_INFINITY) <= now).map((p) => p.playerId));
+  const locked = lockedPlayerIds(candidates, kickoffs, now);
   const plan = planLineup(mine.starters ?? [], candidates, slots, locked);
   if (!plan.changed) return plan;
 
