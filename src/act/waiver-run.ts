@@ -19,9 +19,10 @@
 // One transaction per pass, so a failure cannot leave a half-applied roster.
 
 import { config } from "../config.ts";
+import { leagueRosters } from "../sleeper/graphql.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
-import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta } from "../league/api.ts";
+import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve} from "../league/api.ts";
 import { streamNeeds, pickStreamer } from "../analysis/streaming.ts";
 import { chooseForcedDrops } from "../analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
@@ -353,8 +354,38 @@ async function main(): Promise<void> {
     }
   }
 
+  // An "ir-stash" add goes into the slot an injured player vacates, so the IR
+  // move has to happen FIRST and has to be confirmed. Submitting the add on its
+  // own is what produced "Your roster is either invalid or will be invalid
+  // after this move" on 2026-09-19: the planner had picked the path, but
+  // nothing ever performed it, and the alert told Filip to do it by hand.
+  const stashToIr = async (name: string): Promise<boolean> => {
+    try {
+      const id = resolve(name);
+      const mine = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId);
+      const current = mine?.reserve ?? [];
+      if (current.includes(id)) return true; // already there
+      const back = await updateReserve(gql, [...current, id], rosterId, leagueId);
+      if (!back.includes(id)) throw new Error(`read-back has ${JSON.stringify(back)}`);
+      console.log(`  moved ${name} to IR, freeing an active slot`);
+      logEvent("coach", "ir-stash", `Moved ${name} to injured reserve, freeing an active slot.`, { week, leagueId, player: name, reserve: back });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`  could not move ${name} to IR: ${msg}`);
+      logEvent("coach", "ir-stash-failed", `Could not move ${name} to IR: ${msg}`, { week, leagueId, player: name });
+      await sendAlert("IR move failed", `Week ${week}: ${name} could not be moved to IR. ${msg}`);
+      return false;
+    }
+  };
+
   for (const m of doAdds ? freeAdds : []) {
     try {
+      if (m.dropPath === "ir-stash" && m.irStash && !(await stashToIr(m.irStash))) {
+        // No slot was freed, so the add cannot land. Try the next candidate
+        // rather than throwing: a failed IR move is not a failed waiver run.
+        continue;
+      }
       const res = await addFreeAgent(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);
       console.log(`  added ${m.add}${m.drop ? ` (dropped ${m.drop})` : ""} [${res.status}]`);
       logEvent("coach", "waiver-add", `Added free agent ${m.add}${m.drop ? `, dropped ${m.drop}` : ""}.`, {

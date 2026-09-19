@@ -211,5 +211,31 @@ t("no free IR slots means no IR opportunities", irOpportunities(irRoster, 0, our
     unreactedDrops([drop("x"), drop("y")], none).length === 2);
 }
 
+// ---------------------------------------------------------------------------
+// The ir-stash path must name the player to stash, structurally. On 2026-09-19
+// it named him only in the reason prose, so the executor submitted the add into
+// a full roster and Sleeper rejected the whole waiver run.
+const stashRoster: RailPlayer[] = [
+  { name: "Hurt Starter", position: "WR", points: 250, injuryStatus: "Out" },
+  { name: "Healthy WR", position: "WR", points: 200 },
+  { name: "QB Guy", position: "QB", points: 300 },
+];
+const stashState: RosterState = {
+  roster: stashRoster, openBenchSlots: 0, openIrSlots: 2,
+  irEligible: (x?: string | null) => ["IR", "OUT", "SUS", "COV", "PUP"].includes((x ?? "").trim().toUpperCase()),
+  startingSlots: SMALL,
+};
+const stashMove = planOne(
+  { name: "Good Add", position: "WR", points: 240, onWaivers: false },
+  stashState, DEFAULT_WAIVERS, new Set(),
+);
+t("ir-stash path is chosen when the roster is full and IR is open", stashMove.dropPath === "ir-stash", stashMove.dropPath);
+t("ir-stash names the player to move to IR", stashMove.irStash === "Hurt Starter", String(stashMove.irStash));
+t("ir-stash drops nobody", stashMove.drop === null, String(stashMove.drop));
+t("a non-IR path leaves irStash null", planOne(
+  { name: "Other", position: "WR", points: 240, onWaivers: false },
+  { ...stashState, openBenchSlots: 1, openIrSlots: 0 }, DEFAULT_WAIVERS, new Set(),
+).irStash === null, "expected null");
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

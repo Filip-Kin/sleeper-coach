@@ -100,6 +100,11 @@ export interface WaiverMove {
   onWaivers: boolean;
   drop: string | null; // full name of the player dropped; null when a slot absorbs the add
   dropPath: DropPath;
+  /** For dropPath "ir-stash": the rostered player who must be moved to IR
+   *  BEFORE the add, to free the active slot it goes into. The reason string
+   *  named him but nothing could act on prose, so the executor submitted the
+   *  add into a full roster and Sleeper rejected it. */
+  irStash: string | null;
   gainPts: number; // ROS points the add clears the player it replaces (or the worst starter, for a slot add)
   startsForUs: boolean; // would the add crack our optimal ROS starting lineup
   priorityWorthy: boolean; // clears the bar to burn a queue position
@@ -144,6 +149,7 @@ interface PathEval {
   gain: number; // starting-lineup ROS delta of taking this path
   starts: boolean; // does the add start after it
   reason: string;
+  irStash?: string; // set only on the "ir-stash" path
 }
 
 // Rank a path family for tie-breaking when deltas are equal: prefer to drop
@@ -157,7 +163,7 @@ const PATH_RANK: Record<DropPath, number> = { "bench-slot": 0, "ir-stash": 1, dr
 // protection rails (top-N, never-drop, the injured-returns stash) are never
 // bypassed. Returns paths best-delta first, no-drop winning ties.
 function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverConfig): PathEval[] {
-  const paths: { path: DropPath; drop: string | null; reason: string }[] = [];
+  const paths: { path: DropPath; drop: string | null; reason: string; irStash?: string }[] = [];
 
   if (state.openBenchSlots > 0) {
     paths.push({ path: "bench-slot", drop: null, reason: "into an open bench slot (no drop)" });
@@ -170,7 +176,7 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
     (p) => (p.returnsBeforePlayoffs || irEligible(p.injuryStatus)) && !cfg.rails.neverDrop?.includes(p.name),
   );
   if (state.openIrSlots > 0 && irStashable) {
-    paths.push({ path: "ir-stash", drop: null, reason: `stash ${irStashable.name} (injured) on IR (no drop)` });
+    paths.push({ path: "ir-stash", drop: null, irStash: irStashable.name, reason: `stash ${irStashable.name} (injured) on IR (no drop)` });
   }
   // Every canDrop-ALLOWED player is a candidate drop. canDrop is the authority on
   // what may leave the roster; we pick among the allowed ones by lineup delta.
@@ -229,18 +235,19 @@ export function planOne(
 ): WaiverMove {
   const base = { add: incoming.name, position: incoming.position, onWaivers: incoming.onWaivers };
   const skip = (reason: string): WaiverMove =>
-    ({ ...base, kind: "skip", drop: null, dropPath: "none", gainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, score: 0, reason });
+    ({ ...base, kind: "skip", drop: null, dropPath: "none", irStash: null, gainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, score: 0, reason });
 
   const best = evalPaths(incoming, state, cfg)[0];
   if (!best) return skip("no legal path: nothing on the roster may be dropped and no slot is open");
 
   const { gain, starts, path, drop } = best;
+  const irStash = best.irStash ?? null;
   const droppedPlayer = drop ? state.roster.find((p) => p.name === drop) ?? null : null;
   const byeCredit = byeCreditFor(incoming, droppedPlayer, crowdedByes, cfg);
   const byeNote =
     byeCredit > 0 ? " [plays through a crowded upcoming bye]" : byeCredit < 0 ? " [on a crowded upcoming bye]" : "";
   const move = (kind: MoveKind, priorityWorthy: boolean, reason: string): WaiverMove =>
-    ({ ...base, kind, drop, dropPath: path, gainPts: gain, startsForUs: starts, priorityWorthy, byeCredit, score: Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
+    ({ ...base, kind, drop, dropPath: path, irStash, gainPts: gain, startsForUs: starts, priorityWorthy, byeCredit, score: Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
 
   // A move that would LOWER our starting lineup is never made, whatever the raw
   // point gap suggests. This is the guard against dropping a needed player (our

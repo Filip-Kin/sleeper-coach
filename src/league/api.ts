@@ -507,6 +507,29 @@ export async function updateStarters(
   return r.starters ?? [];
 }
 
+/** Set the roster's injured-reserve list. Same shape as updateStarters, and
+ *  proven the same way: a no-op write of the existing reserve on 2026-09-19
+ *  returned the list and read back unchanged.
+ *
+ *  This is the move the coach could see but not make. A free IR slot is a
+ *  costless roster expansion: stash a player who is Out, and the active slot he
+ *  vacates takes a free agent with nobody dropped. Without it the planner chose
+ *  that path, submitted the add into a still-full roster, and Sleeper answered
+ *  "Your roster is either invalid or will be invalid after this move". The
+ *  alert then told Filip to go do it in Sleeper by hand. */
+export async function updateReserve(
+  gql: Gql, reserve: string[], rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<string[]> {
+  assertWritesAllowed("set injured reserve");
+  for (const id of reserve) safeId(id);
+  const list = `[${reserve.map((x) => str(x)).join(",")}]`;
+  const body = await gql(
+    `mutation{roster_update_reserve(league_id:"${safeId(leagueId)}",roster_id:${Math.trunc(rosterId)},reserve:${list}){roster_id reserve}}`,
+  );
+  const r = (unwrap(body, "roster_update_reserve") ?? {}) as { reserve?: string[] };
+  return r.reserve ?? [];
+}
+
 // ---------------------------------------------------------------------------
 // Chat requests
 // ---------------------------------------------------------------------------
