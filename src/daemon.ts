@@ -12,6 +12,7 @@ import { tokenGql as leagueGql, dropPlayers, completedTrades, myRoster, pendingT
 import { assessToken } from "./league/token.ts";
 import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
+import { leagueRosters } from "./sleeper/graphql.ts";
 import { maybePublishWeekly } from "./blog/auto.ts";
 import { allPosts } from "./blog/store.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
@@ -412,13 +413,22 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
 
     const snap = await snapshot();
     // A player on IR is not a drop candidate either. He is already off the
-    // active roster, so cutting him frees nothing and just loses the player.
-    const irNames = new Set(
-      (snap.rosterOf.get(snap.ourRosterId) ?? [])
-        .filter((p) => onIr.has((p as { playerId?: string }).playerId ?? ""))
-        .map((p) => p.name),
-    );
+    // active roster, so cutting him frees nothing and just loses the player,
+    // which is exactly how Nico Collins was cut off his own IR spot.
+    //
+    // Match by NAME, via the roster's player_map. The snapshot's TradePlayer
+    // carries name/position/points and no player id at all, so the obvious
+    // id-based filter silently matched nothing and left this guard dead.
+    const irNames = new Set<string>();
+    if (onIr.size) {
+      const pm = (await leagueRosters(config.leagueId)).find((r) => r.roster_id === config.rosterId)?.player_map ?? {};
+      for (const id of onIr) {
+        const p = pm[id];
+        if (p) irNames.add(`${p.first_name} ${p.last_name}`.trim());
+      }
+    }
     const roster = (snap.rosterOf.get(snap.ourRosterId) ?? []).filter((p) => !irNames.has(p.name));
+    if (irNames.size) console.log(`[reconcile] excluding from the drop table (on IR): ${[...irNames].join(", ")}`);
     const state = await sleeper.nflState();
     const sched = await scheduleContext(null);
     const cfg = { ...DEFAULT_FAIRNESS, ...sched };
