@@ -61,9 +61,15 @@ export async function snapshot(): Promise<LeagueSnapshot> {
   const idByName = new Map<string, string>();
   const ownerIdOf = new Map<number, string>();
   for (const r of rosters) {
+    // Players on IR are not roster assets for valuation. They cannot start and
+    // cannot cover an injury this week, so counting them inflates both lineup
+    // value and depth insurance for whoever has someone stashed. Reserve is
+    // carried on the GraphQL roster read; REST leaves it null, which degrades
+    // to the old behaviour rather than throwing.
+    const onIr = new Set(r.reserve ?? []);
     rosterOf.set(
       r.roster_id,
-      (r.players ?? []).map((id) => playerById.get(id) ?? { name: id, position: "", points: 0 }),
+      (r.players ?? []).filter((id) => !onIr.has(id)).map((id) => playerById.get(id) ?? { name: id, position: "", points: 0 }),
     );
     for (const id of r.players ?? []) {
       const name = playerById.get(id)?.name;

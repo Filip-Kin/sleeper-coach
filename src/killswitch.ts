@@ -17,7 +17,7 @@ import { existsSync } from "node:fs";
 // 2026-09-19 a real freeze on the production volume made four draft write tests
 // fail inside the container, because they read the live kill-switch file. Tests
 // must never depend on production state, in either direction.
-const FREEZE_FILE = process.env.COACH_FREEZE_FILE
+export const FREEZE_FILE = process.env.COACH_FREEZE_FILE
   ?? (process.env.NODE_ENV === "test" ? "/tmp/sleeper-coach-test/FREEZE" : "/data/sleeper-coach/FREEZE");
 
 // Also honour an env freeze, for a dev/staging process that should never write.
@@ -44,4 +44,11 @@ export function assertWritesAllowed(action: string): void {
   if (s.frozen) {
     throw new Error(`writes are FROZEN (${s.reason}); refusing to ${action}. Remove the freeze to re-enable.`);
   }
+}
+
+/** Freeze the coach from inside, when it detects it is misbehaving. Used by the
+ *  drop circuit breaker: a loop that wants to cut a player every 90 seconds
+ *  must stop itself, not wait to be noticed. */
+export async function freezeNow(reason: string): Promise<void> {
+  await Bun.write(FREEZE_FILE, `${new Date().toISOString()} auto-frozen: ${reason}\n`);
 }

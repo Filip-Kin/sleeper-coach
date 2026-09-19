@@ -13,6 +13,7 @@ import { assessToken } from "./league/token.ts";
 import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
 import { leagueRosters } from "./sleeper/graphql.ts";
+import { mayDrop, type DropRecord } from "./analysis/drop-guard.ts";
 import { maybePublishWeekly } from "./blog/auto.ts";
 import { allPosts } from "./blog/store.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
@@ -21,7 +22,7 @@ import { assessVeto, DEFAULT_VETO } from "./league/veto.ts";
 import { snapshot, scheduleContext } from "./analysis/trade-wire.ts";
 import { activeCapacity, overCapBy, chooseForcedDrops } from "./analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "./analysis/trade-fair.ts";
-import { freezeState, assertWritesAllowed } from "./killswitch.ts";
+import { freezeState, assertWritesAllowed, freezeNow, FREEZE_FILE } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
 // shape: an infinite poll loop with durable SQLite state, each cycle wrapped so
@@ -61,6 +62,15 @@ db.run(`CREATE TABLE IF NOT EXISTS scheduled_runs (
   job TEXT PRIMARY KEY,
   last_run INTEGER
 )`);
+// Every automatic drop, so the circuit breaker in analysis/drop-guard.ts can
+// see a cascade forming across polls and restarts. Durable on purpose: the
+// 2026-09-19 cascade survived nothing, but a crash loop would.
+db.run(`CREATE TABLE IF NOT EXISTS auto_drops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  dropped_at INTEGER NOT NULL
+)`);
+
 db.run(`CREATE TABLE IF NOT EXISTS drop_reactions (
   transaction_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`);
 db.run(`CREATE TABLE IF NOT EXISTS agent_runs (
@@ -71,6 +81,14 @@ db.run(`CREATE TABLE IF NOT EXISTS agent_runs (
 function alreadyHandled(txId: string): boolean {
   return db.query("SELECT 1 FROM seen_transactions WHERE transaction_id = ?").get(txId) !== null;
 }
+function autoDropHistory(): DropRecord[] {
+  return (db.query("SELECT name, dropped_at FROM auto_drops ORDER BY dropped_at DESC LIMIT 50").all() as { name: string; dropped_at: number }[])
+    .map((r) => ({ name: r.name, at: r.dropped_at }));
+}
+function recordAutoDrop(name: string, at: number): void {
+  db.run("INSERT INTO auto_drops (name, dropped_at) VALUES (?, ?)", [name, at]);
+}
+
 function markSeen(txId: string, status: string): void {
   db.run("INSERT OR REPLACE INTO seen_transactions (transaction_id, status, first_seen) VALUES (?, ?, ?)", [txId, status, Date.now()]);
 }
@@ -454,6 +472,26 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     }
     assertWritesAllowed("post-trade drop");
 
+    // THE RAIL. Independent of whatever maths decided to drop. A correct
+    // over-cap fix needs one drop and then the roster is legal, so a healthy
+    // coach never trips this. A loop that has decided to cut somebody every 90
+    // seconds trips it on the second attempt and stops itself.
+    const verdict = mayDrop(autoDropHistory(), Date.now());
+    if (!verdict.allowed) {
+      console.error(`[reconcile] REFUSING to drop: ${verdict.reason}`);
+      logEvent("coach", "drop-blocked", `Refused an automatic drop: ${verdict.reason}`, {
+        wanted: drops.map((d) => d.name), reason: verdict.reason,
+      });
+      if (verdict.freeze) {
+        // Freeze rather than merely skip. Something is wrong with the roster
+        // maths and the next poll would try again in 90 seconds.
+        await freezeNow(verdict.reason).catch(() => {});
+        await sendAlert("Coach froze itself: repeated drops",
+          `${verdict.reason}. It wanted to drop ${drops.map((d) => d.name).join(", ")}. Writes are frozen until you remove ${FREEZE_FILE}.`).catch(() => {});
+      }
+      return;
+    }
+
     const idByName = snap.idByName;
     const ids: string[] = [];
     for (const d of drops) {
@@ -463,6 +501,7 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     }
     try {
       const res = await dropPlayers(gql, ids);
+      for (const d of drops) recordAutoDrop(d.name, Date.now());
       logEvent("coach", "roster-dropped", `Dropped ${drops.map((d) => d.name).join(", ")} to get under the cap`, { status: res.status, drops: drops.map((d) => d.name) });
       // Roster changed: re-solve the lineup now rather than waiting for a timer.
       await resolveLineupNow("a trade completed and the roster changed");
