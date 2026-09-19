@@ -27,7 +27,7 @@
 
 import { config } from "../config.ts";
 import { assertWritesAllowed } from "../killswitch.ts";
-import { SLEEPER_GRAPHQL } from "../sleeper/graphql.ts";
+import { leagueRosters, SLEEPER_GRAPHQL } from "../sleeper/graphql.ts";
 import { jwtExpiry, MissingTokenError, readToken, type TokenProbe } from "./token.ts";
 
 export type Gql = (query: string) => Promise<Record<string, unknown>>;
@@ -468,9 +468,13 @@ export async function completedTrades(gql: Gql, leg: number, leagueId = config.l
 
 /** Our current active roster (the players array) and IR, straight from REST. */
 export async function myRoster(rosterId = config.rosterId, leagueId = config.leagueId): Promise<{ players: string[]; reserve: string[] }> {
-  const res = await fetch(`https://api.sleeper.app/v1/league/${safeId(leagueId)}/rosters`, { signal: AbortSignal.timeout(10_000) });
-  const rosters = (await res.json()) as { roster_id: number; players?: string[]; reserve?: string[] | null }[];
-  const mine = rosters.find((r) => r.roster_id === rosterId);
+  // GraphQL, NOT REST. The REST rosters endpoint sits behind a five-minute CDN
+  // cache: on 2026-09-19, seconds after an add, it still reported 16 players
+  // while the league really held 17. reconcileRoster is the most destructive
+  // path in the coach and it reads this, so a stale answer here means dropping
+  // real players to fix a roster problem that does not exist, or missing one
+  // that does.
+  const mine = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId);
   return { players: mine?.players ?? [], reserve: mine?.reserve ?? [] };
 }
 
