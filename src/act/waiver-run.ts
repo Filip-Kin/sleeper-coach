@@ -20,6 +20,7 @@
 
 import { config } from "../config.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
+import { rankByVor } from "../analysis/vor.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
 import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve} from "../league/api.ts";
@@ -129,9 +130,27 @@ async function main(): Promise<void> {
   // acquiring is still rostered (by them) until it processes. A trade frees
   // nobody to waivers. Only OUR roster view (above) reflects the delta.
   const rostered = new Set(rosters.flatMap((r) => r.players ?? []));
-  const availableRos = Array.from(ros.values())
-    .filter((p) => !rostered.has(p.playerId) && p.points > 0)
-    .sort((a, b) => b.points - a.points)
+  const unrostered = Array.from(ros.values()).filter((p) => !rostered.has(p.playerId) && p.points > 0);
+
+  // Rank by VALUE OVER REPLACEMENT, not raw points. Raw rest-of-season points
+  // always put quarterbacks on top, because a starting QB outscores a starting
+  // running back in every format. On 2026-09-19 that made every one of the 40
+  // planned free adds a quarterback at +0 lineup value, behind Hurts and
+  // Prescott, while the costless path happily took the top of that list. VOR
+  // asks the question that matters instead: how far does this player clear the
+  // guy anyone could pick up at his position. A third QB clears replacement by
+  // almost nothing; a startable receiver clears it by a lot.
+  const vorOf = new Map<string, number>();
+  for (const r of rankByVor(
+    unrostered.map((p) => ({
+      playerId: p.playerId, name: p.name, position: p.position, team: p.team,
+      points: p.points, ptsPpr: p.points, adp: 999, injuryStatus: p.injuryStatus, stats: {},
+    })),
+    league,
+  )) vorOf.set(r.playerId, r.vor);
+
+  const availableRos = unrostered
+    .sort((a, b) => (vorOf.get(b.playerId) ?? 0) - (vorOf.get(a.playerId) ?? 0) || b.points - a.points)
     .slice(0, MAX_CANDIDATES);
 
   // onWaivers heuristic: a player DROPPED in the current scoring period is still
@@ -271,7 +290,7 @@ async function main(): Promise<void> {
     console.log("    no free IR slots.");
   }
   const topCandidate = available[0];
-  console.log(`    best available overall: ${topCandidate ? `${topCandidate.name} (${topCandidate.position}, ${topCandidate.points} ROS)` : "none"}`);
+  console.log(`    best available overall: ${topCandidate ? `${topCandidate.name} (${topCandidate.position}, ${topCandidate.points} ROS, VOR ${Math.round(vorOf.get(idByName.get(topCandidate.name) ?? "") ?? 0)})` : "none"}`);
   if (stream) {
     console.log(`    STREAM: week ${stream.forWeek} would leave ${stream.position} empty (${stream.coveringFor.join(", ")} out); grab ${stream.add} now${stream.drop ? `, drop ${stream.drop}` : ""} [${stream.onWaivers ? "claim" : "free add"}]`);
   } else {
