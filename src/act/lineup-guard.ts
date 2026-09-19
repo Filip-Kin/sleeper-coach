@@ -207,7 +207,15 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     loadWeekProjections(state.season || config.season, week, scoring),
     cachedTeamKickoffs(),
   ]);
-  const candidates = buildRosterWeek(mine.players, overlayRosterStatus(dump, mine), byPlayerId(weekProj), week);
+  // Players on IR are NOT lineup candidates. Sleeper will not start a reserve
+  // player, so offering one is at best a rejected write and at worst a slot
+  // silently left empty. Nothing enforced this before 2026-09-19; it only
+  // failed to bite because an IR player is usually also flagged Out, which the
+  // solver benches for its own reasons. A player who clears his designation
+  // while still parked on IR would have walked straight into the lineup.
+  const onIr = new Set(mine.reserve ?? []);
+  const activeIds = (mine.players ?? []).filter((id) => !onIr.has(id));
+  const candidates = buildRosterWeek(activeIds, overlayRosterStatus(dump, mine), byPlayerId(weekProj), week);
   const locked = lockedPlayerIds(candidates, kickoffs, now);
   const plan = planLineup(mine.starters ?? [], candidates, slots, locked);
   if (!plan.changed) return plan;

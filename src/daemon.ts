@@ -396,12 +396,29 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
   try {
     const league = await sleeper.league(config.leagueId);
     const cap = activeCapacity(league.roster_positions);
-    const { players } = await myRoster();
-    const over = overCapBy(players.length, cap);
+    // Sleeper's `players` array INCLUDES everyone on injured reserve, and the
+    // cap does not. Counting it raw is what destroyed the roster on
+    // 2026-09-19: moving Nico Collins to IR took `players` to 17 against a
+    // 16-man cap, so this read "over cap by 1" and dropped the cheapest body
+    // every 90 seconds. It cut Jayden Reed, then Collins himself straight off
+    // IR, then Josh Downs, and would not have stopped. activeCapacity's own
+    // comment promised reserve did not count; this is the line that did not
+    // honour it.
+    const { players, reserve } = await myRoster();
+    const onIr = new Set(reserve);
+    const active = players.filter((id) => !onIr.has(id));
+    const over = overCapBy(active.length, cap);
     if (over === 0) return;
 
     const snap = await snapshot();
-    const roster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+    // A player on IR is not a drop candidate either. He is already off the
+    // active roster, so cutting him frees nothing and just loses the player.
+    const irNames = new Set(
+      (snap.rosterOf.get(snap.ourRosterId) ?? [])
+        .filter((p) => onIr.has((p as { playerId?: string }).playerId ?? ""))
+        .map((p) => p.name),
+    );
+    const roster = (snap.rosterOf.get(snap.ourRosterId) ?? []).filter((p) => !irNames.has(p.name));
     const state = await sleeper.nflState();
     const sched = await scheduleContext(null);
     const cfg = { ...DEFAULT_FAIRNESS, ...sched };

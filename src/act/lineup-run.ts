@@ -98,7 +98,9 @@ async function main(): Promise<void> {
   ]);
   const players = overlayRosterStatus(dump, mine);
   const idx = byPlayerId(weekProj);
-  const candidates = buildRosterWeek(mine.players, players, idx, week);
+  // IR players are not startable, so they are not candidates. See lineup-guard.
+  const onIr = new Set(mine.reserve ?? []);
+  const candidates = buildRosterWeek((mine.players ?? []).filter((id) => !onIr.has(id)), players, idx, week);
 
   // Players whose game has already kicked off are PINNED where they are.
   // Without this the scheduled locks solve as though the whole roster were

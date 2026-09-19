@@ -95,7 +95,13 @@ async function main(): Promise<void> {
   // sits in commish review. Failure here degrades to the current roster, never
   // blocks the run.
   const delta = await pendingRosterDelta(tokenGql(), week).catch(() => ({ incoming: [], outgoing: [] }));
-  const myPlayerIds = applyRosterDelta(mine.players, delta);
+  // Reserve is excluded from the ANALYSIS roster: an IR player is not startable
+  // and must never appear in the drop table, because cutting him frees no
+  // active slot and just loses the player. The capacity maths below subtracts
+  // onReserve separately. reconcileRoster got this wrong on 2026-09-19 and cut
+  // Nico Collins straight off IR.
+  const onIr = new Set(mine.reserve ?? []);
+  const myPlayerIds = applyRosterDelta(mine.players, delta).filter((id) => !onIr.has(id));
   if (delta.incoming.length || delta.outgoing.length) {
     console.log(`  in-flight trade: +${delta.incoming.length} incoming, -${delta.outgoing.length} outgoing already reflected in the roster`);
   }

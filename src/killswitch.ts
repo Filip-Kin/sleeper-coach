@@ -13,7 +13,12 @@ import { existsSync } from "node:fs";
 // avoiding in-season. Every write path (lineup, add/drop, and trades once live)
 // must call assertWritesAllowed() before it acts.
 
-const FREEZE_FILE = process.env.COACH_FREEZE_FILE ?? "/data/sleeper-coach/FREEZE";
+// Under `bun test` (NODE_ENV=test) the switch points at a scratch path. On
+// 2026-09-19 a real freeze on the production volume made four draft write tests
+// fail inside the container, because they read the live kill-switch file. Tests
+// must never depend on production state, in either direction.
+const FREEZE_FILE = process.env.COACH_FREEZE_FILE
+  ?? (process.env.NODE_ENV === "test" ? "/tmp/sleeper-coach-test/FREEZE" : "/data/sleeper-coach/FREEZE");
 
 // Also honour an env freeze, for a dev/staging process that should never write.
 function envFrozen(): boolean {
