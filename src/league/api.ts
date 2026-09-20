@@ -478,6 +478,37 @@ export async function myRoster(rosterId = config.rosterId, leagueId = config.lea
   return { players: mine?.players ?? [], reserve: mine?.reserve ?? [] };
 }
 
+/** Our own waiver claims still waiting to process, and how many roster slots
+ *  they will need when they do. A claim with no drop attached consumes an open
+ *  slot; one that names a drop is self-financing.
+ *
+ *  Without this the coach spends slots it has already committed. On 2026-09-19
+ *  two claims were filed with no drop, and the daily free-agent job would have
+ *  filled both open slots with +0-value depth the next morning, leaving the
+ *  claims to fail on Wednesday for want of room. */
+export async function pendingClaimSlots(
+  gql: Gql, leg: number, rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<{ count: number; adds: string[] }> {
+  const adds: string[] = [];
+  for (const status of ["pending", "processing"]) {
+    const body = await gql(
+      `{league_transactions_by_status(league_id:"${safeId(leagueId)}",status:"${status}",leg:${Math.trunc(leg)})` +
+      `{transaction_id status type roster_ids adds drops}}`,
+    ).catch(() => ({} as Record<string, unknown>));
+    const raw = ((body.data as Record<string, unknown> | undefined)?.league_transactions_by_status ?? []) as Record<string, unknown>[];
+    for (const t of raw) {
+      if (t.type !== "waiver") continue;
+      if (!((t.roster_ids as number[]) ?? []).includes(rosterId)) continue;
+      const ourAdds = Object.entries((t.adds ?? {}) as Record<string, number>).filter(([, r]) => r === rosterId);
+      const ourDrops = Object.entries((t.drops ?? {}) as Record<string, number>).filter(([, r]) => r === rosterId);
+      // Net slots this claim needs when it lands.
+      const net = ourAdds.length - ourDrops.length;
+      if (net > 0) for (const [pid] of ourAdds) adds.push(pid);
+    }
+  }
+  return { count: adds.length, adds };
+}
+
 export async function cancelWaiverClaim(
   gql: Gql, transactionId: string, leg: number, leagueId = config.leagueId,
 ): Promise<string> {

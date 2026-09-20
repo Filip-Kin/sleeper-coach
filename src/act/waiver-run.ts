@@ -23,7 +23,7 @@ import { leagueRosters } from "../sleeper/graphql.ts";
 import { rankByVor } from "../analysis/vor.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
-import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve} from "../league/api.ts";
+import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve, pendingClaimSlots} from "../league/api.ts";
 import { streamNeeds, pickStreamer } from "../analysis/streaming.ts";
 import { chooseForcedDrops } from "../analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
@@ -207,9 +207,14 @@ async function main(): Promise<void> {
   const irEligible = (status?: string | null): boolean => irAllow.has((status ?? "").trim().toUpperCase());
   const openIrSlots = Math.max(0, irCap - onReserve);
   const activePlayers = mine.players.length - onReserve;
+  // Slots already promised to our own pending waiver claims are NOT open. A
+  // claim with no drop needs a free slot on Wednesday, and a free add made on
+  // Sunday morning takes it, which quietly kills the claim.
+  const claimed = await pendingClaimSlots(tokenGql(), week, rosterId, leagueId).catch(() => ({ count: 0, adds: [] as string[] }));
+  if (claimed.count) console.log(`  holding ${claimed.count} slot(s) for pending waiver claim(s)`);
   const rosterState: RosterState = {
     roster,
-    openBenchSlots: Math.max(0, slots.length + benchCap - activePlayers),
+    openBenchSlots: Math.max(0, slots.length + benchCap - activePlayers - claimed.count),
     openIrSlots,
     startingSlots: slots,
     irEligible,
