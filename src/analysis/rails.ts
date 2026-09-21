@@ -74,6 +74,16 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
   if (cfg.neverDrop.some((n) => norm(n) === t)) {
     return { allowed: false, reason: `"${player.name}" is on the never-drop list` };
   }
+  // A player on injured reserve is never cut or traded away by the robot. He
+  // costs no roster slot, so there is nothing to gain by moving him, and the
+  // season model values a bench-tier stash at nearly nothing (he cannot start
+  // and provides no cover this week), which is exactly the price a rival
+  // would offer. Found in the staging run of 2026-09-20: giving Nico Collins
+  // away evaluated the same with him owned or not. Moving a stash is a human
+  // decision, the same as the returns-before-playoffs rule below.
+  if (player.onIr) {
+    return { allowed: false, reason: `"${player.name}" is on injured reserve; a stash is not cut or traded away automatically` };
+  }
 
   // A hurt starter looks worthless to a weekly projection and is exactly the
   // player you must not cut. This clause matters more than the rest.

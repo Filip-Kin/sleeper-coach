@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildRosterView, overCap, droppable, takenAcrossLeague } from "./roster-view.ts";
 import { tradeRostersFrom } from "./trade-wire.ts";
 import { depthInsurance, evaluateTradeTwoSided, DEFAULT_FAIRNESS } from "./trade-fair.ts";
+import { canDrop } from "./rails.ts";
 import type { Roster } from "../sleeper/types.ts";
 import type { TradePlayer } from "./trade.ts";
 
@@ -104,5 +105,31 @@ describe("7. the stale read: a REST-shaped roster degrades, never throws", () =>
     expect(v.active.length).toBe(2);
     expect(v.reserve.length).toBe(0);
     expect(v.owned.find((e) => e.playerId === "SEA")?.position).toBe("DEF");
+  });
+});
+
+describe("8. a stash is never traded away by the robot", () => {
+  const P = (name: string, position: string, points: number, onIr = false): TradePlayer => ({ name, position, points, onIr });
+  // A bench-tier IR player: behind two better receivers, so his season-lineup
+  // contribution is zero and depth cover skips him. The value model prices him
+  // at nothing, which is why a rail has to exist.
+  const base: TradePlayer[] = [
+    P("QB1", "QB", 300), P("RB1", "RB", 200), P("RB2", "RB", 180), P("WR1", "WR", 230), P("WR2", "WR", 220),
+    P("TE1", "TE", 120), P("F1", "WR", 210), P("F2", "RB", 140), P("K", "K", 90), P("DEF", "DEF", 80),
+  ];
+  const stash = P("Bench Stash", "WR", 130, true);
+  test("canDrop refuses a player on IR", () => {
+    const v = canDrop("Bench Stash", [...base, stash]);
+    expect(v.allowed).toBe(false);
+    expect(v.reason).toContain("injured reserve");
+  });
+  test("a trade giving him away is blocked by that rail, whatever the value says", () => {
+    const ev = evaluateTradeTwoSided({ receive: [P("Any", "WR", 60)], give: [stash] }, [...base, stash], base, DEFAULT_FAIRNESS);
+    expect(ev.verdict).not.toBe("accept");
+    expect(ev.railBlocks.some((b) => b.includes("injured reserve"))).toBe(true);
+  });
+  test("the same player, healthy, is not blocked by this rail", () => {
+    const v = canDrop("Bench Stash", [...base, { ...stash, onIr: false }]);
+    expect(v.reason).not.toContain("injured reserve");
   });
 });
