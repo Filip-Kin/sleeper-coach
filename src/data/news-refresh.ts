@@ -24,6 +24,7 @@
 import { loadPlayers } from "./players.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { config } from "../config.ts";
+import { takenAcrossLeague } from "../analysis/roster-view.ts";
 import { runAgent } from "../agent/runner.ts";
 import { logEvent } from "../log.ts";
 import type { NewsStatus } from "./news.ts";
@@ -176,7 +177,7 @@ export function watchSet(dump: Record<string, DumpPlayer & { search_rank?: numbe
 export async function refreshNews(opts: { web?: boolean; dry?: boolean } = {}): Promise<{ dump: number; web: number; total: number; path: string }> {
   const dump = (await loadPlayers()) as Record<string, DumpPlayer & { search_rank?: number }>;
   const rosters = await sleeper.rosters(config.leagueId);
-  const watch = watchSet(dump, rosters.flatMap((r) => r.players ?? []));
+  const watch = watchSet(dump, [...takenAcrossLeague(rosters)]); // IR included: news on a stash matters most
 
   const fromDump = dossierFromDump(dump, watch);
   let fromWeb: Dossier = {};

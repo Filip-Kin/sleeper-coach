@@ -14,6 +14,14 @@ export interface RailPlayer {
   name: string;
   position: string;
   points: number; // rest-of-season projection
+  /** Sleeper player id. Optional so hand-built fixtures still type-check; every
+   *  live roster carries it. Matching by id is what makes the IR rules real:
+   *  the 2026-09-19 drop-table filter matched on a field nobody set and was
+   *  silently dead. */
+  playerId?: string;
+  /** Parked on injured reserve. Still an asset we own and value for the season;
+   *  cannot start this week and provides no injury cover. Both at once. */
+  onIr?: boolean;
   injuryStatus?: string; // Sleeper injury_status, if any
   returnsBeforePlayoffs?: boolean; // hurt but expected back before week 16
   // Bye week, when known. Optional because the rails themselves do not care, but

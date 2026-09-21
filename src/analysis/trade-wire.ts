@@ -8,6 +8,7 @@
 // unreachable from the running system.
 
 import { config } from "../config.ts";
+import type { Roster } from "../sleeper/types.ts";
 import { tokenGql, pendingRosterDelta, applyRosterDelta, type Gql } from "../league/api.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadSeasonProjections } from "./projections.ts";
@@ -30,6 +31,26 @@ export interface LeagueSnapshot {
   // duplicate-name ambiguity in the full 12k dump.
   idByName: Map<string, string>;
   ownerIdOf: Map<number, string>; // roster_id -> Sleeper user_id
+}
+
+/** Each roster as the trade engine values it. Pure, so the IR rule is testable. */
+export function tradeRostersFrom(rosters: Roster[], playerById: Map<string, TradePlayer>): Map<number, TradePlayer[]> {
+  // OWNED, not active. A player on IR is still ours to trade and still carries
+  // his rest-of-season value (which already discounts the games he misses).
+  // Excluding him here, as a 2026-09-19 patch did, made Nico Collins invisible
+  // to the engine: a trade giving him away evaluated 25 points better than it
+  // was, and the only thing that stopped it was a rail firing by accident. The
+  // onIr flag is what tells the depth-cover term he cannot cover anyone this
+  // week; that is where "cannot play" belongs, not here.
+  const rosterOf = new Map<number, TradePlayer[]>();
+  for (const r of rosters) {
+    const onIr = new Set(r.reserve ?? []);
+    rosterOf.set(
+      r.roster_id,
+      (r.players ?? []).map((id) => ({ ...(playerById.get(id) ?? { name: id, position: "", points: 0 }), playerId: id, onIr: onIr.has(id) })),
+    );
+  }
+  return rosterOf;
 }
 
 // One fetch, reused for every offer in a poll cycle.
@@ -57,20 +78,10 @@ export async function snapshot(): Promise<LeagueSnapshot> {
   }
 
   const rosters = await sleeper.rosters(config.leagueId);
-  const rosterOf = new Map<number, TradePlayer[]>();
+  const rosterOf = tradeRostersFrom(rosters, playerById);
   const idByName = new Map<string, string>();
   const ownerIdOf = new Map<number, string>();
   for (const r of rosters) {
-    // Players on IR are not roster assets for valuation. They cannot start and
-    // cannot cover an injury this week, so counting them inflates both lineup
-    // value and depth insurance for whoever has someone stashed. Reserve is
-    // carried on the GraphQL roster read; REST leaves it null, which degrades
-    // to the old behaviour rather than throwing.
-    const onIr = new Set(r.reserve ?? []);
-    rosterOf.set(
-      r.roster_id,
-      (r.players ?? []).filter((id) => !onIr.has(id)).map((id) => playerById.get(id) ?? { name: id, position: "", points: 0 }),
-    );
     for (const id of r.players ?? []) {
       const name = playerById.get(id)?.name;
       if (name) idByName.set(name, id);
@@ -107,10 +118,11 @@ export async function snapshotWithPending(gql: Gql = tokenGql(), leg?: number): 
   const week = leg ?? Math.max(1, (await sleeper.nflState()).week ?? 1);
   const delta = await pendingRosterDelta(gql, week).catch(() => ({ incoming: [], outgoing: [] }));
   if (!delta.incoming.length && !delta.outgoing.length) return snap;
-  const currentIds = (await sleeper.rosters(config.leagueId)).find((r) => r.roster_id === snap.ourRosterId)?.players ?? [];
-  const effectiveIds = applyRosterDelta(currentIds, delta);
+  const current = (await sleeper.rosters(config.leagueId)).find((r) => r.roster_id === snap.ourRosterId);
+  const onIr = new Set(current?.reserve ?? []);
+  const effectiveIds = applyRosterDelta(current?.players ?? [], delta);
   const rosterOf = new Map(snap.rosterOf);
-  rosterOf.set(snap.ourRosterId, effectiveIds.map((id) => snap.playerById.get(id) ?? { name: id, position: "", points: 0 }));
+  rosterOf.set(snap.ourRosterId, effectiveIds.map((id) => ({ ...(snap.playerById.get(id) ?? { name: id, position: "", points: 0 }), playerId: id, onIr: onIr.has(id) })));
   return { ...snap, rosterOf };
 }
 

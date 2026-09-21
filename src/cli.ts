@@ -142,7 +142,9 @@ async function cmdRoster(): Promise<void> {
   const r = rosters.find((x) => x.roster_id === rosterId);
   if (!r) return void console.log(`No roster ${rosterId}`);
   console.log(`\nRoster ${rosterId} — ${(r.players ?? []).length} players, keepers: ${r.keepers?.length ?? 0}`);
+  const irIds = new Set(r.reserve ?? []);
   for (const pid of r.players ?? []) {
+    if (irIds.has(pid)) process.stdout.write("  [IR] ");
     const p = players[pid];
     const name = p ? (p.full_name ?? `${p.first_name} ${p.last_name}`) : pid;
     console.log(`  ${name} (${p?.position ?? "?"} ${p?.team ?? "?"})`);

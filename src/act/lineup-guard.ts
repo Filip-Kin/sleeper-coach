@@ -31,6 +31,7 @@ import { freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 import { config } from "../config.ts";
+import { buildRosterView } from "../analysis/roster-view.ts";
 
 const KICKOFF_CACHE = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-kickoffs.json`;
 
@@ -213,9 +214,7 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   // failed to bite because an IR player is usually also flagged Out, which the
   // solver benches for its own reasons. A player who clears his designation
   // while still parked on IR would have walked straight into the lineup.
-  const onIr = new Set(mine.reserve ?? []);
-  const activeIds = (mine.players ?? []).filter((id) => !onIr.has(id));
-  const candidates = buildRosterWeek(activeIds, overlayRosterStatus(dump, mine), byPlayerId(weekProj), week);
+  const candidates = buildRosterWeek([...buildRosterView(mine).activeIds], overlayRosterStatus(dump, mine), byPlayerId(weekProj), week);
   const locked = lockedPlayerIds(candidates, kickoffs, now);
   const plan = planLineup(mine.starters ?? [], candidates, slots, locked);
   if (!plan.changed) return plan;

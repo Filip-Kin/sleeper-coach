@@ -9,6 +9,7 @@ import { describeScoring } from "../analysis/scoring.ts";
 import { runAgent, type AgentEvent } from "../agent/runner.ts";
 import { recentEvents } from "../log.ts";
 import { allPosts } from "../blog/store.ts";
+import { buildRosterView } from "../analysis/roster-view.ts";
 import { readGuidanceState, setGuidance } from "./guidance.ts";
 import { draftView } from "./draftview.ts";
 import { seasonWeek, seasonIntent } from "./seasonview.ts";
@@ -35,9 +36,10 @@ async function stateJson(): Promise<Response> {
   const ranked = rankByVor(projections, league).slice(0, 60);
 
   const me = rosters.find((r) => r.roster_id === config.rosterId);
-  const myPlayers = (me?.players ?? []).map((pid) => {
-    const p = players[pid];
-    return { id: pid, name: p ? (p.full_name ?? `${p.first_name} ${p.last_name}`) : pid, pos: p?.position ?? "?", team: p?.team ?? "?", injury: p?.injury_status ?? null };
+  const myView = me ? buildRosterView(me) : null;
+  const myPlayers = (myView?.owned ?? []).map((e) => {
+    const p = players[e.playerId];
+    return { id: e.playerId, name: p ? (p.full_name ?? `${p.first_name} ${p.last_name}`) : e.name, pos: e.position, team: e.team ?? "?", injury: e.injuryStatus, onIr: e.onIr };
   });
 
   const draft = await sleeper.draft(config.draftId);

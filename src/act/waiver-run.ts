@@ -21,6 +21,7 @@
 import { config } from "../config.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import { rankByVor } from "../analysis/vor.ts";
+import { buildRosterView, takenAcrossLeague } from "../analysis/roster-view.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
 import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve, pendingClaimSlots} from "../league/api.ts";
@@ -100,8 +101,10 @@ async function main(): Promise<void> {
   // active slot and just loses the player. The capacity maths below subtracts
   // onReserve separately. reconcileRoster got this wrong on 2026-09-19 and cut
   // Nico Collins straight off IR.
-  const onIr = new Set(mine.reserve ?? []);
-  const myPlayerIds = applyRosterDelta(mine.players, delta).filter((id) => !onIr.has(id));
+  const view = buildRosterView(mine);
+  // The analysis roster (drop table, lineup deltas) is the ACTIVE set. A man on
+  // IR cannot be started and must never be a drop candidate.
+  const myPlayerIds = applyRosterDelta([...view.activeIds], delta);
   if (delta.incoming.length || delta.outgoing.length) {
     console.log(`  in-flight trade: +${delta.incoming.length} incoming, -${delta.outgoing.length} outgoing already reflected in the roster`);
   }
@@ -135,7 +138,7 @@ async function main(): Promise<void> {
   // trading away is still rostered by the team receiving him, and one we are
   // acquiring is still rostered (by them) until it processes. A trade frees
   // nobody to waivers. Only OUR roster view (above) reflects the delta.
-  const rostered = new Set(rosters.flatMap((r) => r.players ?? []));
+  const rostered = takenAcrossLeague(rosters); // IR included: a stashed player is not a free agent
   const unrostered = Array.from(ros.values()).filter((p) => !rostered.has(p.playerId) && p.points > 0);
 
   // Rank by VALUE OVER REPLACEMENT, not raw points. Raw rest-of-season points
@@ -192,7 +195,7 @@ async function main(): Promise<void> {
   // roster_positions.filter(IR) read 0 and the IR-stash path never fired. Fall
   // back to the roster_positions count for any league that does list IR there.
   const irCap = league.settings.reserve_slots ?? league.roster_positions.filter((s) => s === "IR").length;
-  const onReserve = mine.reserve?.length ?? 0;
+  const onReserve = view.reserve.length;
   // IR-eligibility is league-configured via the reserve_allow_* flags; IR itself
   // is always eligible. Build the actual eligible set rather than assuming one.
   const irAllow = new Set<string>(["IR"]);
@@ -206,7 +209,7 @@ async function main(): Promise<void> {
   irAllow.add("PUP"); // Sleeper treats PUP as reserve-eligible independently of the flags
   const irEligible = (status?: string | null): boolean => irAllow.has((status ?? "").trim().toUpperCase());
   const openIrSlots = Math.max(0, irCap - onReserve);
-  const activePlayers = mine.players.length - onReserve;
+  const activePlayers = view.active.length;
   // Slots already promised to our own pending waiver claims are NOT open. A
   // claim with no drop needs a free slot on Wednesday, and a free add made on
   // Sunday morning takes it, which quietly kills the claim.

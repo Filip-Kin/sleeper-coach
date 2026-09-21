@@ -20,6 +20,7 @@
 // zeroes out anyone OUT/IR/on-bye/inactive before assigning a single slot.
 
 import { config } from "../config.ts";
+import { buildRosterView } from "../analysis/roster-view.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
 import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
@@ -99,8 +100,9 @@ async function main(): Promise<void> {
   const players = overlayRosterStatus(dump, mine);
   const idx = byPlayerId(weekProj);
   // IR players are not startable, so they are not candidates. See lineup-guard.
-  const onIr = new Set(mine.reserve ?? []);
-  const candidates = buildRosterWeek((mine.players ?? []).filter((id) => !onIr.has(id)), players, idx, week);
+  // Startable players come from the view's ACTIVE set; the solver applies its
+  // own availability rules on top. IR is excluded structurally, not by a filter.
+  const candidates = buildRosterWeek([...buildRosterView(mine).activeIds], players, idx, week);
 
   // Players whose game has already kicked off are PINNED where they are.
   // Without this the scheduled locks solve as though the whole roster were

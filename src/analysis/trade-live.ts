@@ -72,7 +72,8 @@ export async function evaluateTransactionForUs(tx: TxLike, cfg?: TradeConfig, ro
   const ours = rosters.find((r) => r.roster_id === rosterId);
   if (!ours) throw new Error(`evaluateTransactionForUs: roster ${rosterId} not found in league ${config.leagueId}`);
 
-  const roster = await toTradePlayers(ours.players ?? [], proj);
+  const onIr = new Set(ours.reserve ?? []);
+  const roster = (await toTradePlayers(ours.players ?? [], proj)).map((p, i) => ({ ...p, playerId: (ours.players ?? [])[i], onIr: onIr.has((ours.players ?? [])[i] ?? "") }));
   const receive = await toTradePlayers(receiveIds, proj);
   const give = await toTradePlayers(giveIds, proj);
 

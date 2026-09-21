@@ -8,12 +8,12 @@ import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
 import { unreactedDrops } from "./analysis/waivers.ts";
-import { tokenGql as leagueGql, dropPlayers, completedTrades, myRoster, pendingTrades } from "./league/api.ts";
+import { tokenGql as leagueGql, dropPlayers, completedTrades, myRosterView, pendingTrades } from "./league/api.ts";
 import { assessToken } from "./league/token.ts";
 import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
-import { leagueRosters } from "./sleeper/graphql.ts";
 import { mayDrop, type DropRecord } from "./analysis/drop-guard.ts";
+import { overCap, droppable } from "./analysis/roster-view.ts";
 import { maybePublishWeekly } from "./blog/auto.ts";
 import { allPosts } from "./blog/store.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
@@ -415,38 +415,19 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
   try {
     const league = await sleeper.league(config.leagueId);
     const cap = activeCapacity(league.roster_positions);
-    // Sleeper's `players` array INCLUDES everyone on injured reserve, and the
-    // cap does not. Counting it raw is what destroyed the roster on
-    // 2026-09-19: moving Nico Collins to IR took `players` to 17 against a
-    // 16-man cap, so this read "over cap by 1" and dropped the cheapest body
-    // every 90 seconds. It cut Jayden Reed, then Collins himself straight off
-    // IR, then Josh Downs, and would not have stopped. activeCapacity's own
-    // comment promised reserve did not count; this is the line that did not
-    // honour it.
-    const { players, reserve } = await myRoster();
-    const onIr = new Set(reserve);
-    const active = players.filter((id) => !onIr.has(id));
-    const over = overCapBy(active.length, cap);
+    // Everything about "who is on the roster" comes from the one view. The cap
+    // counts ACTIVE players only; the 2026-09-19 cascade came from counting
+    // Sleeper's raw array, which includes injured reserve.
+    const view = await myRosterView();
+    const over = overCap(view, cap);
     if (over === 0) return;
 
     const snap = await snapshot();
-    // A player on IR is not a drop candidate either. He is already off the
-    // active roster, so cutting him frees nothing and just loses the player,
-    // which is exactly how Nico Collins was cut off his own IR spot.
-    //
-    // Match by NAME, via the roster's player_map. The snapshot's TradePlayer
-    // carries name/position/points and no player id at all, so the obvious
-    // id-based filter silently matched nothing and left this guard dead.
-    const irNames = new Set<string>();
-    if (onIr.size) {
-      const pm = (await leagueRosters(config.leagueId)).find((r) => r.roster_id === config.rosterId)?.player_map ?? {};
-      for (const id of onIr) {
-        const p = pm[id];
-        if (p) irNames.add(`${p.first_name} ${p.last_name}`.trim());
-      }
-    }
-    const roster = (snap.rosterOf.get(snap.ourRosterId) ?? []).filter((p) => !irNames.has(p.name));
-    if (irNames.size) console.log(`[reconcile] excluding from the drop table (on IR): ${[...irNames].join(", ")}`);
+    // Drop candidates come from the view too: a man on IR is never one, by id.
+    // The earlier name-based filter here matched a field nobody set and was
+    // dead code; that is how Nico Collins was cut off his own IR spot.
+    const roster = droppable(view, snap.rosterOf.get(snap.ourRosterId) ?? [], DEFAULT_FAIRNESS.rails);
+    if (view.reserve.length) console.log(`[reconcile] on IR, never a drop candidate: ${view.reserve.map((e) => e.name).join(", ")}`);
     const state = await sleeper.nflState();
     const sched = await scheduleContext(null);
     const cfg = { ...DEFAULT_FAIRNESS, ...sched };

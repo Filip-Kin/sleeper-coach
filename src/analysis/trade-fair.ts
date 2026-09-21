@@ -226,13 +226,18 @@ export function requiredEdge(offer: TradeOffer, cfg: FairnessConfig, ourRoster?:
 export function depthInsurance(
   roster: TradePlayer[], cfg: FairnessConfig = DEFAULT_FAIRNESS, slots: readonly string[] = STARTING_SLOTS,
 ): number {
-  const lineup = bestLineup(roster, slots).starters;
+  // Depth cover is a THIS-WEEK question: who steps in when a starter goes
+  // down. A player on IR can neither start nor step in, so he is out of both
+  // the lineup and the backup list here, whatever his season value says. The
+  // season value still counts in byeAwareLineupTotal, which is the right place.
+  const available = roster.filter((p) => !p.onIr);
+  const lineup = bestLineup(available, slots).starters;
   const starting = new Set(lineup.map((s) => s.player?.name.toLowerCase()).filter(Boolean));
   let total = 0;
   for (const pos of cfg.depthPositions) {
     const n = lineup.filter((s) => s.player?.position === pos).length; // starters at pos, flex included
     if (!n) continue;
-    const backups = roster
+    const backups = available
       .filter((p) => p.position === pos && !starting.has(p.name.toLowerCase()))
       .sort((a, b) => b.points - a.points);
     backups.forEach((b, i) => {

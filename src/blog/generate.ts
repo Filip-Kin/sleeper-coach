@@ -16,6 +16,7 @@ import { loadPlayers } from "../data/players.ts";
 import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
 import { buildRosterWeek } from "../analysis/roster-week.ts";
 import { solveLineup, startingSlots } from "../analysis/lineup.ts";
+import { buildRosterView } from "../analysis/roster-view.ts";
 import { runAgent } from "../agent/runner.ts";
 import { recentEvents } from "../log.ts";
 import { addPost } from "./store.ts";
@@ -146,7 +147,9 @@ async function weekReview(): Promise<Generated> {
     lines.push(`Your score ranked ${place} of ${ranked.length} in the league this week. Highest was ${ranked[0]!.points.toFixed(2)} by ${teamOf(ranked[0]!.roster_id)}.`);
     lines.push("Your starters and what they actually scored:");
     mine.starters.forEach((id, i) => lines.push(`  ${named(id)}: ${(mine.starters_points[i] ?? 0).toFixed(1)}`));
-    const benchIds = (ours?.players ?? []).filter((id) => !mine.starters.includes(id));
+    const ourView = ours ? buildRosterView(ours) : null;
+    const benchIds = [...(ourView?.activeIds ?? [])].filter((id) => !mine.starters.includes(id));
+    if (ourView?.reserve.length) lines.push(`On injured reserve: ${ourView.reserve.map((e) => e.name).join(", ")}`);
     if (benchIds.length) {
       lines.push("On your bench:");
       for (const id of benchIds.sort((a, b) => (mine.players_points[b] ?? 0) - (mine.players_points[a] ?? 0))) {
@@ -208,7 +211,7 @@ async function weekReview(): Promise<Generated> {
     const bestFor = (rid: number) => {
       const r = rosters.find((x) => x.roster_id === rid);
       if (!r?.players) return null;
-      return solveLineup(buildRosterWeek(r.players, dump, idx, next), slots).total;
+      return solveLineup(buildRosterWeek([...buildRosterView(r).activeIds], dump, idx, next), slots).total;
     };
     const usProj = bestFor(config.rosterId);
     const themProj = oppNext ? bestFor(oppNext.roster_id) : null;

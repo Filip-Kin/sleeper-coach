@@ -28,6 +28,7 @@
 import { config } from "../config.ts";
 import { assertWritesAllowed } from "../killswitch.ts";
 import { leagueRosters, SLEEPER_GRAPHQL } from "../sleeper/graphql.ts";
+import { buildRosterView, type RosterView } from "../analysis/roster-view.ts";
 import { jwtExpiry, MissingTokenError, readToken, type TokenProbe } from "./token.ts";
 
 export type Gql = (query: string) => Promise<Record<string, unknown>>;
@@ -468,14 +469,17 @@ export async function completedTrades(gql: Gql, leg: number, leagueId = config.l
 
 /** Our current active roster (the players array) and IR, straight from REST. */
 export async function myRoster(rosterId = config.rosterId, leagueId = config.leagueId): Promise<{ players: string[]; reserve: string[] }> {
-  // GraphQL, NOT REST. The REST rosters endpoint sits behind a five-minute CDN
-  // cache: on 2026-09-19, seconds after an add, it still reported 16 players
-  // while the league really held 17. reconcileRoster is the most destructive
-  // path in the coach and it reads this, so a stale answer here means dropping
-  // real players to fix a roster problem that does not exist, or missing one
-  // that does.
+  const v = await myRosterView(rosterId, leagueId);
+  return { players: [...v.ownedIds], reserve: [...v.reserveIds] };
+}
+
+/** THE roster read for every decision path. Live GraphQL (the REST endpoint
+ *  sits behind a five-minute CDN cache and reported 16 players seconds after
+ *  the league held 17), built into the one RosterView every module shares. */
+export async function myRosterView(rosterId = config.rosterId, leagueId = config.leagueId): Promise<RosterView> {
   const mine = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId);
-  return { players: mine?.players ?? [], reserve: mine?.reserve ?? [] };
+  if (!mine) throw new Error(`roster ${rosterId} not found in league ${leagueId}`);
+  return buildRosterView(mine);
 }
 
 /** Our own waiver claims still waiting to process, and how many roster slots
