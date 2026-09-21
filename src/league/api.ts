@@ -124,6 +124,15 @@ function safeId(v: string): string {
   if (!/^[0-9]{1,25}$/.test(v)) throw new Error(`unsafe id: ${v}`);
   return v;
 }
+/** A Sleeper PLAYER id: numeric for people, the team code for a defense
+ *  ("SEA", "KC"). safeId alone rejected every defense, so the streaming path
+ *  that exists to cover the week-11 DEF bye would have thrown "unsafe id: SEA"
+ *  on the write, after correctly planning the whole move. League, roster and
+ *  transaction ids stay numeric-only. */
+function safePlayerId(v: string): string {
+  if (!/^([0-9]{1,25}|[A-Z]{2,4})$/.test(v)) throw new Error(`unsafe player id: ${v}`);
+  return v;
+}
 /** GraphQL string literals take JSON escaping, which also neutralises quotes and
  *  newlines in anything a rival typed at us. */
 const str = (v: string): string => JSON.stringify(v);
@@ -348,11 +357,11 @@ export async function submitWaiverClaim(
 ): Promise<{ transactionId: string; status: string }> {
   const args = [
     `league_id:"${safeId(leagueId)}"`,
-    `k_adds:["${safeId(addPlayerId)}"]`,
+    `k_adds:["${safePlayerId(addPlayerId)}"]`,
     `v_adds:[${Math.trunc(rosterId)}]`,
   ];
   if (dropPlayerId) {
-    args.push(`k_drops:["${safeId(dropPlayerId)}"]`, `v_drops:[${Math.trunc(rosterId)}]`);
+    args.push(`k_drops:["${safePlayerId(dropPlayerId)}"]`, `v_drops:[${Math.trunc(rosterId)}]`);
   }
   const body = await gql(`mutation{submit_waiver_claim(${args.join(",")}){transaction_id status}}`);
   const r = (unwrap(body, "submit_waiver_claim") ?? {}) as { transaction_id?: string; status?: string };
@@ -368,11 +377,11 @@ export async function addFreeAgent(
   const args = [
     `type:"free_agent"`,
     `league_id:"${safeId(leagueId)}"`,
-    `k_adds:["${safeId(addPlayerId)}"]`,
+    `k_adds:["${safePlayerId(addPlayerId)}"]`,
     `v_adds:[${Math.trunc(rosterId)}]`,
   ];
   if (dropPlayerId) {
-    args.push(`k_drops:["${safeId(dropPlayerId)}"]`, `v_drops:[${Math.trunc(rosterId)}]`);
+    args.push(`k_drops:["${safePlayerId(dropPlayerId)}"]`, `v_drops:[${Math.trunc(rosterId)}]`);
   }
   const body = await gql(`mutation{league_create_transaction(${args.join(",")}){transaction_id status}}`);
   const r = (unwrap(body, "league_create_transaction") ?? {}) as { transaction_id?: string; status?: string };
@@ -390,7 +399,7 @@ export async function dropPlayers(
   gql: Gql, playerIds: string[], rosterId = config.rosterId, leagueId = config.leagueId,
 ): Promise<{ transactionId: string; status: string }> {
   if (!playerIds.length) throw new Error("dropPlayers: nothing to drop");
-  for (const id of playerIds) safeId(id);
+  for (const id of playerIds) safePlayerId(id);
   const kDrops = `[${playerIds.map((x) => `"${x}"`).join(",")}]`;
   const vDrops = `[${playerIds.map(() => Math.trunc(rosterId)).join(",")}]`;
   const body = await gql(
@@ -560,7 +569,7 @@ export async function updateReserve(
   gql: Gql, reserve: string[], rosterId = config.rosterId, leagueId = config.leagueId,
 ): Promise<string[]> {
   assertWritesAllowed("set injured reserve");
-  for (const id of reserve) safeId(id);
+  for (const id of reserve) safePlayerId(id);
   const list = `[${reserve.map((x) => str(x)).join(",")}]`;
   const body = await gql(
     `mutation{roster_update_reserve(league_id:"${safeId(leagueId)}",roster_id:${Math.trunc(rosterId)},reserve:${list}){roster_id reserve}}`,
