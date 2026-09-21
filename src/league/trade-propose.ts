@@ -297,14 +297,24 @@ export async function leagueRostersContext(): Promise<string> {
     const lines = POS.filter((pos) => byPos[pos]?.length).map((pos) =>
       `  ${pos}: ` + byPos[pos]!
         .slice().sort((a, b) => b.points - a.points)
-        .map((p) => `${p.name} (${Math.round(p.points)}${p.bye ? `, bye ${p.bye}` : ""})`)
+        .map((p) => `${p.name} (${Math.round(p.points)}${p.bye ? `, bye ${p.bye}` : ""}${p.onIr ? ", ON IR" : ""})`)
         .join(", "));
+    // The model reads this brief and talks trades off it. A player on IR is
+    // ours, but he is not startable and the rails will not let him be traded
+    // away, so the brief says so in words rather than leaving the model to
+    // treat a 131-point receiver as a normal chip. Before 2026-09-20 the brief
+    // carried no IR information at all.
+    const stashed = roster.filter((p) => p.onIr);
+    if (stashed.length) {
+      lines.push(`  on injured reserve (not startable, ${mine ? "NOT tradeable, do not offer them" : "the owner cannot start them"}): ${stashed.map((p) => p.name).join(", ")}`);
+    }
 
     // Per-week starter holes from byes, weeks 1-14 (regular season pre-playoff).
+    // IR players cannot fill a slot, so they do not count as available.
     const holes: string[] = [];
     for (let w = 1; w <= 14; w++) {
       const avail: Record<string, number> = {};
-      for (const p of roster) if (p.bye !== w) avail[p.position] = (avail[p.position] ?? 0) + 1;
+      for (const p of roster) if (p.bye !== w && !p.onIr) avail[p.position] = (avail[p.position] ?? 0) + 1;
       const short = POS.filter((pos) => (avail[pos] ?? 0) < (need[pos] ?? 0))
         .map((pos) => `${pos}=${avail[pos] ?? 0}/${need[pos] ?? 0}`);
       if (short.length) holes.push(`wk${w} ${short.join(" ")}`);

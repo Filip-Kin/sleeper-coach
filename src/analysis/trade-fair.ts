@@ -657,6 +657,13 @@ export function giveEligibleForProposal(
   if (present.returnsBeforePlayoffs) {
     return { ok: false, reason: `"${present.name}" is an injured stash due back before the playoffs; his depressed projection would undervalue him in a trade` };
   }
+  // Same rule, keyed on the flag the live snapshot actually carries. The
+  // returns-before-playoffs flag comes from the ROS projections and never
+  // reaches the trade snapshot, so a man on IR passed this gate and could be
+  // offered away at his depressed number. Mirrors the canDrop rail.
+  if (present.onIr) {
+    return { ok: false, reason: `"${present.name}" is on injured reserve; a stash is not offered away automatically` };
+  }
   const dedicated = dedicatedSlotsFor(present.position, slots);
   const samePos = roster.filter((p) => p.position === present.position).sort((a, b) => b.points - a.points);
   const rankAtPos = samePos.findIndex((p) => norm(p.name) === norm(present.name)) + 1;

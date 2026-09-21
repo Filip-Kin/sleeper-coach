@@ -3,6 +3,7 @@ import { buildRosterView, overCap, droppable, takenAcrossLeague } from "./roster
 import { tradeRostersFrom } from "./trade-wire.ts";
 import { depthInsurance, evaluateTradeTwoSided, DEFAULT_FAIRNESS } from "./trade-fair.ts";
 import { canDrop } from "./rails.ts";
+import { giveEligibleForProposal } from "./trade-fair.ts";
 import type { Roster } from "../sleeper/types.ts";
 import type { TradePlayer } from "./trade.ts";
 
@@ -127,6 +128,11 @@ describe("8. a stash is never traded away by the robot", () => {
     const ev = evaluateTradeTwoSided({ receive: [P("Any", "WR", 60)], give: [stash] }, [...base, stash], base, DEFAULT_FAIRNESS);
     expect(ev.verdict).not.toBe("accept");
     expect(ev.railBlocks.some((b) => b.includes("injured reserve"))).toBe(true);
+  });
+  test("outbound offers refuse to give him away too", () => {
+    const v = giveEligibleForProposal(stash, [...base, stash], DEFAULT_FAIRNESS);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toContain("injured reserve");
   });
   test("the same player, healthy, is not blocked by this rail", () => {
     const v = canDrop("Bench Stash", [...base, { ...stash, onIr: false }]);
