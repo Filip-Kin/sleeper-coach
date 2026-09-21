@@ -324,20 +324,18 @@ async function main(): Promise<void> {
   // move that can genuinely help a crowded bye, but the IR-move DOM flow is not
   // built or staging-verified yet, so it is alerted for manual action rather than
   // issued blind (the same discipline as waiver claims and trades).
-  if (irOpps.length) {
-    await sendAlert(
-      "IR opportunity",
-      `Week ${week}: ${irOpps.map((o) => `${o.name} (${o.injuryStatus ?? "injured"})`).join(", ")} can move to IR, freeing an active slot for a costless add. Do it in Sleeper.`,
-    ).catch(() => {});
-  }
+  // No "IR opportunity, do it in Sleeper" alert any more: the coach performs
+  // the IR move itself when a slot is needed, and alerts only if Sleeper
+  // refuses. The old alert also fired on every dry run, which is how a
+  // read-only check spammed Filip's phone on 2026-09-20.
 
   if (stream) {
-    await sendAlert("Streaming pickup",
+    if (live) await sendAlert("Streaming pickup",
       `Week ${stream.forWeek} would leave ${stream.position} empty (${stream.coveringFor.join(", ")} on bye/out). ${stream.onWaivers ? "Claim" : "Add"} ${stream.add}${stream.drop ? `, drop ${stream.drop}` : ""} before the deadline.`).catch(() => {});
   }
   // A claim is never auto-submitted (unverified write path). Surface it.
   if (claim) {
-    await sendAlert(
+    if (live) await sendAlert(
       "Waiver claim recommended",
       `Week ${week}: claim ${claim.add} (+${claim.gainPts} ROS)${claim.drop ? `, drop ${claim.drop}` : ""}. ${claim.reason}. Submit it in Sleeper before Wednesday 07:00 GMT.`,
     ).catch(() => {});
@@ -383,7 +381,7 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logEvent("coach", "waiver-stream-failed", `Stream ${stream.add} failed: ${msg}`, { week, add: stream.add });
-      await sendAlert("Stream pickup failed", `Week ${stream.forWeek}: ${stream.add} — ${msg}`);
+      if (live) await sendAlert("Stream pickup failed", `Week ${stream.forWeek}: ${stream.add} — ${msg}`);
     }
   }
 
@@ -392,7 +390,12 @@ async function main(): Promise<void> {
   // own is what produced "Your roster is either invalid or will be invalid
   // after this move" on 2026-09-19: the planner had picked the path, but
   // nothing ever performed it, and the alert told Filip to do it by hand.
+  // One IR attempt per run. Sleeper's refusal ("wait until this week's games
+  // are complete") applies to every candidate equally, and trying it once per
+  // candidate produced five failures and five alerts in one second.
+  let stashRefused: string | null = null;
   const stashToIr = async (name: string): Promise<boolean> => {
+    if (stashRefused) return false;
     try {
       const id = resolve(name);
       const mine = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId);
@@ -405,9 +408,13 @@ async function main(): Promise<void> {
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      stashRefused = msg;
       console.error(`  could not move ${name} to IR: ${msg}`);
       logEvent("coach", "ir-stash-failed", `Could not move ${name} to IR: ${msg}`, { week, leagueId, player: name });
-      await sendAlert("IR move failed", `Week ${week}: ${name} could not be moved to IR. ${msg}`);
+      // Sleeper locking IR until the week's games finish is routine, not an
+      // incident; the next run after Monday night will do it. Only a refusal
+      // that is NOT that lock is worth a push.
+      if (live && !/games are complete/i.test(msg)) await sendAlert("IR move failed", `Week ${week}: ${name} could not be moved to IR. ${msg}`);
       return false;
     }
   };
@@ -429,7 +436,7 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logEvent("coach", "waiver-add-failed", `Free-agent add ${m.add} failed: ${msg}`, { week, leagueId, add: m.add });
-      await sendAlert("Free-agent add failed", `Week ${week}: ${m.add} — ${msg}`);
+      if (live) await sendAlert("Free-agent add failed", `Week ${week}: ${m.add} — ${msg}`);
       throw err;
     }
   }
@@ -445,7 +452,7 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logEvent("coach", "waiver-claim-failed", `Waiver claim ${claim.add} failed: ${msg}`, { week, leagueId, add: claim.add });
-      await sendAlert("Waiver claim failed", `Week ${week}: ${claim.add} — ${msg}`);
+      if (live) await sendAlert("Waiver claim failed", `Week ${week}: ${claim.add} — ${msg}`);
       throw err;
     }
   }
