@@ -503,15 +503,25 @@ export async function pendingClaimSlots(
   gql: Gql, leg: number, rosterId = config.rosterId, leagueId = config.leagueId,
 ): Promise<{ count: number; adds: string[] }> {
   const adds: string[] = [];
-  for (const status of ["pending", "processing"]) {
+  // A claim is filed under the leg it was made in and stays there until the
+  // waiver run processes it, which is after the NFL week has rolled over. On
+  // 2026-09-22 (week 3) the Reed and Downs claims sat under leg 2, this read
+  // leg 3 only, saw no claims, released the hold, and the free-agent job tried
+  // to spend both slots. Look one leg back as well.
+  const legs = [...new Set([Math.trunc(leg), Math.max(1, Math.trunc(leg) - 1)])];
+  const seen = new Set<string>();
+  for (const status of ["pending", "processing"]) for (const l of legs) {
     const body = await gql(
-      `{league_transactions_by_status(league_id:"${safeId(leagueId)}",status:"${status}",leg:${Math.trunc(leg)})` +
+      `{league_transactions_by_status(league_id:"${safeId(leagueId)}",status:"${status}",leg:${l})` +
       `{transaction_id status type roster_ids adds drops}}`,
     ).catch(() => ({} as Record<string, unknown>));
     const raw = ((body.data as Record<string, unknown> | undefined)?.league_transactions_by_status ?? []) as Record<string, unknown>[];
     for (const t of raw) {
       if (t.type !== "waiver") continue;
       if (!((t.roster_ids as number[]) ?? []).includes(rosterId)) continue;
+      const txId = String(t.transaction_id ?? "");
+      if (seen.has(txId)) continue;
+      seen.add(txId);
       const ourAdds = Object.entries((t.adds ?? {}) as Record<string, number>).filter(([, r]) => r === rosterId);
       const ourDrops = Object.entries((t.drops ?? {}) as Record<string, number>).filter(([, r]) => r === rosterId);
       // Net slots this claim needs when it lands.
@@ -520,6 +530,23 @@ export async function pendingClaimSlots(
     }
   }
   return { count: adds.length, adds };
+}
+
+/** Is the league inside its waiver window, where every unrostered player is
+ *  on waivers and free adds are refused? True from the week's first kickoff
+ *  until the waiver run clears. There is no direct flag, but an unprocessed
+ *  waiver claim from ANY roster under this leg or the last one means the run
+ *  has not happened yet, and in an 8-team league somebody always has one in.
+ *  When this is wrong the write-time fallback in waiver-run still catches it. */
+export async function waiverWindowOpen(gql: Gql, leg: number, leagueId = config.leagueId): Promise<boolean> {
+  for (const l of new Set([Math.trunc(leg), Math.max(1, Math.trunc(leg) - 1)])) {
+    const body = await gql(
+      `{league_transactions_by_status(league_id:"${safeId(leagueId)}",status:"pending",leg:${l}){transaction_id type}}`,
+    ).catch(() => ({} as Record<string, unknown>));
+    const raw = ((body.data as Record<string, unknown> | undefined)?.league_transactions_by_status ?? []) as Record<string, unknown>[];
+    if (raw.some((t) => t.type === "waiver")) return true;
+  }
+  return false;
 }
 
 export async function cancelWaiverClaim(

@@ -24,7 +24,7 @@ import { rankByVor } from "../analysis/vor.ts";
 import { buildRosterView, takenAcrossLeague } from "../analysis/roster-view.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
-import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve, pendingClaimSlots} from "../league/api.ts";
+import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve, pendingClaimSlots, waiverWindowOpen} from "../league/api.ts";
 import { streamNeeds, pickStreamer } from "../analysis/streaming.ts";
 import { chooseForcedDrops } from "../analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
@@ -170,6 +170,14 @@ async function main(): Promise<void> {
   const txns = (await sleeper.transactions(leagueId, round).catch(() => [])) as TransactionLike[];
   const recentlyDropped = new Set<string>();
   for (const tx of txns) for (const id of Object.keys(tx.drops ?? {})) recentlyDropped.add(id);
+  // From Sunday kickoff until the waiver run clears, EVERYONE unrostered is on
+  // waivers, dropped this week or not. Without this the Tuesday job planned
+  // Jacory Croskey-Merritt as a free add, Sleeper refused him, the job exited
+  // 1 and two alerts went out; and the Tuesday-night claim job would not have
+  // claimed him either, because it only considers players labelled claims.
+  const windowOpen = await waiverWindowOpen(tokenGql(), week, leagueId).catch(() => false);
+  if (windowOpen) console.log("  waiver window is open: every unrostered player is a claim, not a free add");
+  const isOnWaivers = (id: string): boolean => windowOpen || recentlyDropped.has(id);
 
   // Name -> player_id, for both the available pool and our own roster. The
   // analysis reasons in names, but every write needs an id: the GraphQL roster
@@ -183,7 +191,7 @@ async function main(): Promise<void> {
     points: p.points,
     injuryStatus: p.injuryStatus ?? undefined,
     returnsBeforePlayoffs: p.returnsBeforePlayoffs,
-    onWaivers: recentlyDropped.has(p.playerId),
+    onWaivers: isOnWaivers(p.playerId),
     bye: byeWeek(p.team) ?? undefined, // so a candidate on a crowded bye is debited
   }));
 
@@ -249,7 +257,7 @@ async function main(): Promise<void> {
   // kickers or defenses (they score far less), the very positions we stream.
   const streamPool = Array.from(ros.values())
     .filter((p) => !rostered.has(p.playerId) && p.points > 0)
-    .map((p) => ({ name: p.name, position: p.position, points: p.points, onWaivers: recentlyDropped.has(p.playerId) }));
+    .map((p) => ({ name: p.name, position: p.position, points: p.points, onWaivers: isOnWaivers(p.playerId) }));
   const needs = streamNeeds(roster, week, DEFAULT_WAIVERS.byeLookaheadWeeks ?? 3);
   let stream: { add: string; drop: string | null; position: string; forWeek: number; onWaivers: boolean; points: number; coveringFor: string[] } | null = null;
   for (const need of needs) {
@@ -426,10 +434,33 @@ async function main(): Promise<void> {
         // rather than throwing: a failed IR move is not a failed waiver run.
         continue;
       }
-      const res = await addFreeAgent(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);
-      console.log(`  added ${m.add}${m.drop ? ` (dropped ${m.drop})` : ""} [${res.status}]`);
-      logEvent("coach", "waiver-add", `Added free agent ${m.add}${m.drop ? `, dropped ${m.drop}` : ""}.`, {
-        week, leagueId, add: m.add, drop: m.drop, transaction_id: res.transactionId, status: res.status,
+      let res: { transactionId: string; status: string };
+      let via: "free-add" | "claim" = "free-add";
+      try {
+        res = await addFreeAgent(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // From Sunday kickoff until the waiver run clears, every unrostered
+        // player is on waivers and Sleeper refuses free adds. The onWaivers
+        // heuristic (dropped this week) cannot know that, so the answer is
+        // to take Sleeper's word for it and file the same move as a claim.
+        // Before 2026-09-22 this threw, the whole job exited 1, and two
+        // alerts went out for a routine Tuesday.
+        if (!/on waivers/i.test(msg)) throw err;
+        if (!doClaims || claimUsed) {
+          // An adds-only run has no business filing claims; the Tuesday claim
+          // job owns that. Everyone else in the list is on waivers too.
+          console.log(`  ${m.add} is on waivers; free adds are closed until the waiver run clears. Left for the claim job.`);
+          logEvent("coach", "waiver-window", `Free adds closed (waiver window); ${m.add} left for the claim job.`, { week, leagueId, add: m.add });
+          break;
+        }
+        res = await submitWaiverClaim(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);
+        via = "claim";
+        claimUsed = true;
+      }
+      console.log(`  ${via === "claim" ? "claimed (was on waivers)" : "added"} ${m.add}${m.drop ? ` (dropping ${m.drop})` : ""} [${res.status}]`);
+      logEvent("coach", via === "claim" ? "waiver-claim" : "waiver-add", `${via === "claim" ? "Claimed" : "Added free agent"} ${m.add}${m.drop ? `, dropping ${m.drop}` : ""}.`, {
+        week, leagueId, add: m.add, drop: m.drop, transaction_id: res.transactionId, status: res.status, via,
       });
       // One transaction per pass, so a batch cannot leave a half-applied roster.
       break;
