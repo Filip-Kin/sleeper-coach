@@ -24,14 +24,15 @@ import { rankByVor } from "../analysis/vor.ts";
 import { buildRosterView, takenAcrossLeague } from "../analysis/roster-view.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
-import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve, pendingClaimSlots, waiverWindowOpen} from "../league/api.ts";
-import { streamNeeds, pickStreamer } from "../analysis/streaming.ts";
+import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve } from "../league/api.ts";
+import { streamNeeds, pickStreamer, type StreamCandidate } from "../analysis/streaming.ts";
 import { chooseForcedDrops } from "../analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
 import { loadRestOfSeason } from "../analysis/ros-projections.ts";
+import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
 import {
-  planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities,
+  planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities, stashCandidates,
   DEFAULT_WAIVERS, type AvailablePlayer, type RosterState,
 } from "../analysis/waivers.ts";
 import type { RailPlayer } from "../analysis/rails.ts";
@@ -39,6 +40,10 @@ import { byeWeek } from "../data/byes.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
+import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE } from "../sleeper/rules.ts";
+import { overlayRosterStatus, cachedTeamKickoffs } from "./lineup-guard.ts";
+import { pendingClaimPlayers, withoutPendingAdds, railsWithPendingDrops } from "./pending-claims.ts";
+import { droppedAtFromTransactions, onWaiversNow } from "./waiver-status.ts";
 
 const MAX_CANDIDATES = 40; // consider the top-40 available by ROS; the tail is noise
 
@@ -48,7 +53,7 @@ function opt(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-interface TransactionLike { drops?: Record<string, number> | null; }
+interface TransactionLike { drops?: Record<string, number> | null; created?: number; status_updated?: number }
 
 async function main(): Promise<void> {
   const live = flag("live");
@@ -114,15 +119,20 @@ async function main(): Promise<void> {
   const ros = await loadRestOfSeason(season, week, league.scoring_settings);
 
   // Our roster as RailPlayers, on ROS points, carrying the stash flag the rails
-  // depend on.
+  // depend on. Injury status is LIVE from the roster read's player_map laid
+  // over the daily dump (R10): the dump is up to 24 h stale, which is how a
+  // player ruled Out on Saturday was still "Questionable" to Sunday's run.
+  const liveStatus = overlayRosterStatus(players, mine);
   const roster: RailPlayer[] = myPlayerIds.map((id) => {
     const r = ros.get(id);
-    const dump = players[id];
+    const dump = liveStatus[id];
     const name = dump?.full_name ?? (dump ? `${dump.first_name} ${dump.last_name}`.trim() : r?.name ?? id);
     const position = dump?.position ?? r?.position ?? (/^[A-Z]{2,4}$/.test(id) ? "DEF" : "?");
     // team drives the bye lookup; a DEF's team abbreviation IS its id.
     const team = dump?.team ?? r?.team ?? (/^[A-Z]{2,4}$/.test(id) ? id : undefined);
     return {
+      playerId: id,
+      onIr: false, // the analysis roster is the ACTIVE set; reserve was excluded above
       name,
       position,
       points: r?.points ?? 0,
@@ -131,6 +141,19 @@ async function main(): Promise<void> {
       bye: byeWeek(team) ?? undefined, // for the upcoming-bye lookahead and tie-break
     };
   });
+  const nameOf = new Map(roster.map((p) => [p.playerId ?? "", p.name]));
+  // This week's starters as the site has them. Never dropped, never stashed,
+  // before their games lock (R7). The lineup guard owns who starts.
+  const currentStarters = (mine.starters ?? []).map((id) => nameOf.get(id)).filter((n): n is string => !!n);
+
+  // Players spoken for by our own pending claims (R6): the adds leave the
+  // candidate pool, the drops leave the drop table.
+  const pending = await pendingClaimPlayers(tokenGql(), week, rosterId, leagueId).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
+  if (pending.adds.length || pending.drops.length) {
+    console.log(`  pending claims: +${pending.adds.length} add(s) held out of the pool, ${pending.drops.length} drop(s) held off the table`);
+  }
+  const rails = railsWithPendingDrops(DEFAULT_WAIVERS.rails, roster, pending.drops);
+  const waiverCfg = { ...DEFAULT_WAIVERS, rails };
 
   // Available = fantasy players on no roster in the league. Rank by ROS, take the
   // top slice.
@@ -139,7 +162,7 @@ async function main(): Promise<void> {
   // acquiring is still rostered (by them) until it processes. A trade frees
   // nobody to waivers. Only OUR roster view (above) reflects the delta.
   const rostered = takenAcrossLeague(rosters); // IR included: a stashed player is not a free agent
-  const unrostered = Array.from(ros.values()).filter((p) => !rostered.has(p.playerId) && p.points > 0);
+  const unrostered = withoutPendingAdds(Array.from(ros.values()).filter((p) => !rostered.has(p.playerId) && p.points > 0), pending.adds);
 
   // Rank by VALUE OVER REPLACEMENT, not raw points. Raw rest-of-season points
   // always put quarterbacks on top, because a starting QB outscores a starting
@@ -162,22 +185,19 @@ async function main(): Promise<void> {
     .sort((a, b) => (vorOf.get(b.playerId) ?? 0) - (vorOf.get(a.playerId) ?? 0) || b.points - a.points)
     .slice(0, MAX_CANDIDATES);
 
-  // onWaivers heuristic: a player DROPPED in the current scoring period is still
-  // on waivers (a two-day hold); anyone else long-available is a free agent.
-  // This is an approximation, clearly labelled, and it only ever affects whether
-  // a move is called a claim or a free-add - not whether the rails permit it.
-  const round = Math.max(1, week);
-  const txns = (await sleeper.transactions(leagueId, round).catch(() => [])) as TransactionLike[];
-  const recentlyDropped = new Set<string>();
-  for (const tx of txns) for (const id of Object.keys(tx.drops ?? {})) recentlyDropped.add(id);
-  // From Sunday kickoff until the waiver run clears, EVERYONE unrostered is on
-  // waivers, dropped this week or not. Without this the Tuesday job planned
-  // Jacory Croskey-Merritt as a free add, Sleeper refused him, the job exited
-  // 1 and two alerts went out; and the Tuesday-night claim job would not have
-  // claimed him either, because it only considers players labelled claims.
-  const windowOpen = await waiverWindowOpen(tokenGql(), week, leagueId).catch(() => false);
-  if (windowOpen) console.log("  waiver window is open: every unrostered player is a claim, not a free add");
-  const isOnWaivers = (id: string): boolean => windowOpen || recentlyDropped.has(id);
+  // On waivers, PER PLAYER (R5): dropped inside waiver_clear_days, or his team
+  // has kicked off since the last Wednesday run. Drops are read from this leg
+  // and the last (a Tuesday drop lives under last week's leg on Wednesday).
+  // This only ever decides whether a move is filed as a claim or a free add;
+  // the write-time fallback below takes Sleeper's word when it disagrees.
+  const txns: TransactionLike[] = [];
+  for (const l of legsToScan(week)) txns.push(...((await sleeper.transactions(leagueId, l).catch(() => [])) as TransactionLike[]));
+  const droppedAt = droppedAtFromTransactions(txns);
+  const kickoffs = await cachedTeamKickoffs();
+  const clearDays = (league.settings as { waiver_clear_days?: number }).waiver_clear_days ?? 2;
+  const nowMs = Date.now();
+  const isOnWaivers = (id: string, team: string | null | undefined): boolean =>
+    onWaiversNow({ playerId: id, team, droppedAt, kickoffs, now: nowMs, clearDays });
 
   // Name -> player_id, for both the available pool and our own roster. The
   // analysis reasons in names, but every write needs an id: the GraphQL roster
@@ -191,7 +211,7 @@ async function main(): Promise<void> {
     points: p.points,
     injuryStatus: p.injuryStatus ?? undefined,
     returnsBeforePlayoffs: p.returnsBeforePlayoffs,
-    onWaivers: isOnWaivers(p.playerId),
+    onWaivers: isOnWaivers(p.playerId, p.team),
     bye: byeWeek(p.team) ?? undefined, // so a candidate on a crowded bye is debited
   }));
 
@@ -204,41 +224,32 @@ async function main(): Promise<void> {
   // back to the roster_positions count for any league that does list IR there.
   const irCap = league.settings.reserve_slots ?? league.roster_positions.filter((s) => s === "IR").length;
   const onReserve = view.reserve.length;
-  // IR-eligibility is league-configured via the reserve_allow_* flags; IR itself
-  // is always eligible. Build the actual eligible set rather than assuming one.
-  const irAllow = new Set<string>(["IR"]);
-  const s = league.settings;
-  if (s.reserve_allow_out) irAllow.add("OUT");
-  if (s.reserve_allow_doubtful) irAllow.add("DOUBTFUL");
-  if (s.reserve_allow_sus) irAllow.add("SUS");
-  if (s.reserve_allow_cov) irAllow.add("COV");
-  if (s.reserve_allow_na) irAllow.add("NA");
-  if (s.reserve_allow_dnr) irAllow.add("DNR");
-  irAllow.add("PUP"); // Sleeper treats PUP as reserve-eligible independently of the flags
-  const irEligible = (status?: string | null): boolean => irAllow.has((status ?? "").trim().toUpperCase());
+  // IR-eligibility is the league's reserve_allow_* flags, encoded once in
+  // sleeper/rules.ts. Nothing else decides it.
+  const irEligible = (status?: string | null): boolean => ruleIrEligible(status, league.settings);
   const openIrSlots = Math.max(0, irCap - onReserve);
   const activePlayers = view.active.length;
   // Slots already promised to our own pending waiver claims are NOT open. A
   // claim with no drop needs a free slot on Wednesday, and a free add made on
   // Sunday morning takes it, which quietly kills the claim.
-  const claimed = await pendingClaimSlots(tokenGql(), week, rosterId, leagueId).catch(() => ({ count: 0, adds: [] as string[] }));
-  if (claimed.count) console.log(`  holding ${claimed.count} slot(s) for pending waiver claim(s)`);
+  if (pending.slotsNeeded) console.log(`  holding ${pending.slotsNeeded} slot(s) for pending waiver claim(s)`);
   const rosterState: RosterState = {
     roster,
-    openBenchSlots: Math.max(0, slots.length + benchCap - activePlayers - claimed.count),
+    openBenchSlots: Math.max(0, slots.length + benchCap - activePlayers - pending.slotsNeeded),
     openIrSlots,
     startingSlots: slots,
     irEligible,
+    currentStarters,
   };
 
   // Look ahead for a crowded STARTER bye we still have time to relieve (the
   // week-8 hole is a week-7 job), and feed the crowded weeks into the move
   // ranking so a relieving add edges ahead of an equal one that ignores it.
-  const byeCrunch = upcomingByeCrunch(roster, slots, week, DEFAULT_WAIVERS);
+  const byeCrunch = upcomingByeCrunch(roster, slots, week, waiverCfg);
   const crowdedByes = crowdedByeWeeks(byeCrunch);
-  const irOpps = irOpportunities(roster, openIrSlots, irEligible);
+  const irOpps = irOpportunities(roster, openIrSlots, irEligible, currentStarters);
 
-  const moves = planWaivers(available, rosterState, DEFAULT_WAIVERS, crowdedByes);
+  const moves = planWaivers(available, rosterState, waiverCfg, crowdedByes);
   const claim = bestClaim(moves);
   const freeAdds = moves.filter((m) => m.kind === "free-add");
   const froze = freezeState();
@@ -251,26 +262,29 @@ async function main(): Promise<void> {
   // upgrade logic above, which would skip a streamer since he does not beat our
   // rostered starter rest-of-season; the trigger here is an empty slot, not an
   // upgrade.
-  const streamCfg = { ...DEFAULT_FAIRNESS, upcomingWeeks: Array.from({ length: Math.max(1, 15 - week + 1) }, (_, i) => week + i) };
+  const streamCfg = { ...DEFAULT_FAIRNESS, rails, upcomingWeeks: Array.from({ length: Math.max(1, 15 - week + 1) }, (_, i) => week + i) };
   // Streaming candidates come from the FULL unrostered pool, not `available`,
   // which is sliced to the top skill players by points and so contains no
   // kickers or defenses (they score far less), the very positions we stream.
-  const streamPool = Array.from(ros.values())
-    .filter((p) => !rostered.has(p.playerId) && p.points > 0)
-    .map((p) => ({ name: p.name, position: p.position, points: p.points, onWaivers: isOnWaivers(p.playerId) }));
+  // Each candidate carries the NEED WEEK's projection and his bye (R4): a
+  // rest-of-season number put a kicker on his own bye at the top of the list.
+  const streamBase = unrostered.map((p) => ({ playerId: p.playerId, name: p.name, position: p.position, team: p.team, bye: byeWeek(p.team) }));
   const needs = streamNeeds(roster, week, DEFAULT_WAIVERS.byeLookaheadWeeks ?? 3);
   let stream: { add: string; drop: string | null; position: string; forWeek: number; onWaivers: boolean; points: number; coveringFor: string[] } | null = null;
   for (const need of needs) {
-    const pick = pickStreamer(need, streamPool);
+    const table = byPlayerId(await loadWeekProjections(season, need.week, league.scoring_settings).catch(() => []));
+    const pool: (StreamCandidate & { playerId: string; team: string })[] = streamBase.map((p) => ({ ...p, weekPoints: table.get(p.playerId)?.points ?? 0 }));
+    const pick = pickStreamer(need, pool);
     if (!pick) continue;
     // A drop is only needed if we are full; never drop the player we are
-    // covering for (he returns from his bye), and chooseForcedDrops already
-    // refuses to empty a mandatory slot or cut a stash.
+    // covering for (he returns from his bye) nor a current starter, and
+    // chooseForcedDrops already refuses to empty a mandatory slot or cut a stash.
     const drop = rosterState.openBenchSlots > 0
       ? null
-      : chooseForcedDrops(roster, 1, streamCfg, need.coveringFor)[0]?.name ?? null;
+      : chooseForcedDrops(roster, 1, streamCfg, [...need.coveringFor, ...currentStarters], rails)[0]?.name ?? null;
     if (rosterState.openBenchSlots <= 0 && !drop) continue; // no legal way to make room
-    const onWaivers = streamPool.find((a) => a.name === pick.add)?.onWaivers ?? true;
+    const picked = pool.find((a) => a.name === pick.add);
+    const onWaivers = picked ? isOnWaivers(picked.playerId, picked.team) : true;
     stream = { add: pick.add, drop, position: need.position, forWeek: need.week, onWaivers, points: pick.points, coveringFor: need.coveringFor };
     break; // earliest actionable need only
   }
@@ -398,31 +412,47 @@ async function main(): Promise<void> {
   // own is what produced "Your roster is either invalid or will be invalid
   // after this move" on 2026-09-19: the planner had picked the path, but
   // nothing ever performed it, and the alert told Filip to do it by hand.
-  // One IR attempt per run. Sleeper's refusal ("wait until this week's games
-  // are complete") applies to every candidate equally, and trying it once per
-  // candidate produced five failures and five alerts in one second.
-  let stashRefused: string | null = null;
+  // Sleeper's lock refusal ("wait until this week's games are complete")
+  // applies to every candidate equally, so it ends IR moves for this run:
+  // trying it once per candidate produced five failures and five alerts in
+  // one second. Any OTHER refusal is about that one player (R3), so the next
+  // best candidate gets one try.
+  const stashRanked = stashCandidates({ roster, irEligible, currentStarters }, waiverCfg).map((p) => p.name);
+  let stashLocked = false;
+  const stashRefusedNames = new Set<string>();
+  let retried = false;
+  const stashOnce = async (name: string): Promise<boolean> => {
+    const id = resolve(name);
+    const mine = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId);
+    const current = mine?.reserve ?? [];
+    if (current.includes(id)) return true; // already there
+    const back = await updateReserve(gql, [...current, id], rosterId, leagueId);
+    if (!back.includes(id)) throw new Error(`read-back has ${JSON.stringify(back)}`);
+    console.log(`  moved ${name} to IR, freeing an active slot`);
+    logEvent("coach", "ir-stash", `Moved ${name} to injured reserve, freeing an active slot.`, { week, leagueId, player: name, reserve: back });
+    return true;
+  };
   const stashToIr = async (name: string): Promise<boolean> => {
-    if (stashRefused) return false;
+    if (stashLocked || stashRefusedNames.has(name)) return false;
     try {
-      const id = resolve(name);
-      const mine = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId);
-      const current = mine?.reserve ?? [];
-      if (current.includes(id)) return true; // already there
-      const back = await updateReserve(gql, [...current, id], rosterId, leagueId);
-      if (!back.includes(id)) throw new Error(`read-back has ${JSON.stringify(back)}`);
-      console.log(`  moved ${name} to IR, freeing an active slot`);
-      logEvent("coach", "ir-stash", `Moved ${name} to injured reserve, freeing an active slot.`, { week, leagueId, player: name, reserve: back });
-      return true;
+      return await stashOnce(name);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      stashRefused = msg;
       console.error(`  could not move ${name} to IR: ${msg}`);
       logEvent("coach", "ir-stash-failed", `Could not move ${name} to IR: ${msg}`, { week, leagueId, player: name });
-      // Sleeper locking IR until the week's games finish is routine, not an
-      // incident; the next run after Monday night will do it. Only a refusal
-      // that is NOT that lock is worth a push.
-      if (live && !/games are complete/i.test(msg)) await sendAlert("IR move failed", `Week ${week}: ${name} could not be moved to IR. ${msg}`);
+      if (RESERVE_LOCKED_RE.test(msg)) {
+        // Routine, not an incident: the next run after Monday night will do it.
+        stashLocked = true;
+        return false;
+      }
+      stashRefusedNames.add(name);
+      if (live) await sendAlert("IR move failed", `Week ${week}: ${name} could not be moved to IR. ${msg}`);
+      const next = stashRanked.find((n) => n !== name && !stashRefusedNames.has(n));
+      if (next && !retried) {
+        retried = true;
+        console.log(`  trying the next IR candidate: ${next}`);
+        return stashToIr(next);
+      }
       return false;
     }
   };

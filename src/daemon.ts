@@ -7,22 +7,26 @@ import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
-import { unreactedDrops } from "./analysis/waivers.ts";
 import { tokenGql as leagueGql, dropPlayers, completedTrades, myRosterView, pendingTrades } from "./league/api.ts";
 import { assessToken } from "./league/token.ts";
 import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
-import { dropVerdict, DropRefused } from "./league/drop-ledger.ts";
-import { overCap, droppable } from "./analysis/roster-view.ts";
+import { DropRefused } from "./league/drop-ledger.ts";
+import { overCap } from "./analysis/roster-view.ts";
+import { activeRailRoster, chooseLegalForcedDrops } from "./analysis/reconcile-plan.ts";
+import { reconcileReserve } from "./act/reserve-reconcile.ts";
+import { RunLedger } from "./act/run-ledger.ts";
+import { runJobProcess, JOB_TIMEOUT_MS } from "./act/spawn-job.ts";
+import { reactToDropsCore } from "./act/drop-react.ts";
 import { maybePublishWeekly } from "./blog/auto.ts";
 import { allPosts } from "./blog/store.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
 import { handleDms } from "./league/dm-watch.ts";
 import { assessVeto, DEFAULT_VETO } from "./league/veto.ts";
 import { snapshot, scheduleContext } from "./analysis/trade-wire.ts";
-import { activeCapacity, overCapBy, chooseForcedDrops } from "./analysis/roster-fit.ts";
+import { activeCapacity } from "./analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "./analysis/trade-fair.ts";
-import { freezeState, assertWritesAllowed, freezeNow, FREEZE_FILE } from "./killswitch.ts";
+import { freezeState, assertWritesAllowed } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
 // shape: an infinite poll loop with durable SQLite state, each cycle wrapped so
@@ -55,11 +59,10 @@ db.run(`CREATE TABLE IF NOT EXISTS seen_transactions (
 )`);
 // Which scheduled occurrence of each job we have already handled. Durable on
 // purpose: "have I run this week's Sunday lock" must survive a container restart,
-// which is the whole reason this can replace host systemd timers.
-db.run(`CREATE TABLE IF NOT EXISTS scheduled_runs (
-  job TEXT PRIMARY KEY,
-  last_run INTEGER
-)`);
+// which is the whole reason this can replace host systemd timers. A job is
+// recorded when it STARTS, so a redeploy under it cannot re-run it. See
+// act/run-ledger.ts.
+const runs = new RunLedger(db);
 db.run(`CREATE TABLE IF NOT EXISTS drop_reactions (
   transaction_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`);
 db.run(`CREATE TABLE IF NOT EXISTS agent_runs (
@@ -128,13 +131,7 @@ async function tokenReady(): Promise<boolean> {
 // it's not using my systemd timer." Every daemon poll asks each job whether its
 // most recent occurrence has passed unhandled; the answer is durable in SQLite so
 // a restart cannot double-fire or silently skip a week.
-function lastRunOf(job: string): number {
-  const row = db.query("SELECT last_run FROM scheduled_runs WHERE job = ?").get(job) as { last_run?: number } | null;
-  return row?.last_run ?? 0;
-}
-function markRun(job: string, occurrence: number): void {
-  db.run("INSERT OR REPLACE INTO scheduled_runs (job, last_run) VALUES (?, ?)", [job, occurrence]);
-}
+const lastRunOf = (job: string): number => runs.lastRunOf(job);
 
 // Each job maps to a script already exercised by hand. Running them as separate
 // processes rather than in-process is deliberate: a job that hangs or throws
@@ -200,29 +197,51 @@ async function runJob(job: Job, occurrence: number): Promise<void> {
     // do not want a queue of missed locks all firing the moment it is lifted.
     console.log(`[schedule] ${job.name} skipped, ${frozen.reason}`);
     logEvent("coach", "schedule-frozen", `${job.name} skipped: ${frozen.reason}`, { job: job.name });
-    markRun(job.name, occurrence);
+    runs.markHandled(job.name, occurrence);
     return;
   }
   console.log(`[schedule] running ${job.name}: ${cmd.join(" ")}`);
   logEvent("coach", "schedule-run", `Running ${job.name}.`, { job: job.name, occurrence });
-  const t0 = Date.now();
-  const proc = Bun.spawn(cmd, { cwd: "/app", stdout: "pipe", stderr: "pipe" });
-  const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(out.trim().split("\n").slice(-25).join("\n"));
-  if (code !== 0) {
-    console.error(`[schedule] ${job.name} exited ${code} after ${secs}s: ${err.trim().slice(0, 400)}`);
-    logEvent("coach", "schedule-failed", `${job.name} exited ${code}.`, { job: job.name, code, stderr: err.trim().slice(0, 600) });
-    await sendAlert(`Scheduled job failed: ${job.name}`, `Exited ${code} after ${secs}s. ${err.trim().slice(0, 300)}`).catch(() => {});
-    // Mark it handled regardless. Retrying a half-applied roster write on the
-    // next 90s poll is more dangerous than missing the lock, and the alert has
-    // already gone out.
-    markRun(job.name, occurrence);
-    return;
+  // Recorded as handled BEFORE the spawn. A redeploy that kills the container
+  // mid-run must not re-run a half-applied roster write on the next boot.
+  runs.markStarted(job.name, occurrence);
+  const r = await runJobProcess(cmd, { cwd: process.cwd(), timeoutMs: JOB_TIMEOUT_MS });
+  const secs = r.secs.toFixed(1);
+  console.log(r.out.trim().split("\n").slice(-25).join("\n"));
+  if (r.timedOut) {
+    await jobTimedOut(job.name, r.secs);
+  } else if (r.code !== 0) {
+    console.error(`[schedule] ${job.name} exited ${r.code} after ${secs}s: ${r.err.trim().slice(0, 400)}`);
+    logEvent("coach", "schedule-failed", `${job.name} exited ${r.code}.`, { job: job.name, code: r.code, stderr: r.err.trim().slice(0, 600) });
+    await sendAlert(`Scheduled job failed: ${job.name}`, `Exited ${r.code} after ${secs}s. ${r.err.trim().slice(0, 300)}`).catch(() => {});
+    // Handled regardless. Retrying a half-applied roster write on the next
+    // poll is more dangerous than missing the lock, and the alert has gone out.
+  } else {
+    console.log(`[schedule] ${job.name} finished in ${secs}s`);
+    logEvent("coach", "schedule-done", `${job.name} finished in ${secs}s.`, { job: job.name });
   }
-  console.log(`[schedule] ${job.name} finished in ${secs}s`);
-  logEvent("coach", "schedule-done", `${job.name} finished in ${secs}s.`, { job: job.name });
-  markRun(job.name, occurrence);
+  runs.markFinished(job.name, occurrence);
+}
+
+// A child that overruns its deadline is killed, logged, and alerted once per
+// job per day; the poll loop never waits on it again.
+const timeoutAlerted = new Map<string, number>();
+async function jobTimedOut(name: string, secs: number): Promise<void> {
+  console.error(`[schedule] ${name} killed after ${secs.toFixed(0)}s (limit ${Math.round(JOB_TIMEOUT_MS / 60_000)} min)`);
+  logEvent("coach", "job-timeout", `${name} was killed after ${Math.round(secs)}s, past the ${Math.round(JOB_TIMEOUT_MS / 60_000)} min limit.`, { job: name, secs: Math.round(secs) });
+  const now = Date.now();
+  if (now - (timeoutAlerted.get(name) ?? 0) > 24 * 3_600_000) {
+    timeoutAlerted.set(name, now);
+    await sendAlert(`Job timed out: ${name}`, `Killed after ${Math.round(secs / 60)} min. Check the container log.`).catch(() => {});
+  }
+}
+
+/** Spawn a one-off job (lineup re-solve, claim reaction, blog) with the same
+ *  deadline as the scheduled ones, output streamed to our own log. */
+async function runOneOff(name: string, cmd: string[]): Promise<number> {
+  const r = await runJobProcess(cmd, { cwd: process.cwd(), timeoutMs: JOB_TIMEOUT_MS, inherit: true });
+  if (r.timedOut) await jobTimedOut(name, r.secs);
+  return r.code;
 }
 
 // #region pick'em pre-kickoff passes
@@ -258,8 +277,7 @@ async function pickemKickoffPass(): Promise<void> {
   const next = Math.min(...kickoffs.filter((k) => k > Date.now()));
   const mins = Math.round((next - Date.now()) / 60_000);
   console.log(`[pickem] pre-kickoff pass: next game in ${mins} min (window ${FINAL_WINDOW_MIN} min)`);
-  const proc = Bun.spawn(["bun", "run", "src/pickem/run.ts"], { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" });
-  const code = await proc.exited;
+  const code = await runOneOff("pickem-pass", ["bun", "run", "src/pickem/run.ts"]);
   if (code !== 0) {
     // Not fatal and not alerted: we are still holding a provisional favourite,
     // so a failed pass costs the edge on one game, and the next poll retries.
@@ -293,7 +311,7 @@ async function runDueJobs(): Promise<void> {
       // Record it so the skip is logged once rather than every 90 seconds.
       console.log(`[schedule] ${job.name}: ${v.reason}`);
       logEvent("coach", "schedule-skipped", `${job.name}: ${v.reason}`, { job: job.name });
-      markRun(job.name, v.occurrence);
+      runs.markHandled(job.name, v.occurrence);
     }
   }
 }
@@ -311,7 +329,10 @@ async function runDueJobs(): Promise<void> {
 // submitting the moment we notice takes nothing from anybody: everyone has until
 // the clear. It is the instant free-agent grab that is unfair, and that stays on
 // its randomised daily slot.
-const DROP_REACTION_COOLDOWN_MS = 20 * 60 * 1000;
+//
+// A drop is marked reacted only once the claim run has exited 0 (see
+// act/drop-react.ts): marking first buried every drop whose run crashed or was
+// skipped inside the cooldown.
 let lastDropReaction = 0;
 
 function alreadyReacted(id: string): boolean {
@@ -325,24 +346,23 @@ async function reactToDrops(week: number): Promise<void> {
   } catch {
     return; // a transient read failure is not worth a retry storm
   }
-  const fresh = unreactedDrops(txns, alreadyReacted);
-  if (!fresh.length) return;
-
-  // Record them first, so a failing evaluation cannot loop on the same drop.
-  for (const id of fresh) db.run("INSERT OR REPLACE INTO drop_reactions (transaction_id, at) VALUES (?, ?)", [id, Date.now()]);
-
-  if (Date.now() - lastDropReaction < DROP_REACTION_COOLDOWN_MS) return;
-  if (freezeState().frozen) return;
-  lastDropReaction = Date.now();
-
-  console.log(`[waivers] ${fresh.length} new drop(s) in the league; re-evaluating claims`);
-  logEvent("coach", "waiver-react", `${fresh.length} player(s) dropped in the league; re-evaluating waiver claims`, { transactions: fresh });
-  const cmd = waiversLive
-    ? ["bun", "run", "src/act/waiver-run.ts", "--live", "--claims-only"]
-    : ["bun", "run", "src/act/waiver-run.ts", "--claims-only"];
-  const proc = Bun.spawn(cmd, { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" });
-  const code = await proc.exited;
-  if (code !== 0) console.error(`[waivers] drop reaction exited ${code}`);
+  const r = await reactToDropsCore({
+    txns, alreadyReacted,
+    markReacted: (id) => db.run("INSERT OR REPLACE INTO drop_reactions (transaction_id, at) VALUES (?, ?)", [id, Date.now()]),
+    now: Date.now(), lastReaction: lastDropReaction, frozen: freezeState().frozen,
+    run: async () => {
+      lastDropReaction = Date.now();
+      console.log(`[waivers] new drop(s) in the league; re-evaluating claims`);
+      const cmd = waiversLive
+        ? ["bun", "run", "src/act/waiver-run.ts", "--live", "--claims-only"]
+        : ["bun", "run", "src/act/waiver-run.ts", "--claims-only"];
+      return runOneOff("waiver-react", cmd);
+    },
+  });
+  if (r.ran) {
+    logEvent("coach", "waiver-react", `${r.fresh.length} player(s) dropped in the league; re-evaluated waiver claims (exit ${r.code}).`, { transactions: r.fresh, code: r.code });
+    if (r.code !== 0) console.error(`[waivers] drop reaction exited ${r.code}; the drops stay unreacted and are retried after the cooldown`);
+  }
 }
 // #endregion
 
@@ -385,10 +405,18 @@ async function reviewOthersTrades(leg: number): Promise<void> {
 // and will it fix our lineup?" These two functions are that yes.
 let reconcileBusy = false;
 
+// The "cannot auto-fix" and "frozen" alerts say it once an hour, not once a poll.
+let lastStuckAlert = 0;
+const STUCK_ALERT_MS = 60 * 60_000;
+
 /** If a completed trade (or anything else) left us over the 16-man limit, drop
  *  the cheapest-to-lose players to get legal. Mechanism-agnostic: it fixes an
  *  over-cap roster however it arose, which is more robust than betting on
- *  Sleeper's exact accept-time drop flow, which we cannot rehearse. */
+ *  Sleeper's exact accept-time drop flow, which we cannot rehearse.
+ *
+ *  The kill switch and the drop breaker live INSIDE dropPlayers (league/api.ts)
+ *  since 2026-09-23. A DropRefused from there is the breaker's decision and is
+ *  treated as "not now": logged, never alerted as a failure, retried next poll. */
 async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void> {
   if (reconcileBusy || draftActive()) return;
   reconcileBusy = true;
@@ -403,15 +431,15 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     if (over === 0) return;
 
     const snap = await snapshot();
-    // Drop candidates come from the view too: a man on IR is never one, by id.
-    // The earlier name-based filter here matched a field nobody set and was
-    // dead code; that is how Nico Collins was cut off his own IR spot.
-    const roster = droppable(view, snap.rosterOf.get(snap.ourRosterId) ?? [], DEFAULT_FAIRNESS.rails);
+    // The solver sees the FULL active roster (a man on IR is excluded by id,
+    // structurally) and droppable() checks what it chose. Handing it only the
+    // droppable subset (the audit's R2) made every candidate look like it
+    // emptied a starting slot, and this path never dropped anyone.
+    const full = activeRailRoster(view, snap.rosterOf.get(snap.ourRosterId) ?? []);
     if (view.reserve.length) console.log(`[reconcile] on IR, never a drop candidate: ${view.reserve.map((e) => e.name).join(", ")}`);
-    const state = await sleeper.nflState();
     const sched = await scheduleContext(null);
     const cfg = { ...DEFAULT_FAIRNESS, ...sched };
-    const drops = chooseForcedDrops(roster, over, cfg);
+    const drops = chooseLegalForcedDrops(view, full, over, cfg, DEFAULT_FAIRNESS.rails);
 
     if (drops.length < over) {
       // Rails would not let us drop enough without cutting a stash or a
@@ -419,55 +447,40 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
       logEvent("coach", "roster-overcap-stuck", `Over the roster cap by ${over} but only ${drops.length} legal drop(s); needs a human`, {
         over, chose: drops.map((d) => d.name),
       });
-      await sendAlert("Roster over cap, cannot auto-fix",
-        `We are ${over} over the ${cap}-man limit and the rails only allow dropping ${drops.length}: ${drops.map((d) => d.name).join(", ") || "none"}. Handle it in Sleeper.`).catch(() => {});
-      return;
-    }
-
-    logEvent("coach", "roster-reconcile", `Over cap by ${over}; dropping ${drops.map((d) => d.name).join(", ")}`, {
-      over, drops: drops.map((d) => ({ name: d.name, cost: d.cost })),
-    });
-    if (freezeState().frozen) {
-      await sendAlert("Roster over cap (frozen)", `Would drop ${drops.map((d) => d.name).join(", ")} but writes are frozen.`).catch(() => {});
-      return;
-    }
-    assertWritesAllowed("post-trade drop");
-
-    // THE RAIL. Independent of whatever maths decided to drop. A correct
-    // over-cap fix needs one drop and then the roster is legal, so a healthy
-    // coach never trips this. A loop that has decided to cut somebody every 90
-    // seconds trips it on the second attempt and stops itself.
-    const verdict = dropVerdict();
-    if (!verdict.allowed) {
-      console.error(`[reconcile] REFUSING to drop: ${verdict.reason}`);
-      logEvent("coach", "drop-blocked", `Refused an automatic drop: ${verdict.reason}`, {
-        wanted: drops.map((d) => d.name), reason: verdict.reason,
-      });
-      if (verdict.freeze) {
-        // Freeze rather than merely skip. Something is wrong with the roster
-        // maths and the next poll would try again in 90 seconds.
-        await freezeNow(verdict.reason).catch(() => {});
-        await sendAlert("Coach froze itself: repeated drops",
-          `${verdict.reason}. It wanted to drop ${drops.map((d) => d.name).join(", ")}. Writes are frozen until you remove ${FREEZE_FILE}.`).catch(() => {});
+      if (Date.now() - lastStuckAlert > STUCK_ALERT_MS) {
+        lastStuckAlert = Date.now();
+        await sendAlert("Roster over cap, cannot auto-fix",
+          `We are ${over} over the ${cap}-man limit and the rails only allow dropping ${drops.length}: ${drops.map((d) => d.name).join(", ") || "none"}. Handle it in Sleeper.`).catch(() => {});
       }
       return;
     }
 
-    const idByName = snap.idByName;
-    const ids: string[] = [];
-    for (const d of drops) {
-      const id = idByName.get(d.name);
-      if (!id) { console.error(`[reconcile] no id for ${d.name}`); continue; }
-      ids.push(id);
+    logEvent("coach", "roster-reconcile", `Over cap by ${over}; dropping ${drops.map((d) => d.name).join(", ")}`, {
+      over, drops: drops.map((d) => ({ name: d.name, playerId: d.playerId, cost: d.cost })),
+    });
+    if (freezeState().frozen) {
+      if (Date.now() - lastStuckAlert > STUCK_ALERT_MS) {
+        lastStuckAlert = Date.now();
+        await sendAlert("Roster over cap (frozen)", `Would drop ${drops.map((d) => d.name).join(", ")} but writes are frozen.`).catch(() => {});
+      }
+      return;
     }
+    assertWritesAllowed("post-trade drop");
+
     try {
-      const res = await dropPlayers(gql, ids);
+      const res = await dropPlayers(gql, drops.map((d) => d.playerId));
       logEvent("coach", "roster-dropped", `Dropped ${drops.map((d) => d.name).join(", ")} to get under the cap`, { status: res.status, drops: drops.map((d) => d.name) });
       // Roster changed: re-solve the lineup now rather than waiting for a timer.
-      await resolveLineupNow("a trade completed and the roster changed");
+      await resolveLineupNow("the roster changed");
     } catch (e) {
-      logEvent("coach", "roster-drop-failed", `Could not drop to get under the cap: ${e instanceof Error ? e.message : String(e)}`, { drops: drops.map((d) => d.name) });
-      await sendAlert("Post-trade drop failed", `Wanted to drop ${drops.map((d) => d.name).join(", ")} but the write failed: ${e instanceof Error ? e.message : String(e)}. Handle it in Sleeper.`).catch(() => {});
+      const msg = e instanceof Error ? e.message : String(e);
+      if (e instanceof DropRefused) {
+        // The breaker decided. Not a failure: the next poll after the cooldown tries again.
+        logEvent("coach", "drop-deferred", `Over-cap drop of ${drops.map((d) => d.name).join(", ")} deferred by the breaker: ${e.verdict.reason}`, { drops: drops.map((d) => d.name) });
+        return;
+      }
+      logEvent("coach", "roster-drop-failed", `Could not drop to get under the cap: ${msg}`, { drops: drops.map((d) => d.name) });
+      await sendAlert("Post-trade drop failed", `Wanted to drop ${drops.map((d) => d.name).join(", ")} but the write failed: ${msg}. Handle it in Sleeper.`).catch(() => {});
     }
   } finally {
     reconcileBusy = false;
@@ -479,14 +492,16 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
 async function resolveLineupNow(why: string): Promise<void> {
   if (freezeState().frozen) return;
   console.log(`[lineup] re-solving now: ${why}`);
-  const proc = Bun.spawn(["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"], { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" });
-  const code = await proc.exited;
+  const code = await runOneOff("lineup-resolve", ["bun", "run", "src/act/lineup-run.ts", "--live", "--refresh"]);
   if (code !== 0) console.error(`[lineup] re-solve exited ${code}`);
 }
 
 /** Notice a trade that has PROCESSED and react: reconcile the roster (which
  *  re-solves the lineup if it drops anyone) and, even on an even trade that
- *  needs no drop, re-solve the lineup so a newly acquired starter is in. */
+ *  needs no drop, re-solve the lineup so a newly acquired starter is in.
+ *  Idempotent across restarts: each trade is keyed `done:<id>` in the durable
+ *  seen_transactions table before anything runs. completedTrades scans this
+ *  leg and the last, so a Tuesday completion is still found on Wednesday. */
 async function reactToCompletedTrades(gql: ReturnType<typeof leagueGql>, leg: number): Promise<void> {
   if (draftActive()) return;
   let trades;
@@ -507,12 +522,18 @@ async function pollOnce(): Promise<void> {
   const round = Math.max(1, state.week || 1);
   if (draftActive()) return; // the draft orchestrator owns the league while it runs
 
+  // A healed player still parked on IR makes the roster invalid and every
+  // lineup write fails, so he comes off reserve BEFORE the guard plans. The
+  // reads are public; the write waits for the token. See act/reserve-reconcile.ts.
+  const fixReserve = () => reconcileReserve({ gql: leagueGql(), tokenReady }).then(() => undefined);
+  await fixReserve().catch((e) => console.error(`[reserve] ${e instanceof Error ? e.message : String(e)}`));
+
   // Is the lineup on the site still the optimal one? A starter ruled Out since
   // the last lock, or a player back from Out, is fixed here, every poll, not at
   // the next fixed lock. The reads are public GraphQL (no token, no player
   // dump), so this runs before the token gate; only a needed write waits for
   // the token. See act/lineup-guard.ts.
-  await runLineupGuard({ tokenReady }).catch((e) => console.error(`[lineup-guard] ${e instanceof Error ? e.message : String(e)}`));
+  await runLineupGuard({ tokenReady, onReserveIneligible: fixReserve }).catch((e) => console.error(`[lineup-guard] ${e instanceof Error ? e.message : String(e)}`));
 
   // TRADES COME FROM GRAPHQL, NOT REST. On 2026-09-02 a real offer sat live for
   // hours and the coach never saw it: GET /transactions/<week> does not list
@@ -555,12 +576,7 @@ async function pollOnce(): Promise<void> {
   await maybePublishWeekly({
     posts: allPosts,
     currentWeek: async () => Math.max(1, (await sleeper.nflState()).week || 1),
-    run: async (w) => {
-      const proc = Bun.spawn(["bun", "run", "src/blog/generate.ts", "week", String(w)], {
-        cwd: process.cwd(), stdout: "inherit", stderr: "inherit",
-      });
-      return proc.exited;
-    },
+    run: (w) => runOneOff("blog-weekly", ["bun", "run", "src/blog/generate.ts", "week", String(w)]),
   }).catch((e) => console.error(`[blog] ${e instanceof Error ? e.message : String(e)}`));
 
   // The coach answers its own DMs. Trade negotiation in this league happens in
@@ -577,6 +593,16 @@ async function pollOnce(): Promise<void> {
 async function main(): Promise<void> {
   logEvent("daemon", "online", "Daemon started; watching for trades, auth and the weekly schedule.");
   console.log(`[daemon] polling every ${POLL_INTERVAL_MS / 1000}s, db=${DB_PATH}`);
+  // A job the previous container started and never finished (killed by a
+  // redeploy) is reported once and NOT re-run: its occurrence is already
+  // recorded, and a second half-applied write is worse than a missed one.
+  const cut = runs.interrupted();
+  if (cut.length) {
+    const names = cut.map((r) => `${r.job} (started ${new Date(r.startedAt).toISOString()})`).join(", ");
+    logEvent("daemon", "job-interrupted", `Interrupted by the last restart, not re-run: ${names}`, { jobs: cut });
+    await sendAlert("Job interrupted by a restart", `${names}. Not re-run; check the roster if it was a write job.`).catch(() => {});
+    runs.settleInterrupted();
+  }
   for (const j of JOBS) {
     const cmd = JOB_COMMAND[j.name];
     console.log(`[schedule] ${j.name.padEnd(18)} ${dayLabel(j)} ${String(j.hour).padStart(2, "0")}:${String(j.minute).padStart(2, "0")} ET, up to ${Math.round(j.maxLateMs / 3600000)}h late  ->  ${cmd ? cmd.slice(2).join(" ") : "NO COMMAND"}`);
