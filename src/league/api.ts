@@ -417,8 +417,21 @@ export async function dropPlayers(
  *  Filip: "make sure trading takes into account trades that are processing so
  *  if you already traded for a TE you are not trying to pick up another one."
  *
- *  Only trades WE consented to count: a bare proposal from a rival we have not
- *  accepted changes nothing about what we will have. */
+ *  Only trades EVERY party has consented to count. A proposal carries the
+ *  proposer's consent from the moment it is sent, so "we consented" is true of
+ *  every offer we make. On 2026-09-23 that pre-applied our own outgoing offer
+ *  to Cloud Nine: the brief listed Harold Fannin as ours, the DM bot told
+ *  Cookie he was "getting my WR1 and my TE1" when Chase and Fannin are his,
+ *  and the waiver engine planned around three players we do not have. A trade
+ *  changes what we will hold only once the other side has said yes too. */
+/** Has every roster in this trade consented? Pure. The proposer is always a
+ *  consenter, so a lone proposer means nobody else has agreed yet. */
+export function tradeInFlight(t: { roster_ids?: number[] | null; consenter_ids?: number[] | null }): boolean {
+  const rosters = t.roster_ids ?? [];
+  const consenters = new Set(t.consenter_ids ?? []);
+  return rosters.length > 0 && rosters.every((r) => consenters.has(r));
+}
+
 export async function pendingRosterDelta(
   gql: Gql, leg: number, rosterId = config.rosterId, leagueId = config.leagueId,
 ): Promise<{ incoming: string[]; outgoing: string[] }> {
@@ -437,8 +450,7 @@ export async function pendingRosterDelta(
       const id = String(t.transaction_id ?? "");
       if (seen.has(id)) continue;
       seen.add(id);
-      const consenters = (t.consenter_ids as number[]) ?? [];
-      if (!consenters.includes(rosterId)) continue; // we have not agreed to it
+      if (!tradeInFlight(t)) continue;
       for (const [pid, rid] of Object.entries((t.adds ?? {}) as Record<string, number>)) if (rid === rosterId) incoming.push(pid);
       for (const [pid, rid] of Object.entries((t.drops ?? {}) as Record<string, number>)) if (rid === rosterId) outgoing.push(pid);
     }
