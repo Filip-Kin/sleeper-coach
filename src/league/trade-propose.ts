@@ -38,6 +38,7 @@ import { snapshot, snapshotWithPending, scheduleContext, type LeagueSnapshot } f
 import { proposeTrades, giveEligibleForProposal, byeAwareLineupTotal, depthInsurance, DEFAULT_FAIRNESS, type Proposal, type RivalRoster, type FairnessConfig } from "../analysis/trade-fair.ts";
 import { gateOutgoing, offerKey, IntentStore, DEFAULT_GATE, type GateOptions } from "../analysis/trade-intent.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
+import { shortlist, pickOne, type PickCandidate, type PickResult } from "./trade-pick.ts";
 import { pastTradeDeadline, tradeDead } from "../sleeper/rules.ts";
 import { STATE_DIR } from "../paths.ts";
 import { sleeper } from "../sleeper/client.ts";
@@ -71,6 +72,8 @@ export interface ProposerIo {
   scheduleContext: (theirRosterId: number) => Promise<{ remainingWeeks: number; headToHeadRemaining: number; upcomingWeeks: number[] }>;
   proposeTrade: (gql: Gql, spec: ProposalSpec) => Promise<{ transactionId: string; status: string }>;
   pitch: (gql: Gql, snap: LeagueSnapshot, best: Proposal) => Promise<void>;
+  /** The judgement step (trade-pick.ts): one of the shortlist, or none. */
+  pick: (cands: PickCandidate[], ourRoster: TradePlayer[]) => Promise<PickResult>;
 }
 const REAL_IO: ProposerIo = {
   nflState: () => sleeper.nflState(),
@@ -86,6 +89,7 @@ const REAL_IO: ProposerIo = {
     const dm = owner ? (await listDms(gql, 25)).find((d) => d.lastAuthorId === owner || d.title?.includes(owner)) : null;
     if (dm) await sendDm(gql, dm.dmId, pitchText(best));
   },
+  pick: (cands, ourRoster) => pickOne(cands, ourRoster),
 };
 
 /** Identity of a swap for the cooldown: manager plus the PLAYER IDS on each
@@ -234,20 +238,41 @@ export async function runProposer(state: ProposerState, gql: Gql = tokenGql()): 
   // Schedule dilution is per rival, so evaluate each against its own head to
   // head count rather than one blended number.
   const candidates: Proposal[] = [];
+  const h2hOf = new Map<string, number>();
   for (const rival of rivals) {
     const sched = await io.scheduleContext(Number(rival.managerId));
+    h2hOf.set(rival.managerId, sched.headToHeadRemaining);
     candidates.push(...proposeTrades(ourRoster, [rival], { ...DEFAULT_FAIRNESS, ...sched, rosterCapacity: snap.capacity }, 5));
   }
   candidates.sort((a, b) => b.score - a.score || b.theirGain - a.theirGain);
 
   const fresh = candidates.filter((c) => !onCooldown(db, proposalKey(c), now));
-  const best = fresh[0];
-  if (!best) {
+  if (!fresh.length) {
     return { sent: null, considered: candidates.length, outcome: "nothing",
       reason: candidates.length ? "every candidate was offered recently" : "no offer helps both sides right now" };
   }
 
-  if (state.dry) return { sent: best, considered: candidates.length, outcome: "dry", reason: "dry run, nothing sent" };
+  // The judgement step: the engine's best per rival goes to the model, which
+  // sends one or none. The engine's own ranking is not the send order any more
+  // (2026-09-23: it put a Prescott giveaway above the one real upgrade).
+  const cands = shortlist(ourRoster, fresh, (m) => h2hOf.get(m) ?? 0);
+  const picked = await io.pick(cands, ourRoster);
+  if (picked.error) {
+    logEvent("coach", "trade-pick-failed", `Could not judge ${cands.length} candidate offers; nothing sent`, { error: picked.error });
+    return { sent: null, considered: candidates.length, outcome: "nothing", reason: picked.why };
+  }
+  if (!picked.chosen) {
+    logEvent("coach", "trade-pick-none", `Judged ${cands.length} candidate offers and sent none: ${picked.why}`, {
+      candidates: cands.map((c) => c.proposal.why), why: picked.why,
+    });
+    return { sent: null, considered: candidates.length, outcome: "nothing", reason: `judged ${cands.length} and chose none: ${picked.why}` };
+  }
+  const best = picked.chosen.proposal;
+  logEvent("coach", "trade-pick", `Judged ${cands.length} candidate offers and chose ${best.why}: ${picked.why}`, {
+    candidates: cands.map((c) => c.proposal.why), chosen: best.why, why: picked.why,
+  });
+
+  if (state.dry) return { sent: best, considered: candidates.length, outcome: "dry", reason: `dry run, nothing sent; judged ${cands.length}, chose this one: ${picked.why}` };
 
   // The two-pass gate (T11). Keyed on ids so a namesake cannot satisfy it.
   const intents = state.intents ?? new IntentStore(`${STATE_DIR}/trade-intents.json`);

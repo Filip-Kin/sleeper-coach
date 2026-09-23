@@ -251,6 +251,7 @@ function proposerIo(over: Partial<ProposerIo> = {}): Partial<ProposerIo> {
     scheduleContext: async () => ({ remainingWeeks: 12, headToHeadRemaining: 2, upcomingWeeks: weeks }),
     proposeTrade: async () => ({ transactionId: "sent1", status: "proposed" }),
     pitch: async () => {},
+    pick: async (cands) => ({ chosen: cands[0] ?? null, why: "test picks the top candidate" }),
     ...over,
   };
 }
