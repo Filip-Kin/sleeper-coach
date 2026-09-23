@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Versioned pre-push hook. Install once per clone with `bun run setup-hooks`
+# (git config core.hooksPath scripts/hooks). The unversioned .git/hooks copy
+# this replaces only knew the worktree rule.
+#
+# Two rules, both learned the hard way:
+#
+# 1. A WORKTREE may not push main. On 30 Aug 2026 three spawned agents were
+#    each told not to push or merge to main and all three did, one merging the
+#    other two. main auto-deploys and restarts the live coach, so during a
+#    draft that is destructive. The primary checkout pushes main; nothing else.
+#
+# 2. A push that touches main must pass the whole gate: typecheck, every test
+#    suite, and the soak against staging (scripts/soak.sh). A green push is one
+#    the daemon has actually run under. The 2026-09-19 deploy passed its unit
+#    tests and cut three receivers off a live roster inside four minutes.
+#
+# Override: COACH_PUSH_OVERRIDE="<why>" skips the gate for one push and appends
+# {ts, sha, reason} to .git/pushes.jsonl. An empty reason is refused. This
+# cannot stop `git push --no-verify`; nothing client-side can. It stops the
+# reflex push, which is the one that has hurt.
+set -uo pipefail
+
+touches_main=0
+sha=""
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  case "${remote_ref}" in
+    refs/heads/main|refs/heads/master) touches_main=1; sha="${local_sha}" ;;
+  esac
+done
+[ "${touches_main}" = 1 ] || exit 0
+
+case "$(git rev-parse --git-dir)" in
+  *".git/worktrees/"*)
+    echo "pre-push: REFUSING to push main from a worktree." >&2
+    echo "  main auto-deploys and restarts the live containers, and this path skips review." >&2
+    echo "  Push your feature branch instead; the primary checkout merges." >&2
+    exit 1 ;;
+esac
+
+if [ "${COACH_PUSH_OVERRIDE+set}" = set ]; then
+  reason="${COACH_PUSH_OVERRIDE}"
+  if [ -z "$(printf '%s' "${reason}" | tr -d '[:space:]')" ]; then
+    echo "pre-push: COACH_PUSH_OVERRIDE is set but empty. Say why, or run the gate." >&2
+    exit 1
+  fi
+  ledger="$(git rev-parse --git-common-dir)/pushes.jsonl"
+  reason_json=$(printf '%s' "${reason}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf '{"ts":"%s","sha":"%s","reason":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${sha}" "${reason_json}" >> "${ledger}"
+  echo "pre-push: gate skipped by override (${reason}); recorded in ${ledger}" >&2
+  exit 0
+fi
+
+# The gate. COACH_HOOK_CHECKS (newline-separated commands) replaces the list
+# for the hook's own test; the default is the real thing.
+if [ -n "${COACH_HOOK_CHECKS:-}" ]; then
+  checks="${COACH_HOOK_CHECKS}"
+else
+  checks=$'bun run tsc --noEmit\nNODE_ENV=test bash scripts/run-tests.sh\nbash scripts/soak.sh'
+fi
+cd "$(git rev-parse --show-toplevel)" || exit 1
+while IFS= read -r cmd; do
+  [ -n "${cmd}" ] || continue
+  echo "pre-push: ${cmd}" >&2
+  if ! bash -c "${cmd}"; then
+    echo "pre-push: BLOCKED, '${cmd}' failed. Fix it, or COACH_PUSH_OVERRIDE=\"<why>\" git push." >&2
+    exit 1
+  fi
+done <<< "${checks}"
+echo "pre-push: gate passed for main @ ${sha:0:12}" >&2
+exit 0

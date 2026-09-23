@@ -28,16 +28,28 @@ for t in $FOUND; do
   else
     out=$(bun run "$t" 2>&1)
     line=$(printf '%s' "$out" | tail -1)
-    case "$line" in
-      *"0 failed"*|*"ALL PASS"*|*" pass"*) printf '  ok    %-38s %s\n' "$t" "$line" ;;
-      *) printf '  FAIL  %-38s %s\n' "$t" "$line"; printf '%s\n' "$out" | tail -20; fail=1 ;;
-    esac
+    # "19 passed, 2 failed" used to match the old *" pass"* pattern and print
+    # ok. Zero failures must be stated as such; any non-zero fail count fails.
+    if printf '%s' "$line" | grep -qE '(^|[^0-9])0 failed|ALL PASS'; then
+      printf '  ok    %-38s %s\n' "$t" "$line"
+    elif printf '%s' "$line" | grep -qE '[1-9][0-9]* fail'; then
+      printf '  FAIL  %-38s %s\n' "$t" "$line"; printf '%s\n' "$out" | tail -20; fail=1
+    elif printf '%s' "$line" | grep -qE ' pass' ; then
+      printf '  ok    %-38s %s\n' "$t" "$line"
+    else
+      printf '  FAIL  %-38s %s\n' "$t" "$line"; printf '%s\n' "$out" | tail -20; fail=1
+    fi
   fi
 done
 # The engine selftest is not named *.test.ts but is a real suite.
 out=$(bun run src/draft/selftest.ts 2>&1); line=$(printf '%s' "$out" | tail -1)
 case "$line" in *"ALL PASS"*) printf '  ok    %-38s %s\n' "src/draft/selftest.ts" "$line" ;;
   *) printf '  FAIL  src/draft/selftest.ts\n'; printf '%s\n' "$out" | tail -20; fail=1 ;; esac
+
+# The pre-push hook has a bash test of its own (real git pushes into a temp bare repo).
+out=$(bash scripts/hooks/pre-push.test.sh 2>&1); line=$(printf '%s' "$out" | tail -1)
+case "$line" in *" 0 failed"*) printf '  ok    %-38s %s\n' "scripts/hooks/pre-push.test.sh" "$line" ;;
+  *) printf '  FAIL  scripts/hooks/pre-push.test.sh\n'; printf '%s\n' "$out" | tail -20; fail=1 ;; esac
 
 echo
 [ "$fail" = 0 ] && echo "all suites pass ($(printf '%s\n' "$FOUND" | wc -l | tr -d ' ') test files + selftest)" || echo "SUITE FAILED"

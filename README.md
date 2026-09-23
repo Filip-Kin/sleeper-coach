@@ -5,6 +5,13 @@ It prepares for the draft, drafts live, sets weekly lineups, works the waiver
 wire, and evaluates and proposes trades. It runs on the NAS with scheduled
 wakeups for deadlines and a poller that wakes it when a trade offer arrives.
 
+## Deploying, freezing, rolling back
+
+See [DEPLOY.md](DEPLOY.md): Coolify deploys every push to main, the container
+boots frozen until its canary passes, `/health` reports the daemon heartbeat,
+and `bun run soak` runs the real daemon against the staging league. Install
+the push gate once per clone with `bun run setup-hooks`.
+
 ## The one hard constraint
 
 Sleeper's public REST API is **read-only**. There is no official way to set a
