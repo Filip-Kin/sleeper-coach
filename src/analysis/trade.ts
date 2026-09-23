@@ -35,6 +35,28 @@ function norm(n: string): string {
   return n.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
 }
 
+// #region identity
+/** The key a player is matched on everywhere in the trade engine. The Sleeper
+ *  id when the record carries one, the normalised name only for hand-built
+ *  fixtures that do not. Matching on names was how a give of one "Josh Allen"
+ *  removed both of them from the post-trade roster (audit 2026-09-23, T10). */
+export function playerKey(p: Pick<TradePlayer, "name" | "playerId">): string {
+  return p.playerId ? `id:${p.playerId}` : `name:${norm(p.name)}`;
+}
+export function samePlayer(a: Pick<TradePlayer, "name" | "playerId">, b: Pick<TradePlayer, "name" | "playerId">): boolean {
+  if (a.playerId && b.playerId) return a.playerId === b.playerId;
+  return norm(a.name) === norm(b.name);
+}
+/** The roster with these players removed, matched by id. */
+export function without(roster: TradePlayer[], gone: readonly TradePlayer[]): TradePlayer[] {
+  return roster.filter((p) => !gone.some((g) => samePlayer(g, p)));
+}
+/** The roster after a swap: gives out, receives in. */
+export function afterTrade(roster: TradePlayer[], offer: TradeOffer): TradePlayer[] {
+  return [...without(roster, offer.give), ...offer.receive];
+}
+// #endregion
+
 function eligible(slot: string, position: string): boolean {
   return slot === "FLEX" ? FLEX_ELIGIBLE.has(position) : slot === position;
 }
@@ -82,9 +104,12 @@ const REPLACEMENT_POINTS: Record<string, number> = {
 };
 
 export function bestLineup(roster: TradePlayer[], slots: readonly string[] = STARTING_SLOTS): LineupResult {
+  // A player on injured reserve cannot be started, so he is not in the pool
+  // whatever his season number says. Before 2026-09-23 he was, and a trade
+  // giving him away was priced as if it emptied a starting slot (T6).
   // Players best-first; ties are broken by original order, which is irrelevant
   // to the total.
-  const ranked = roster.map((p, i) => ({ p, i })).sort((a, b) => b.p.points - a.p.points);
+  const ranked = roster.filter((p) => !p.onIr).map((p, i) => ({ p, i })).sort((a, b) => b.p.points - a.p.points);
   const used = new Set<number>();
   const filled: (TradePlayer | null)[] = slots.map(() => null);
 
@@ -176,14 +201,19 @@ export function evaluateTrade(
   //    injured stash due back before the playoffs, not on the never-drop list,
   //    and actually present on the roster we read back. A rail block is fatal no
   //    matter how good the lineup maths looks; that is the whole point of rails.
+  //    The roster entry is found by id first, so a namesake cannot stand in
+  //    for the player actually leaving, and the IR rail reads the entry's own
+  //    onIr flag rather than whatever the offer object happened to carry.
   for (const g of offer.give) {
-    const v = canDrop(g.name, roster, cfg.rails);
+    const present = roster.find((p) => samePlayer(g, p));
+    if (!present) { railBlocks.push(`"${g.name}" is not on the roster as read back from Sleeper`); continue; }
+    if (present.onIr) { railBlocks.push(`"${present.name}" is on injured reserve; a stash is not cut or traded away automatically`); continue; }
+    const v = canDrop(present.name, roster, cfg.rails);
     if (!v.allowed) railBlocks.push(v.reason);
   }
 
   // 2. Lineup impact. Build the post-trade roster and compare best lineups.
-  const giveNames = new Set(offer.give.map((g) => norm(g.name)));
-  const postRoster = roster.filter((p) => !giveNames.has(norm(p.name))).concat(offer.receive);
+  const postRoster = afterTrade(roster, offer);
 
   const beforeLineup = bestLineup(roster);
   const afterLineup = bestLineup(postRoster);
@@ -195,17 +225,17 @@ export function evaluateTrade(
   //    that makes trades counter-intuitive (an eighth WR adding nothing, a
   //    second TE adding a lot). Name which received players actually start and
   //    which surrendered players were starters we are giving up.
-  const startsAfter = new Set(afterLineup.starters.map((s) => s.player && norm(s.player.name)).filter(Boolean) as string[]);
-  const startsBefore = new Set(beforeLineup.starters.map((s) => s.player && norm(s.player.name)).filter(Boolean) as string[]);
+  const startsAfter = new Set(afterLineup.starters.flatMap((s) => (s.player ? [playerKey(s.player)] : [])));
+  const startsBefore = new Set(beforeLineup.starters.flatMap((s) => (s.player ? [playerKey(s.player)] : [])));
   for (const r of offer.receive) {
     reasons.push(
-      startsAfter.has(norm(r.name))
+      startsAfter.has(playerKey(r))
         ? `${r.name} (${r.position}) cracks our starting lineup`
         : `${r.name} (${r.position}) does not improve our lineup (we are already deep at ${r.position})`,
     );
   }
   for (const g of offer.give) {
-    if (startsBefore.has(norm(g.name))) reasons.push(`we give up ${g.name} (${g.position}), currently a starter`);
+    if (startsBefore.has(playerKey(g))) reasons.push(`we give up ${g.name} (${g.position}), currently a starter`);
   }
   reasons.push(`starting-lineup projection ${before} -> ${after} (${lineupDelta >= 0 ? "+" : ""}${lineupDelta})`);
 

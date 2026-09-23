@@ -33,7 +33,8 @@ import { sendAlert } from "../alert.ts";
 import { config } from "../config.ts";
 import { buildRosterView } from "../analysis/roster-view.ts";
 
-const KICKOFF_CACHE = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-kickoffs.json`;
+import { KICKOFF_CACHE } from "../paths.ts";
+import { FailureLedger, classifyLineupRefusal } from "./failure-ledger.ts";
 
 // #region pure
 export interface LineupSwap { slot: string; out: string; in: string; why: string }
@@ -53,9 +54,16 @@ function canonical(ids: string[], slots: string[]): string {
   return [...groups.entries()].sort().map(([slot, v]) => `${slot}:${v.sort().join(",")}`).join("|");
 }
 
-/** Decide the lineup we want, given what is on the site now. Pure. */
+/** Decide the lineup we want, given what is on the site now. Pure.
+ *
+ *  An occupant who is not among the candidates (not on the active roster:
+ *  dropped, traded away, or parked on IR while still listed) is a phantom, and
+ *  a phantom is an empty slot. He is replaced when a body exists and written
+ *  empty when none does, because Sleeper is already scoring the slot as empty. */
 export function planLineup(current: string[], candidates: LineupPlayer[], slots: string[], locked: Set<string>): LineupPlan {
-  const cur = slots.map((_, i) => current[i] || "0");
+  const active = new Set(candidates.map((p) => p.playerId));
+  const site = slots.map((_, i) => current[i] || "0");
+  const cur = site.map((pid) => (pid !== "0" && !active.has(pid) ? "0" : pid));
   // 1. Locked starters stay where they are; locked bench players cannot come in.
   const pinned = cur.map((pid) => (pid !== "0" && locked.has(pid) ? pid : null));
   const pinnedSet = new Set(pinned.filter((p): p is string => p !== null));
@@ -80,17 +88,18 @@ export function planLineup(current: string[], candidates: LineupPlayer[], slots:
     ids[slotI] = occupant !== "0" && !ids.some((v, j) => j !== slotI && v === occupant) ? occupant : "0";
   });
 
-  // 3. Same lineup up to like-slot permutation means no write.
-  if (canonical(ids, slots) === canonical(cur, slots)) return { ids: cur, changed: false, unfilled, swaps: [] };
+  // 3. Same lineup up to like-slot permutation means no write. The comparison
+  //    is against what the SITE has, so a phantom occupant is itself a change.
+  if (canonical(ids, slots) === canonical(site, slots)) return { ids: site, changed: false, unfilled, swaps: [] };
   if (ids.some((v, i) => v === "0" && cur[i] !== "0")) {
-    // Refuse to empty a slot the site has filled; the scheduled lock alerts a human.
-    return { ids: cur, changed: false, unfilled, swaps: [] };
+    // Refuse to empty a slot an active player fills; the scheduled lock alerts a human.
+    return { ids: site, changed: false, unfilled, swaps: [] };
   }
 
   const byId = new Map(candidates.map((p) => [p.playerId, p]));
   const why = new Map(solved.excluded.map((e) => [e.player.playerId, e.reason]));
-  const outs = cur.filter((id) => id !== "0" && !ids.includes(id));
-  const ins = ids.filter((id) => id !== "0" && !cur.includes(id));
+  const outs = site.filter((id) => id !== "0" && !ids.includes(id));
+  const ins = ids.filter((id) => id !== "0" && !site.includes(id));
   const swaps: LineupSwap[] = [];
   const label = (id: string) => {
     const p = byId.get(id);
@@ -99,8 +108,8 @@ export function planLineup(current: string[], candidates: LineupPlayer[], slots:
   for (let k = 0; k < Math.max(outs.length, ins.length); k++) {
     const out = outs[k] ?? "";
     const inn = ins[k] ?? "";
-    const slot = slots[ids.indexOf(inn)] ?? slots[cur.indexOf(out)] ?? "";
-    const reason = out ? why.get(out) ?? "outscored" : "open slot";
+    const slot = slots[ids.indexOf(inn)] ?? slots[site.indexOf(out)] ?? "";
+    const reason = out ? why.get(out) ?? (active.has(out) ? "outscored" : "not on the active roster") : "open slot";
     swaps.push({ slot, out: out ? label(out) : "(empty)", in: inn ? label(inn) : "(empty)", why: reason });
   }
   return { ids, changed: true, unfilled, swaps };
@@ -178,17 +187,32 @@ async function leagueShape(): Promise<{ slots: string[]; scoring: ScoringSetting
   return leagueCache;
 }
 
-// A plan that failed to write is not retried every 90 s; and a dead token or a
-// freeze is said once an hour, not forty times.
-let lastFailure: { key: string; at: number } | null = null;
+// A plan that failed to write backs off per distinct plan (15 min doubling to
+// an hour) and alerts once a day per plan; a dead token or a freeze is said
+// once an hour, not forty times. A refusal naming a locked player pins him for
+// the rest of the day so the same plan is not offered again.
+const failures = new FailureLedger();
 let lastHeldNotice = 0;
-const RETRY_MS = 15 * 60_000;
 const NOTICE_MS = 60 * 60_000;
+const PIN_MS = 24 * 60 * 60_000;
+const pinned = new Map<string, number>();
+let emptyProjectionLogged = 0;
 
 export interface GuardDeps {
   /** Can a write go out right now? The daemon answers from its token check. */
   tokenReady: () => Promise<boolean>;
   now?: number;
+  /** Sleeper refused the lineup because a reserve player is no longer eligible:
+   *  the daemon runs the reserve reconciler now rather than at its next poll. */
+  onReserveIneligible?: () => Promise<void>;
+}
+
+/** Tests only: forget every backoff and pin. */
+export function resetGuardStateForTests(): void {
+  if (process.env.NODE_ENV !== "test") throw new Error("resetGuardStateForTests is for tests only");
+  pinned.clear();
+  lastHeldNotice = 0;
+  emptyProjectionLogged = 0;
 }
 
 /** One pass. Returns the plan (changed or not), or null when out of season. */
@@ -214,14 +238,28 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   // failed to bite because an IR player is usually also flagged Out, which the
   // solver benches for its own reasons. A player who clears his designation
   // while still parked on IR would have walked straight into the lineup.
+  // No projection table means no basis for a decision: the endpoint has not
+  // published the week yet, or the fetch failed. Solving on zeros would bench
+  // everyone for nobody. Skip, and say so once an hour.
+  if (weekProj.length === 0) {
+    if (now - emptyProjectionLogged > NOTICE_MS) {
+      emptyProjectionLogged = now;
+      console.log(`[lineup-guard] week ${week} projection table is empty; skipping`);
+    }
+    return null;
+  }
   const candidates = buildRosterWeek([...buildRosterView(mine).activeIds], overlayRosterStatus(dump, mine), byPlayerId(weekProj), week);
   const locked = lockedPlayerIds(candidates, kickoffs, now);
+  for (const [id, until] of pinned) {
+    if (until > now) locked.add(id);
+    else pinned.delete(id);
+  }
   const plan = planLineup(mine.starters ?? [], candidates, slots, locked);
   if (!plan.changed) return plan;
 
   const key = plan.ids.join(",");
   const summary = plan.swaps.map((s) => `${s.slot}: ${s.out} -> ${s.in} (${s.why})`).join("; ");
-  if (lastFailure && lastFailure.key === key && now - lastFailure.at < RETRY_MS) return plan;
+  if (!failures.shouldAttempt(key, now)) return plan;
 
   const froze = freezeState();
   if (froze.frozen) {
@@ -246,13 +284,25 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     if (back.join(",") !== key) throw new Error(`read-back mismatch: site has ${back.join(",")}`);
     console.log(`[lineup-guard] week ${week} lineup changed: ${summary}`);
     logEvent("coach", "lineup-auto", `Week ${week} lineup changed between locks: ${summary}`, { week, ids: plan.ids, swaps: plan.swaps });
-    lastFailure = null;
+    failures.clear(key);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    lastFailure = { key, at: now };
-    console.error(`[lineup-guard] write failed: ${msg}`);
-    logEvent("coach", "lineup-auto-failed", `Week ${week} lineup change failed: ${msg}`, { week, ids: plan.ids, swaps: plan.swaps });
-    await sendAlert("Lineup guard write failed", `${summary}\n${msg}`).catch(() => {});
+    const verdict = failures.recordFailure(key, now);
+    const why = classifyLineupRefusal(msg);
+    console.error(`[lineup-guard] write failed (${why.kind}, retry in ${Math.round(verdict.retryInMs / 60_000)} min): ${msg}`);
+    logEvent("coach", "lineup-auto-failed", `Week ${week} lineup change failed: ${msg}`, { week, ids: plan.ids, swaps: plan.swaps, kind: why.kind, attempt: verdict.count });
+    if (why.kind === "reserve-ineligible" && deps.onReserveIneligible) {
+      // The cause is a healed player still on IR. Fix that now; the next poll
+      // re-plans against a legal roster.
+      await deps.onReserveIneligible().catch((e) => console.error(`[lineup-guard] reserve fix failed: ${e instanceof Error ? e.message : String(e)}`));
+    } else if (why.kind === "locked") {
+      // Pin whoever Sleeper named; with no id, pin every player this plan
+      // moves out, since one of them is the locked one.
+      const ids = why.playerId ? [why.playerId] : (mine.starters ?? []).filter((id) => id !== "0" && !plan.ids.includes(id));
+      for (const id of ids) pinned.set(id, now + PIN_MS);
+      if (ids.length) console.log(`[lineup-guard] pinned ${ids.join(", ")} until the lock lifts`);
+    }
+    if (verdict.alert) await sendAlert("Lineup guard write failed", `${summary}\n${msg}`).catch(() => {});
   }
   return plan;
 }

@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, beforeEach } from "bun:test";
+import { rmSync } from "node:fs";
+import { resetLedgerForTests } from "./drop-ledger.ts";
+import { DB_PATH, FREEZE_FILE } from "../paths.ts";
 import { addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, type Gql } from "./api.ts";
 
 // A defense's player id is its team code. Every write helper used to run the
@@ -9,6 +12,9 @@ function recorder(reply: Record<string, unknown>): { gql: Gql; sent: string[] } 
   const gql: Gql = async (q) => { sent.push(q); return { data: reply }; };
   return { gql, sent };
 }
+
+// The drop breaker is inside every write now; give each case a clean ledger.
+beforeEach(() => { resetLedgerForTests(); for (const f of [DB_PATH, FREEZE_FILE]) { try { rmSync(f); } catch { /* fresh */ } } });
 
 describe("write helpers accept a team-code player id", () => {
   test("addFreeAgent sends SEA", async () => {

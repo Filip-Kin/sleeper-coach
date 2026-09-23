@@ -83,7 +83,7 @@ async function main(): Promise<void> {
   // Membership only: which players are on our roster. This reads the rosters API
   // `players` array, which is safe - the stale-cache problem was specifically
   // the `starters` array, and the write is verified by a GraphQL read-back regardless.
-  const rosters = await sleeper.rosters(leagueId);
+  const rosters = await leagueRosters(leagueId);
   const mine = rosters.find((r) => r.roster_id === rosterId);
   if (!mine || !mine.players?.length) {
     throw new Error(`no roster ${rosterId} in league ${leagueId}, or it is empty`);

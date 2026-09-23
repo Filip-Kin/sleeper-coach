@@ -17,8 +17,8 @@ import { existsSync } from "node:fs";
 // 2026-09-19 a real freeze on the production volume made four draft write tests
 // fail inside the container, because they read the live kill-switch file. Tests
 // must never depend on production state, in either direction.
-export const FREEZE_FILE = process.env.COACH_FREEZE_FILE
-  ?? (process.env.NODE_ENV === "test" ? "/tmp/sleeper-coach-test/FREEZE" : "/data/sleeper-coach/FREEZE");
+import { FREEZE_FILE } from "./paths.ts";
+export { FREEZE_FILE };
 
 // Also honour an env freeze, for a dev/staging process that should never write.
 function envFrozen(): boolean {

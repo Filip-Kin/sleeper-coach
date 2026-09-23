@@ -16,8 +16,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const STATE_DIR = process.env.STATE_DIR ?? "/data/sleeper-coach";
-export const TOKEN_FILE = `${STATE_DIR}/sleeper-token`;
+import { STATE_DIR, TOKEN_FILE } from "../paths.ts";
+export { STATE_DIR, TOKEN_FILE };
 
 /** The refresh procedure, word for word what the alert says. README, "The
  *  Sleeper token", walks through the same steps. */

@@ -401,7 +401,7 @@ async function buildWeekView(week: number, currentWeek: number): Promise<WeekVie
   // when a row is missing (a future week Sleeper has not populated yet), so a
   // future matchup still shows a real lineup rather than an empty grid.
   const buildSide = (roster: Roster, row: MatchupRow | null): SideView => {
-    const ids = [...buildRosterView(roster).activeIds]; // IR players are not lineup material
+    const ids = [...buildRosterView(roster, { allowRest: true }).activeIds]; // IR players are not lineup material
     const week1 = buildRosterWeek(ids, players, projIndex, week);
     const byId = new Map(week1.map((p) => [p.playerId, p]));
 
@@ -532,7 +532,7 @@ function buildLineupCall(
   week: number,
   phase: MatchupPhase,
 ): LineupCall {
-  const candidates = buildRosterWeek([...buildRosterView(roster).activeIds], players, projIndex, week);
+  const candidates = buildRosterWeek([...buildRosterView(roster, { allowRest: true }).activeIds], players, projIndex, week);
   const solved = solveLineup(candidates, slots);
 
   const currentIds = (row?.starters ?? roster.starters ?? []).slice();
@@ -615,7 +615,7 @@ async function buildByeTrouble(
   currentWeek: number,
   selectedWeek: number,
 ): Promise<ByeTrouble> {
-  const ids = [...buildRosterView(roster).activeIds]; // bye trouble is about who could otherwise start
+  const ids = [...buildRosterView(roster, { allowRest: true }).activeIds]; // bye trouble is about who could otherwise start
   const rows = ids.map((id) => {
     const d = players[id];
     const isDef = !d && /^[A-Z]{2,4}$/.test(id);
@@ -878,7 +878,7 @@ async function buildIntent(week: number): Promise<IntentView> {
     };
   };
 
-  const ourView = buildRosterView(ourRoster);
+  const ourView = buildRosterView(ourRoster, { allowRest: true });
   const ourTradeRoster = ourView.owned.map((e) => ({ ...toTradePlayer(e.playerId), playerId: e.playerId, onIr: e.onIr }));
 
   // #region pending trades
@@ -907,7 +907,7 @@ async function buildIntent(week: number): Promise<IntentView> {
         const partnerRosterId = (t.roster_ids ?? []).find((rid) => rid !== config.rosterId) ?? null;
         const partnerRoster = partnerRosterId != null ? rosters.find((r) => r.roster_id === partnerRosterId) : undefined;
         const theirRoster = partnerRoster
-          ? buildRosterView(partnerRoster).owned.map((e) => ({ ...toTradePlayer(e.playerId), playerId: e.playerId, onIr: e.onIr }))
+          ? buildRosterView(partnerRoster, { allowRest: true }).owned.map((e) => ({ ...toTradePlayer(e.playerId), playerId: e.playerId, onIr: e.onIr }))
           : [];
 
         const receive = receiveIds.map(toTradePlayer);

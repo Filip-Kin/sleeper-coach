@@ -90,19 +90,24 @@ describe("6. depth cover: a man on IR covers nobody this week", () => {
     const healthy = [...base, P("RB3", "RB", 160, false)];
     expect(depthInsurance(healthy, DEFAULT_FAIRNESS)).toBeGreaterThan(depthInsurance(base, DEFAULT_FAIRNESS));
   });
-  test("and giving away the IR player still costs his season value", () => {
+  test("and giving away the IR player is refused by the rail, not priced by the lineup", () => {
+    // Since the 2026-09-23 audit (T6) a man on IR is out of every lineup
+    // total, so his season number cannot be what stops a trade; the rail is.
     const stash = P("Stash", "WR", 200, true);
     const offer = { receive: [P("Meh", "WR", 60)], give: [stash] };
-    const withHim = evaluateTradeTwoSided(offer, [...base, stash], base, DEFAULT_FAIRNESS).ourGain;
-    const without = evaluateTradeTwoSided(offer, base, base, DEFAULT_FAIRNESS).ourGain;
-    expect(withHim).toBeLessThan(without);
+    const ev = evaluateTradeTwoSided(offer, [...base, stash], base, DEFAULT_FAIRNESS);
+    expect(ev.verdict).toBe("reject");
+    expect(ev.railBlocks.join(" ")).toMatch(/injured reserve/);
   });
 });
 
-describe("7. the stale read: a REST-shaped roster degrades, never throws", () => {
-  test("reserve null and no player_map means everyone is active", () => {
-    const rest: Roster = { roster_id: 3, owner_id: "u", players: ["1", "SEA"], starters: ["1", "SEA"], reserve: null, keepers: null, settings: { wins: 0, losses: 0, ties: 0, fpts: 0, fpts_decimal: 0 } };
-    const v = buildRosterView(rest);
+describe("7. the stale read: a REST-shaped roster is refused for decisions", () => {
+  const rest: Roster = { roster_id: 3, owner_id: "u", players: ["1", "SEA"], starters: ["1", "SEA"], reserve: null, keepers: null, settings: { wins: 0, losses: 0, ties: 0, fpts: 0, fpts_decimal: 0 } };
+  test("no player_map throws: IR cannot be told from active", () => {
+    expect(() => buildRosterView(rest)).toThrow(/player_map/);
+  });
+  test("display code may opt in to the degrade", () => {
+    const v = buildRosterView(rest, { allowRest: true });
     expect(v.active.length).toBe(2);
     expect(v.reserve.length).toBe(0);
     expect(v.owned.find((e) => e.playerId === "SEA")?.position).toBe("DEF");

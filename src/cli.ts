@@ -152,28 +152,38 @@ async function cmdRoster(): Promise<void> {
   if (!(r.players ?? []).length) console.log("  (empty — pre-draft, keepers not designated yet)");
 }
 
-// The deterministic trade verdict for a pending offer, from the pure engine
-// over live data. Read-only: it evaluates and prints, it never accepts, rejects
-// or sends anything. This is the "surface for a human" view and the same verdict
-// the daemon's agent should defer to rather than reasoning a trade through by
-// feel. Value is starting-lineup impact, not the sum of player values.
+// The deterministic trade verdict for a pending offer, from the SAME engine
+// the daemon decides with (evaluateLiveOffer: two-sided, bye-aware, schedule
+// diluted, legality checked). Read-only: it evaluates and prints, it never
+// accepts, rejects or sends anything. The old one-sided evaluator this used
+// to call (trade-live.ts) could disagree with the daemon and was deleted (T15).
+// Proposed trades only exist in the GraphQL feed, so this needs the session
+// token like the daemon does; it still only reads.
 async function cmdTradeEval(): Promise<void> {
   const txid = args[0];
   if (!txid) {
     console.log("usage: coach trade-eval <transaction_id>");
     process.exit(1);
   }
-  const { findTransaction, evaluateTransactionForUs } = await import("./analysis/trade-live.ts");
-  const tx = await findTransaction(txid);
+  const { tokenGql } = await import("./league/api.ts");
+  const { findTransaction, evaluateLiveOffer, offerFromTransaction } = await import("./analysis/trade-wire.ts");
+  const gql = tokenGql();
+  const week = Math.max(1, (await sleeper.nflState()).week ?? 1);
+  const tx = await findTransaction(gql, week, txid);
   if (!tx) {
-    console.log(`No transaction ${txid} found in the recent transactions for league ${config.leagueId}.`);
+    console.log(`No proposed trade ${txid} in legs ${week} or ${week - 1} of league ${config.leagueId}.`);
     process.exit(2);
   }
-  const { evaluation, summary } = await evaluateTransactionForUs(tx);
-  console.log(`\n${summary}\n`);
-  console.log(`  verdict:      ${evaluation.verdict.toUpperCase()}`);
-  console.log(`  lineup delta: ${evaluation.lineupDelta >= 0 ? "+" : ""}${evaluation.lineupDelta} (${evaluation.before} -> ${evaluation.after})`);
-  if (evaluation.railBlocks.length) console.log(`  rail blocks:  ${evaluation.railBlocks.join("; ")}`);
+  const { evaluation, theirRosterId, isMultiParty, snap } = await evaluateLiveOffer({ adds: tx.adds, drops: tx.drops, roster_ids: tx.rosterIds });
+  const { offer } = offerFromTransaction({ adds: tx.adds, drops: tx.drops, roster_ids: tx.rosterIds }, snap);
+  const fmt = (ps: { name: string; position: string; points: number; onIr?: boolean }[]) =>
+    ps.length ? ps.map((p) => `${p.name} (${p.position} ${Math.round(p.points)}${p.onIr ? ", IR" : ""})`).join(", ") : "nothing";
+  console.log(`\nTrade ${txid} with roster ${theirRosterId}${isMultiParty ? " (multi-party)" : ""}: we receive ${fmt(offer.receive)}; we give ${fmt(offer.give)}.`);
+  console.log(`  verdict:  ${evaluation.verdict.toUpperCase()}`);
+  console.log(`  ours:     ${evaluation.ourGain >= 0 ? "+" : ""}${evaluation.ourGain} season points   theirs: ${evaluation.theirGain >= 0 ? "+" : ""}${evaluation.theirGain}`);
+  console.log(`  net:      ${evaluation.netValue} against ${evaluation.requiredEdge} needed`);
+  if (evaluation.railBlocks.length) console.log(`  rails:    ${evaluation.railBlocks.join("; ")}`);
+  if (evaluation.fairnessBlocks.length) console.log(`  blocks:   ${evaluation.fairnessBlocks.join("; ")}`);
   console.log("  reasoning:");
   for (const r of evaluation.reasons) console.log(`    - ${r}`);
 }

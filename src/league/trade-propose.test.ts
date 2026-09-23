@@ -44,16 +44,19 @@ test("the outstanding-offer cap is small enough not to look like spam", () => {
   expect(MAX_OPEN_OFFERS).toBeLessThanOrEqual(2);
 });
 
-test("the pitch leads with THEIR gain, which is the reason to say yes", () => {
+test("the pitch gives THEIR positional reason and never our number", () => {
   const p = {
     managerId: "2", teamName: "roster 2",
     offer: { receive: [{ name: "Bijan Robinson", position: "RB", points: 0 }], give: [{ name: "Rome Odunze", position: "WR", points: 0 }] },
-    ourGain: 8.2, theirGain: 5.4, edge: 0, byeRelief: 0, score: 8.2, why: "",
+    ourGain: 8.2, theirGain: 5.4, edge: 0, byeRelief: 0, score: 5.4, why: "",
+    theirReason: "your WR slot is 60 behind Rome Odunze; he starts for you",
   };
   const t = pitchText(p as never);
-  expect(t).toContain("+5.4 to your starting lineup");
+  expect(t).toContain("Your WR slot is 60 behind Rome Odunze; he starts for you");
   expect(t).toContain("Rome Odunze");
   expect(t).toContain("Bijan Robinson");
+  expect(t).not.toContain("8.2");
+  expect(t).not.toContain("5.4");
   expect(t).toContain("No hard feelings");
 });
 
@@ -63,30 +66,39 @@ test("the brief renders our outbound offers so the coach cannot deny one", async
     surplus: [], thin: [], askFor: [], deals: [], lastOffer: null,
     pendingFromUs: [{ give: ["Parker Washington"], get: ["Mark Andrews"] }],
   });
-  expect(text).toContain("I give Parker Washington, I get Mark Andrews");
+  expect(text).toContain("you give Parker Washington, you get Mark Andrews");
   expect(text).toContain("Never deny an offer you have made");
 });
 
 // --- counters -----------------------------------------------------------------
 import { pickCounter, recordProposal } from "./trade-propose.ts";
-import { evaluateTradeTwoSided, DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
+import { evaluateTradeTwoSided, outboundConfig, DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
 import { asksForCounter } from "./dm-watch.ts";
 import { tradeReplyText } from "./trade-watch.ts";
 
-const PP = (name: string, position: string, points: number, depth = 1) => ({ name, position, points, depthChartOrder: depth });
-// WR-rich with a hole at RB2; they are RB-rich and WR-poor. A 2-for-1 exists.
-const OURS = [PP("QB1","QB",300), PP("RB1","RB",280), PP("RBbad","RB",60,3), PP("WRa","WR",250), PP("WRb","WR",245), PP("WRc","WR",240),
+const PP = (name: string, position: string, points: number, depth = 1) => ({ name, position, points, depthChartOrder: depth, playerId: name });
+// WR-rich with a soft RB2; they are RB-rich and a little thin at WR. The gaps
+// are moderate on purpose: since the 2026-09-23 objective (T13) a counter has
+// to help them a REAL but bounded amount (1.5 points per remaining week), so
+// the old fixture, which handed them +160, produces nothing at all now.
+const OURS = [PP("QB1","QB",300), PP("RB1","RB",280), PP("RBbad","RB",190,2), PP("WRa","WR",250), PP("WRb","WR",245), PP("WRc","WR",240),
   PP("WRd","WR",235), PP("WRe","WR",230), PP("TE1","TE",190), PP("K1","K",44), PP("DEF1","DEF",10)];
-const THEIRS = [PP("tQB","QB",290), PP("tRB1","RB",270), PP("tRB2","RB",265), PP("tRB3","RB",260), PP("tRB4","RB",200), PP("tWRa","WR",90), PP("tWRb","WR",80), PP("tWRc","WR",70),
+const THEIRS = [PP("tQB","QB",290), PP("tRB1","RB",270), PP("tRB2","RB",265), PP("tRB3","RB",210), PP("tRB4","RB",200), PP("tWRa","WR",222), PP("tWRb","WR",215), PP("tWRc","WR",70),
   PP("tTE","TE",185), PP("tK","K",42), PP("tDEF","DEF",8)];
 const RIVAL = { managerId: "2", teamName: "them", roster: THEIRS };
 
-test("THE INVARIANT: any counter it picks would be accepted if it came straight back", () => {
+test("THE INVARIANT: any counter it picks clears the acceptor's bar as applied to an outbound offer", () => {
+  // Outbound differs from inbound in exactly one number: the ceiling on their
+  // gain is 1.5 points per remaining week rather than the flat 15 (T13), so a
+  // counter can hand them up to 22.5 at 15 weeks. Every other rail and floor
+  // is the same one that decides an incoming offer.
   const c = pickCounter(OURS as never, RIVAL as never, DEFAULT_FAIRNESS, db(), 1_700_000_000_000);
   expect(c).not.toBeNull();
-  const back = evaluateTradeTwoSided(c!.offer, OURS as never, THEIRS as never, DEFAULT_FAIRNESS);
+  const back = evaluateTradeTwoSided(c!.offer, OURS as never, THEIRS as never, outboundConfig(DEFAULT_FAIRNESS));
   expect(back.verdict).toBe("accept");
   expect(c!.theirGain).toBeGreaterThan(0);
+  expect(c!.theirGain).toBeLessThanOrEqual(1.5 * DEFAULT_FAIRNESS.remainingWeeks);
+  expect(c!.ourGain / c!.theirGain).toBeLessThanOrEqual(2);
 });
 
 test("no counter when nothing clears the bar", () => {

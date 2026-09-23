@@ -14,6 +14,7 @@
 // with per-game locks rather than one weekly deadline.
 
 import { config } from "../config.ts";
+import { STATE_DIR, KICKOFF_CACHE } from "../paths.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
@@ -163,7 +164,7 @@ async function main(): Promise<void> {
   // are deliberately not alerted (the next poll retries, and we are never blank),
   // but a game kicking off having NEVER been finalised is a real degradation and
   // has to be noticed.
-  const FINALISED = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-finalised.json`;
+  const FINALISED = `${STATE_DIR}/pickem-finalised.json`;
   let finalised: Record<string, number> = {};
   try {
     const f = Bun.file(FINALISED);
@@ -210,7 +211,7 @@ async function main(): Promise<void> {
   // times instead of a fixed timetable. Sourced from Sleeper here rather than a
   // third party, so the trigger has no outside dependency, and refreshed on
   // every run, which also picks up flex scheduling.
-  const KICKOFF_CACHE = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-kickoffs.json`;
+
   await Bun.write(KICKOFF_CACHE, JSON.stringify({
     week, updatedAt: Date.now(),
     games: games.map((g) => ({ gameId: g.gameId, startTime: g.startTime, label: `${g.away}@${g.home}` })),

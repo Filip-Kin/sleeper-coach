@@ -41,6 +41,8 @@ export interface LeagueSettings {
   // Our league: OUT and SUS yes, NA/DNR/DOUBTFUL no. These decide IR-eligibility,
   // so a fixed status set is wrong; read the flags.
   reserve_allow_out?: number;
+  waiver_clear_days?: number;
+  waiver_day_of_week?: number;
   reserve_allow_doubtful?: number;
   reserve_allow_sus?: number;
   reserve_allow_cov?: number;

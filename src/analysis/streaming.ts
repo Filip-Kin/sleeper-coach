@@ -66,19 +66,27 @@ export function streamNeeds(
 export interface StreamPick {
   need: StreamNeed;
   add: string;      // best available player at the needed position
-  points: number;
+  points: number;   // his projection for the need week
 }
 
-/** The best available body for a need. Plain "most projected points at that
- *  position": for a one-week fill there is nothing cleverer to do without live
- *  matchup data, and at kicker/defense the spread between startable options is
- *  small anyway. */
-export function pickStreamer(
-  need: StreamNeed, available: { name: string; position: string; points: number }[],
-): StreamPick | null {
+/** A streaming candidate carries the NEED WEEK's projection and his bye. A
+ *  rest-of-season number is the wrong currency for a one-week fill: on
+ *  2026-09-22 it ranked a kicker on his own bye at the top of the list. */
+export interface StreamCandidate {
+  name: string;
+  position: string;
+  weekPoints: number;
+  bye?: number | null;
+}
+
+/** The best available body for a need: most projected points in THAT week at
+ *  that position, never a player who is himself on bye then, never one with no
+ *  game. At kicker/defense the spread between startable options is small, so
+ *  nothing cleverer is needed without live matchup data. */
+export function pickStreamer(need: StreamNeed, available: StreamCandidate[]): StreamPick | null {
   const best = available
-    .filter((p) => p.position === need.position)
-    .sort((a, b) => b.points - a.points)[0];
+    .filter((p) => p.position === need.position && p.bye !== need.week && p.weekPoints > 0)
+    .sort((a, b) => b.weekPoints - a.weekPoints)[0];
   if (!best) return null;
-  return { need, add: best.name, points: best.points };
+  return { need, add: best.name, points: best.weekPoints };
 }

@@ -31,6 +31,29 @@ if [ ! -x "${HOME}/.local/bin/claude" ]; then
     curl -fsSL https://claude.ai/install.sh | bash || echo "[entrypoint] claude install failed; check on next start"
 fi
 export PATH="${HOME}/.local/bin:${PATH}"
+# Keep the CLI current: the DM bot asks for claude-opus-5-5, which needs 2.1.280+.
+# Best effort with a short timeout; a failure here must never stop the boot.
+timeout 120 "${HOME}/.local/bin/claude" update >/dev/null 2>&1 || echo "[entrypoint] claude update skipped"
+
+# Boot frozen. Every container start writes `boot-canary <sha>` into the
+# kill-switch file, and the daemon removes it only once its read-only canary
+# (src/soak/canary.ts) has passed: token usable, right league, roster legal,
+# scores non-zero, schedule readable, log writable. A deploy that cannot see
+# its own world therefore stays frozen and alerts rather than acting on it.
+#
+# A FREEZE with any other content is a human's or an auto-freeze and is left
+# exactly as it is: the daemon never lifts those. See DEPLOY.md, "Freeze and
+# canary".
+FREEZE_FILE="${COACH_FREEZE_FILE:-${COACH_STATE:-/data/sleeper-coach}/FREEZE}"
+COACH_SHA="${COACH_SHA:-${SOURCE_COMMIT:-unknown}}"
+export COACH_SHA
+if [ -e "${FREEZE_FILE}" ] && ! grep -q '^boot-canary' "${FREEZE_FILE}"; then
+    echo "[entrypoint] existing freeze kept: $(head -c 200 "${FREEZE_FILE}")"
+else
+    mkdir -p "$(dirname "${FREEZE_FILE}")"
+    printf 'boot-canary %s\n' "${COACH_SHA}" > "${FREEZE_FILE}"
+    echo "[entrypoint] frozen until the boot canary passes (sha ${COACH_SHA})"
+fi
 
 # Web dashboard in the background; daemon in foreground.
 if [ -f /app/src/web/server.ts ]; then

@@ -14,6 +14,7 @@ import { readGuidanceState, setGuidance } from "./guidance.ts";
 import { draftView } from "./draftview.ts";
 import { seasonWeek, seasonIntent } from "./seasonview.ts";
 import { statSync, openSync, readSync, closeSync } from "node:fs";
+import { heartbeatAgeMs, healthVerdict } from "../heartbeat.ts";
 
 const ACTIVITY_LOG = process.env.ACTIVITY_LOG ?? "/data/sleeper-coach/activity.jsonl";
 const REASONING_LOG = process.env.REASONING_LOG ?? "/data/sleeper-coach/reasoning.jsonl";
@@ -36,7 +37,7 @@ async function stateJson(): Promise<Response> {
   const ranked = rankByVor(projections, league).slice(0, 60);
 
   const me = rosters.find((r) => r.roster_id === config.rosterId);
-  const myView = me ? buildRosterView(me) : null;
+  const myView = me ? buildRosterView(me, { allowRest: true }) : null;
   const myPlayers = (myView?.owned ?? []).map((e) => {
     const p = players[e.playerId];
     return { id: e.playerId, name: p ? (p.full_name ?? `${p.first_name} ${p.last_name}`) : e.name, pos: e.position, team: e.team ?? "?", injury: e.injuryStatus, onIr: e.onIr };
@@ -148,6 +149,13 @@ Bun.serve({
   idleTimeout: 0,
   async fetch(req) {
     const url = new URL(req.url);
+    // Liveness for an external monitor: 200 while the daemon's heartbeat file
+    // is fresh, 503 with the age once the poll loop has stopped. No auth, no
+    // league data, so it is safe to expose past Authelia. See heartbeat.ts.
+    if (url.pathname === "/health") {
+      const v = healthVerdict(heartbeatAgeMs());
+      return new Response(v.body, { status: v.status, headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" } });
+    }
     // Public (no-auth at nginx) blog surface: the reader-facing retrospectives.
     if (url.pathname === "/api/blog") return Response.json({ posts: allPosts() });
     if (url.pathname === "/blog" || url.pathname === "/blog/") {

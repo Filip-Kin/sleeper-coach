@@ -1,5 +1,6 @@
 import { canDrop, DEFAULT_RAILS, type RailPlayer, type RailConfig } from "./rails.ts";
 import { solveLineup, type LineupPlayer } from "./lineup.ts";
+import { irEligible as ruleIrEligible, type Settings } from "../sleeper/rules.ts";
 
 // The waiver engine, priced in WAIVER PRIORITY, not dollars.
 //
@@ -29,10 +30,11 @@ export interface WaiverConfig {
   // priority on a claim. Deliberately high: going to the back of the queue is
   // only worth it for a real, multi-week difference to the lineup we field.
   claimMarginPts: number;
-  // Starting-lineup improvement required to justify a costless free-agent add
-  // that entails a DROP. Low, because a free add is effectively reversible (worst
-  // case a wasted roster spot), but not zero: we never cut a rostered player for
-  // no lineup gain. A costless add into an OPEN slot has no drop and skips this.
+  // Starting-lineup improvement (ROS points) required before ANY add that
+  // entails a DROP, free agent or not. A costless add into an OPEN slot has no
+  // drop and skips this. It was 1 until 2026-09-23, when the planner proposed
+  // "add Malik Willis (+2), drop DK Metcalf": a drop is not reversible, the
+  // dropped man is claimed by someone else, so the bar is a real gain.
   freeAddMarginPts: number;
   // A claim is only worth a priority burn if the incoming player would actually
   // START for us. A bench/handcuff upgrade never justifies going last; wait and
@@ -59,7 +61,7 @@ export interface WaiverConfig {
 export const DEFAULT_WAIVERS: WaiverConfig = {
   rails: DEFAULT_RAILS,
   claimMarginPts: 15, // lineup ROS; a genuine multi-week difference, not a streamer
-  freeAddMarginPts: 1, // any real lineup improvement justifies a costless swap
+  freeAddMarginPts: 5, // a drop is for a real gain, never for a rounding error
   claimMustStart: true,
   crowdedByeAt: 3, // same threshold as the trade engine's byeRelief
   byeReliefPts: 4, // same modest tie-break weight as trades
@@ -86,8 +88,14 @@ export interface RosterState {
   // Whether a Sleeper injury status makes a player IR-eligible in THIS league.
   // The eligible set is league-configured (reserve_allow_out/sus/cov/... flags),
   // not universal: our league allows OUT and SUS onto IR but not NA or DNR, which
-  // the old fixed set got wrong both ways. Absent = the conservative default set.
+  // the old fixed set got wrong both ways. Absent = IR and PUP only, which every
+  // league accepts (sleeper/rules.ts irEligibleSet with no flags).
   irEligible?: (status?: string | null) => boolean;
+  /** Names of this week's starters as the site has them. A starter is neither
+   *  dropped nor stashed on IR by the waiver run before his game locks: the
+   *  lineup guard decides who starts, and a drop table that can name DK
+   *  Metcalf is the 2026-09-23 audit's finding R7. */
+  currentStarters?: string[];
 }
 
 export type MoveKind = "free-add" | "waiver-claim" | "wait" | "skip";
@@ -169,18 +177,21 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
     paths.push({ path: "bench-slot", drop: null, reason: "into an open bench slot (no drop)" });
   }
   // An IR slot with a genuinely injured incumbent to stash frees a bench slot
-  // without dropping anyone. The stash-worthy player is exactly the one the rails
-  // protect, so he belongs on IR, never on the drop table.
-  const irEligible = state.irEligible ?? isReserveInjury;
-  const irStashable = state.roster.find(
-    (p) => (p.returnsBeforePlayoffs || irEligible(p.injuryStatus)) && !cfg.rails.neverDrop?.includes(p.name),
-  );
+  // without dropping anyone. Eligibility is the league's flags and nothing
+  // else: a playoff-return stash who is merely Questionable is not IR-eligible,
+  // and Sleeper refused exactly that write on 2026-09-22. Highest value first,
+  // as irOpportunities ranks them, never a current starter.
+  const stashable = stashCandidates(state, cfg);
+  const irStashable = stashable[0];
   if (state.openIrSlots > 0 && irStashable) {
-    paths.push({ path: "ir-stash", drop: null, irStash: irStashable.name, reason: `stash ${irStashable.name} (injured) on IR (no drop)` });
+    paths.push({ path: "ir-stash", drop: null, irStash: irStashable.name, reason: `stash ${irStashable.name} (${irStashable.injuryStatus ?? "injured"}) on IR (no drop)` });
   }
   // Every canDrop-ALLOWED player is a candidate drop. canDrop is the authority on
   // what may leave the roster; we pick among the allowed ones by lineup delta.
+  // A current-week starter is never on the table (R7).
+  const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
   for (const p of state.roster) {
+    if (starters.has(p.name.toLowerCase())) continue;
     if (canDrop(p.name, state.roster, cfg.rails).allowed) {
       paths.push({ path: "drop", drop: p.name, reason: `drop ${p.name}` });
     }
@@ -194,12 +205,24 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   return evals;
 }
 
-// Reserve-eligible injury states: a player in one of these can legitimately go
-// to IR, freeing a bench slot. "Questionable"/"Doubtful" are weekly game states,
-// not reserve states, so they are excluded.
-function isReserveInjury(status?: string | null): boolean {
-  const s = (status ?? "").trim().toUpperCase();
-  return s === "IR" || s === "PUP" || s === "NA" || s === "SUS" || s === "DNR" || s === "COV";
+// With no league flags only IR and PUP qualify. The live run always passes the
+// league's real flags through RosterState.irEligible.
+const NO_FLAGS: Settings = { num_teams: 0, playoff_teams: 0, playoff_week_start: 0, trade_deadline: 0, waiver_budget: 0, max_keepers: 0, disable_trades: 0 };
+function defaultIrEligible(status?: string | null): boolean {
+  return ruleIrEligible(status, NO_FLAGS);
+}
+
+/** Rostered players who may go to IR, best first: eligible under the league's
+ *  flags, not on the never-drop list, not a current starter. Stashes (hurt but
+ *  back for the playoffs) first, then by rest-of-season value, so a genuine
+ *  asset is parked before a fringe body when slots are scarce. */
+export function stashCandidates(state: Pick<RosterState, "roster" | "irEligible" | "currentStarters">, cfg: Pick<WaiverConfig, "rails">): RailPlayer[] {
+  const irEligible = state.irEligible ?? defaultIrEligible;
+  const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
+  const never = new Set((cfg.rails.neverDrop ?? []).map((n) => n.toLowerCase()));
+  return state.roster
+    .filter((p) => irEligible(p.injuryStatus) && !never.has(p.name.toLowerCase()) && !starters.has(p.name.toLowerCase()))
+    .sort((a, b) => Number(b.returnsBeforePlayoffs ?? false) - Number(a.returnsBeforePlayoffs ?? false) || b.points - a.points);
 }
 
 // Bye tie-break for one move, in the same spirit as trade-fair.ts byeRelief.
@@ -391,13 +414,13 @@ export interface IrOpportunity {
 export function irOpportunities(
   roster: RailPlayer[],
   openIrSlots: number,
-  irEligible: (status?: string | null) => boolean = isReserveInjury,
+  irEligible: (status?: string | null) => boolean = defaultIrEligible,
+  currentStarters: string[] = [],
 ): IrOpportunity[] {
   if (openIrSlots <= 0) return [];
-  const eligible = roster.filter((p) => p.returnsBeforePlayoffs || irEligible(p.injuryStatus));
-  // Stashes first (highest value to protect), then by ROS so a genuine asset is
-  // parked before a fringe body when slots are scarce.
-  eligible.sort((a, b) => Number(b.returnsBeforePlayoffs ?? false) - Number(a.returnsBeforePlayoffs ?? false) || b.points - a.points);
+  // Eligibility is the league's flags only. A stash who is Questionable is not
+  // eligible however much we want to keep him; Sleeper refuses the write.
+  const eligible = stashCandidates({ roster, irEligible, currentStarters }, { rails: DEFAULT_RAILS });
   return eligible.slice(0, openIrSlots).map((p) => ({
     name: p.name,
     position: p.position,

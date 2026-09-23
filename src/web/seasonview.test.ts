@@ -1,4 +1,8 @@
-import { derivePhase, buildStandings } from "./seasonview.ts";
+// buildStandings marks "ours" from config.rosterId, which under bun test is
+// the STAGING roster (1). This fixture is written around roster 3, so pin the
+// env before config is imported. Dynamic import keeps the order honest.
+process.env.SLEEPER_ROSTER_ID = "3";
+const { derivePhase, buildStandings } = await import("./seasonview.ts");
 import type { NflGame } from "../data/nfl-games.ts";
 import type { League, LeagueUser, Roster } from "../sleeper/types.ts";
 

@@ -244,4 +244,8 @@ export const JOBS: Job[] = [
     name: "waiver-submit", dow: 2, hour: 20, minute: 0, maxLateMs: 6 * HOUR,
     why: "Waivers clear Wednesday 07:00 GMT, which is Wednesday 02:00 ET in winter and 03:00 ET in summer, so Tuesday 20:00 ET is six to seven hours ahead of the cutoff.",
   },
+  {
+    name: "alert-digest", dow: -1, hour: 9, minute: 0, maxLateMs: 6 * HOUR,
+    why: "One morning push with everything recorded at digest level or muted by the hourly budget, instead of a phone buzzing per event.",
+  },
 ];

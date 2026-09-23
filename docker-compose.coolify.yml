@@ -1,8 +1,12 @@
-# Coolify deployment variant (build + run on the NAS via Coolify).
-# The original docker-compose.yml is kept for plain-docker rollback.
-# Differences: no fixed container_name (Coolify manages names). State + config
-# already live at /data/sleeper-coach (outside ncdata) so the bind is unchanged.
-# Secrets come from Coolify-managed env instead of env_file: /data/sleeper-coach/env.
+# The ONLY compose file. Coolify (resource rl3nyhykcsaixibjci6xbqif on the NAS)
+# builds and runs this on every push to main; see DEPLOY.md at the repo root.
+# The plain docker-compose.yml that used to sit next to it was deleted on
+# 2026-09-23: it pinned container_name sleeper-coach and the same 8770 port, so
+# a `docker compose up` from the checkout collided with the Coolify container
+# and put a second daemon on the same state volume. Rollback is a Coolify
+# redeploy of an earlier SHA, not a hand-run compose.
+# No container_name (Coolify manages names). State and config live on the bind
+# at /data/sleeper-coach; secrets come from Coolify-managed env.
 services:
   sleeper-coach:
     build: .

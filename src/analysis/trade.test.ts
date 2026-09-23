@@ -195,19 +195,21 @@ t("  its lineup delta is ~zero despite the raw-sum gain", Math.abs(bigSumNoSlot.
   t("the package cap allows the shapes a human actually offers", PACKAGE_MAX >= 2, `${PACKAGE_MAX}`);
   t("the search pool is bounded so the weekly run stays quick", PACKAGE_POOL <= 12, `${PACKAGE_POOL}`);
 
-  // A package a one-for-one search cannot see. We are WR-rich with a hole at RB2;
-  // they are RB-rich and WR-poor. Two spare receivers for a back helps us a lot
-  // and them a little, which is exactly the shape a human offers and a
-  // single-player search can never construct.
-  const P = (name: string, position: string, points: number) => ({ name, position, points });
+  // A package a one-for-one search cannot see. We are WR-rich with a soft RB2;
+  // they are RB-rich and a little thin at WR. Two spare receivers for two
+  // backs helps both sides a moderate amount, which is exactly the shape a
+  // human offers and a single-player search can never construct. Moderate on
+  // purpose: since the 2026-09-23 objective (T13) their gain is capped at 1.5
+  // points per remaining week, so a fixture that hands them +100 yields nothing.
+  const P = (name: string, position: string, points: number) => ({ name, position, points, playerId: name });
   const ours = [
-    P("QB1","QB",300), P("RB1","RB",280), P("RBbad","RB",60),
+    P("QB1","QB",300), P("RB1","RB",280), P("RBbad","RB",190),
     P("WRa","WR",250), P("WRb","WR",245), P("WRc","WR",240), P("WRd","WR",235), P("WRe","WR",230),
     P("TE1","TE",190), P("K1","K",44), P("DEF1","DEF",10),
   ];
   const theirs = [
-    P("tQB","QB",290), P("tRB1","RB",270), P("tRB2","RB",265), P("tRB3","RB",260),
-    P("tWRa","WR",90), P("tWRb","WR",80),
+    P("tQB","QB",290), P("tRB1","RB",270), P("tRB2","RB",265), P("tRB3","RB",210), P("tRB4","RB",200),
+    P("tWRa","WR",222), P("tWRb","WR",215), P("tWRc","WR",70),
     P("tTE","TE",185), P("tK","K",42), P("tDEF","DEF",8),
   ];
   const rival = [{ managerId: "2", teamName: "them", roster: theirs }];

@@ -42,16 +42,31 @@ test("no need is raised for a position we have depth at", () => {
   expect(streamNeeds(twoK, 5, 3).some((n) => n.position === "K")).toBe(false);
 });
 
-test("pickStreamer takes the best available body at the needed position", () => {
+// R4. A streamer is a one-week fill, so he is ranked on THAT week's projection
+// and must not himself be on bye that week. Rest-of-season points put a kicker
+// on his own bye at the top of the list on 2026-09-22.
+test("pickStreamer ranks on the need week's points and skips a bye", () => {
   const avail = [
-    { name: "Streamer K1", position: "K", points: 40 },
-    { name: "Streamer K2", position: "K", points: 48 },
-    { name: "Some WR", position: "WR", points: 120 },
+    { name: "Streamer K1", position: "K", weekPoints: 9, bye: 6 },   // best ROS, but on bye in week 6
+    { name: "Streamer K2", position: "K", weekPoints: 7, bye: 10 },
+    { name: "Streamer K3", position: "K", weekPoints: 8, bye: 11 },
+    { name: "Some WR", position: "WR", weekPoints: 20, bye: 12 },
   ];
   const pick = pickStreamer({ week: 6, position: "K", coveringFor: ["Bates"] }, avail);
-  expect(pick?.add).toBe("Streamer K2");
+  expect(pick?.add).toBe("Streamer K3");
+  expect(pick?.points).toBe(8);
+});
+
+test("pickStreamer never picks a player on bye in the need week", () => {
+  const avail = [{ name: "Only K", position: "K", weekPoints: 9, bye: 6 }];
+  expect(pickStreamer({ week: 6, position: "K", coveringFor: [] }, avail)).toBeNull();
+});
+
+test("pickStreamer skips a zero projection for the week", () => {
+  const avail = [{ name: "Idle K", position: "K", weekPoints: 0, bye: 10 }];
+  expect(pickStreamer({ week: 6, position: "K", coveringFor: [] }, avail)).toBeNull();
 });
 
 test("pickStreamer returns null when nobody at that position is available", () => {
-  expect(pickStreamer({ week: 6, position: "K", coveringFor: [] }, [{ name: "X", position: "WR", points: 1 }])).toBeNull();
+  expect(pickStreamer({ week: 6, position: "K", coveringFor: [] }, [{ name: "X", position: "WR", weekPoints: 1, bye: 9 }])).toBeNull();
 });

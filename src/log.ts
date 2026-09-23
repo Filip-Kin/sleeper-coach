@@ -10,12 +10,11 @@ import { dirname } from "node:path";
 // Under `bun test` (NODE_ENV=test) the logs go to a scratch dir. On 2026-09-09
 // a test suite run inside the production container wrote its fixture events
 // ("Nobody, who is not in our league") into the real activity log.
-const UNDER_TEST = process.env.NODE_ENV === "test";
-const LOG_PATH = process.env.ACTIVITY_LOG ?? (UNDER_TEST ? "/tmp/sleeper-coach-test/activity.jsonl" : "/data/sleeper-coach/activity.jsonl");
+import { ACTIVITY_LOG as LOG_PATH, REASONING_LOG as REASONING_PATH } from "./paths.ts";
 // Transient "thinking" channel: the agent's full streamed output, kept OUT of
 // the durable activity log (which is the record of decisions) but tailed into
 // the live dashboard console so the model's reasoning is watchable in full.
-const REASONING_PATH = process.env.REASONING_LOG ?? (UNDER_TEST ? "/tmp/sleeper-coach-test/reasoning.jsonl" : "/data/sleeper-coach/reasoning.jsonl");
+
 
 export interface ActivityEvent {
   ts: string;
