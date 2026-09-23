@@ -26,7 +26,7 @@ import { loadPlayers } from "../data/players.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import type { PlayersMap, Roster, ScoringSettings, SleeperPlayer } from "../sleeper/types.ts";
-import { tokenGql, updateStarters } from "../league/api.ts";
+import { tokenGql, updateStarters, currentStarters } from "../league/api.ts";
 import { freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
@@ -254,7 +254,11 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     if (until > now) locked.add(id);
     else pinned.delete(id);
   }
-  const plan = planLineup(mine.starters ?? [], candidates, slots, locked);
+  // Plan from what the site will SCORE this week: the matchup leg, which is
+  // what the app shows too. The roster array can disagree with it (see
+  // matchupLegStarters) and did on 2026-09-23.
+  const onSite = await currentStarters(tokenGql(), week, mine.starters ?? []);
+  const plan = planLineup(onSite, candidates, slots, locked);
   if (!plan.changed) return plan;
 
   const key = plan.ids.join(",");
@@ -279,8 +283,9 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   }
 
   try {
-    await updateStarters(tokenGql(), plan.ids);
-    const back = (await leagueRosters(config.leagueId)).find((r) => r.roster_id === config.rosterId)?.starters ?? [];
+    // updateStarters writes the roster array and the week's leg and throws
+    // unless the leg reads back as written.
+    const back = await updateStarters(tokenGql(), plan.ids, config.rosterId, config.leagueId, week);
     if (back.join(",") !== key) throw new Error(`read-back mismatch: site has ${back.join(",")}`);
     console.log(`[lineup-guard] week ${week} lineup changed: ${summary}`);
     logEvent("coach", "lineup-auto", `Week ${week} lineup changed between locks: ${summary}`, { week, ids: plan.ids, swaps: plan.swaps });
@@ -298,7 +303,7 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     } else if (why.kind === "locked") {
       // Pin whoever Sleeper named; with no id, pin every player this plan
       // moves out, since one of them is the locked one.
-      const ids = why.playerId ? [why.playerId] : (mine.starters ?? []).filter((id) => id !== "0" && !plan.ids.includes(id));
+      const ids = why.playerId ? [why.playerId] : onSite.filter((id) => id !== "0" && !plan.ids.includes(id));
       for (const id of ids) pinned.set(id, now + PIN_MS);
       if (ids.length) console.log(`[lineup-guard] pinned ${ids.join(", ")} until the lock lifts`);
     }

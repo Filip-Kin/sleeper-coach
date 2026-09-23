@@ -31,7 +31,7 @@ import { sendAlert } from "../alert.ts";
 import { logEvent } from "../log.ts";
 import { legsToScan, tradeInFlight as ruleTradeInFlight } from "../sleeper/rules.ts";
 import { dropVerdict, recordDrop, DropRefused } from "./drop-ledger.ts";
-import { leagueRosters, SLEEPER_GRAPHQL } from "../sleeper/graphql.ts";
+import { leagueRosters, sportInfo, SLEEPER_GRAPHQL } from "../sleeper/graphql.ts";
 import { buildRosterView, type RosterView } from "../analysis/roster-view.ts";
 import { jwtExpiry, MissingTokenError, readToken, type TokenProbe } from "./token.ts";
 
@@ -637,8 +637,44 @@ export async function cancelWaiverClaim(
 
 /** Set the week's starters. Order matters and must match the league's slot
  *  order exactly; Sleeper positions by index, not by player position. */
+/** The starters Sleeper will actually score this week: the matchup leg's
+ *  array, not the roster's.
+ *
+ *  Found 2026-09-23, week 3. roster_update_starters had put Collins at WR2
+ *  and every read-back agreed, while the app showed him on the bench. The
+ *  app and the scorer read `matchup_legs[round].starters`, which that
+ *  mutation never touches (proved on staging: the roster array changed, the
+ *  leg did not). So the leg is the truth for the current week and the roster
+ *  array is only the default a new leg is seeded from. Returns null when the
+ *  week has no leg yet (pre-season). */
+export async function matchupLegStarters(
+  gql: Gql, round: number, rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<{ leg: number; starters: string[] } | null> {
+  const body = await gql(
+    `{matchup_legs(league_id:"${safeId(leagueId)}",round:${Math.trunc(round)}){leg roster_id starters}}`,
+  );
+  const legs = (unwrap(body, "matchup_legs") ?? []) as { leg: number; roster_id: number; starters?: string[] }[];
+  const mine = legs.find((l) => l.roster_id === rosterId);
+  return mine ? { leg: mine.leg, starters: mine.starters ?? [] } : null;
+}
+
+/** What is set on the site for this week: the leg when there is one, else
+ *  the roster array. Every planner starts from this. */
+export async function currentStarters(
+  gql: Gql, round: number, rosterStarters: string[], rosterId = config.rosterId, leagueId = config.leagueId,
+): Promise<string[]> {
+  const leg = await matchupLegStarters(gql, round, rosterId, leagueId);
+  return leg?.starters.length ? leg.starters : rosterStarters;
+}
+
+const starterList = (starters: string[]): string => `[${starters.map((x) => `"${x}"`).join(",")}]`;
+
+/** Set the lineup: the roster array AND this week's matchup leg, then read
+ *  the leg back. `round` is the week; pass it from the caller's NFL state so
+ *  the write and the plan agree on the week. Throws when the leg does not
+ *  echo the array, which is the only read-back that means anything. */
 export async function updateStarters(
-  gql: Gql, starters: string[], rosterId = config.rosterId, leagueId = config.leagueId,
+  gql: Gql, starters: string[], rosterId = config.rosterId, leagueId = config.leagueId, round?: number,
 ): Promise<string[]> {
   // The kill switch is checked at the chokepoint, same as the DOM setLineup:
   // the lineup guard, the scheduled locks and a manual script all pass here.
@@ -650,12 +686,26 @@ export async function updateStarters(
     if (/^[A-Z]{2,3}$/.test(id)) continue;
     safeId(id);
   }
-  const list = `[${starters.map((x) => `"${x}"`).join(",")}]`;
+  const week = round ?? (await sportInfo("nfl")).week;
+  const list = starterList(starters);
   const body = await gql(
     `mutation{roster_update_starters(league_id:"${safeId(leagueId)}",roster_id:${Math.trunc(rosterId)},starters:${list}){roster_id starters}}`,
   );
   const r = (unwrap(body, "roster_update_starters") ?? {}) as { starters?: string[] };
-  return r.starters ?? [];
+
+  const leg = await matchupLegStarters(gql, week, rosterId, leagueId);
+  if (!leg) return r.starters ?? []; // no matchup this week; the roster array is all there is
+  const legBody = await gql(
+    `mutation{update_matchup_leg(league_id:"${safeId(leagueId)}",round:${Math.trunc(week)},leg:${Math.trunc(leg.leg)},roster_id:${Math.trunc(rosterId)},starters:${list}){roster_id starters}}`,
+  );
+  unwrap(legBody, "update_matchup_leg");
+  const back = await matchupLegStarters(gql, week, rosterId, leagueId);
+  const got = back?.starters ?? [];
+  if (got.join(",") !== starters.join(",")) {
+    throw new Error(`week ${week} matchup leg read-back mismatch: site has ${got.join(",")}`);
+  }
+  logEvent("coach", "write-starters", `Week ${week} starters set on the roster and the matchup leg.`, { starters, week, rosterId, leagueId });
+  return got;
 }
 
 /** Set the roster's injured-reserve list. Same shape as updateStarters, and

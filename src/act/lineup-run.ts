@@ -27,7 +27,7 @@ import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts
 import { buildRosterWeek } from "../analysis/roster-week.ts";
 import { startingSlots, availabilityOf } from "../analysis/lineup.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
-import { tokenGql, updateStarters } from "../league/api.ts";
+import { tokenGql, updateStarters, currentStarters } from "../league/api.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import { overlayRosterStatus, lockedPlayerIds, cachedTeamKickoffs, planLineup } from "./lineup-guard.ts";
 import { logEvent } from "../log.ts";
@@ -46,9 +46,10 @@ function opt(name: string): string | undefined {
 // echoed the array and the read-back matched. The DOM fallback that used to sit
 // behind this went with the browser; a failed write now alerts and exits
 // non-zero, and the daemon's lineup guard retries on its own schedule.
-async function writeStarters(ids: string[], leagueId: string, rosterId: number): Promise<void> {
-  await updateStarters(tokenGql(), ids, rosterId, leagueId);
-  const back = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId)?.starters ?? [];
+async function writeStarters(ids: string[], leagueId: string, rosterId: number, week: number): Promise<void> {
+  // Writes the roster array and the week's matchup leg; throws unless the
+  // leg reads back as written (the leg is what scores, see api.ts).
+  const back = await updateStarters(tokenGql(), ids, rosterId, leagueId, week);
   if (back.join(",") !== ids.join(",")) throw new Error(`read-back mismatch: site has ${back.join(",")}`);
 }
 
@@ -113,7 +114,9 @@ async function main(): Promise<void> {
   // them; the locks did not, which was the last asymmetry between the two
   // writers. planLineup also refuses to empty a slot the site has filled.
   const locked = lockedPlayerIds(candidates, await cachedTeamKickoffs(), Date.now());
-  const plan = planLineup(mine.starters ?? [], candidates, slots, locked);
+  // Plan from the week's matchup leg, which is what the app shows and scores.
+  const onSite = await currentStarters(tokenGql(), week, mine.starters ?? [], rosterId, leagueId);
+  const plan = planLineup(onSite, candidates, slots, locked);
   const byId = new Map(candidates.map((p) => [p.playerId, p]));
   const chosen = plan.ids.map((id) => byId.get(id) ?? null);
   const total = chosen.reduce((sum, p) => sum + (p?.points ?? 0), 0);
@@ -172,7 +175,7 @@ async function main(): Promise<void> {
   assertWritesAllowed(`set the week ${week} lineup`);
   const ids = plan.ids;
   try {
-    await writeStarters(ids, leagueId, rosterId);
+    await writeStarters(ids, leagueId, rosterId, week);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // A throw here means the write did not take as intended (or the read-back
