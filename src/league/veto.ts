@@ -23,7 +23,7 @@
 // than a deal?
 
 import type { TradePlayer } from "../analysis/trade.ts";
-import { bestLineup } from "../analysis/trade.ts";
+import { bestLineup, afterTrade } from "../analysis/trade.ts";
 
 export interface ReviewTrade {
   transactionId: string;
@@ -65,9 +65,10 @@ export const DEFAULT_VETO: VetoConfig = {
 function sideGain(
   roster: TradePlayer[], incoming: TradePlayer[], outgoing: TradePlayer[],
 ): number {
-  const out = new Set(outgoing.map((p) => p.name.toLowerCase()));
+  // Matched by id (afterTrade), so a namesake on the same roster is not
+  // removed alongside the player actually leaving.
   const before = bestLineup(roster).total;
-  const after = bestLineup([...roster.filter((p) => !out.has(p.name.toLowerCase())), ...incoming]).total;
+  const after = bestLineup(afterTrade(roster, { receive: incoming, give: outgoing })).total;
   return Math.round((after - before) * 10) / 10;
 }
 

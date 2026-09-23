@@ -16,12 +16,15 @@ import { config } from "../config.ts";
 import { logEvent } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import {
-  pendingTrades, acceptTrade, rejectTrade, proposeTrade, outstandingOffers, listDms, threadMessages, sendDm,
-  type Gql, type PendingTrade,
+  pendingTrades, acceptTrade, rejectTrade, proposeTrade, listDms, threadMessages, sendDm,
+  type Gql, type PendingTrade, type ProposalSpec,
 } from "./api.ts";
-import { snapshot, offerFromTransaction, evaluateLiveOffer, scheduleContext } from "../analysis/trade-wire.ts";
-import { DEFAULT_FAIRNESS, type TradeVerdictSummary, type Proposal } from "../analysis/trade-fair.ts";
-import { pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS } from "./trade-propose.ts";
+import { DropRefused } from "./drop-ledger.ts";
+import { snapshotWithPending, offerFromTransaction, evaluateLiveOffer, liveFairness, type LeagueSnapshot } from "../analysis/trade-wire.ts";
+import { evaluateTradeTwoSided, outboundConfig, type FairnessConfig, type TradeVerdictSummary, type Proposal, type TwoSidedEvaluation, type MultiSidedEvaluation } from "../analysis/trade-fair.ts";
+import { pickCounter, recordProposal, reconcileProposals, liveOffers, MAX_OPEN_OFFERS, OFFER_TTL_DAYS, specFor } from "./trade-propose.ts";
+import { tradeDead, TX_DEAD } from "../sleeper/rules.ts";
+import { sendAlert } from "../alert.ts";
 import type { Database } from "bun:sqlite";
 import { newsAgeDays } from "../data/news.ts";
 
@@ -114,24 +117,107 @@ export interface HandledTrade {
   replied: boolean;
 }
 
+/** Sleeper's answer to accept_trade is the transaction's new status. Anything
+ *  dead or empty means the accept did not take (T8). */
+export function acceptSucceeded(status: string): boolean {
+  const s = String(status ?? "").trim().toLowerCase();
+  return s !== "" && !TX_DEAD.has(s);
+}
+
+/** Every side effect the poll performs, injectable so the accept and reject
+ *  paths can be driven through their failure modes in a test without a
+ *  network or a token. Production uses the real functions. */
+export interface TradeWatchDeps {
+  now: () => number;
+  pendingTrades: (gql: Gql, leg: number) => Promise<PendingTrade[]>;
+  snapshot: (gql: Gql, leg: number) => Promise<LeagueSnapshot>;
+  evaluate: (tx: { adds: Record<string, number>; drops: Record<string, number>; roster_ids: number[] }, snap: LeagueSnapshot) =>
+    Promise<{ evaluation: TwoSidedEvaluation | MultiSidedEvaluation; theirRosterId: number | null; isMultiParty: boolean }>;
+  fairness: (snap: LeagueSnapshot, theirRosterId: number | null) => Promise<FairnessConfig>;
+  acceptTrade: (gql: Gql, txId: string, leg: number, giveIds: string[]) => Promise<string>;
+  rejectTrade: (gql: Gql, txId: string, leg: number) => Promise<string>;
+  proposeTrade: (gql: Gql, spec: ProposalSpec) => Promise<{ transactionId: string; status: string }>;
+  findTradeThread: (gql: Gql, transactionId: string) => Promise<string | null>;
+  sendDm: (gql: Gql, dmId: string, text: string) => Promise<string>;
+  alert: (title: string, message: string) => Promise<void>;
+  warnIfNewsStale: () => Promise<void>;
+}
+const REAL_DEPS: TradeWatchDeps = {
+  now: () => Date.now(),
+  pendingTrades,
+  snapshot: (gql, leg) => snapshotWithPending(gql, leg),
+  evaluate: (tx, snap) => evaluateLiveOffer(tx, {}, snap),
+  fairness: (snap, rid) => liveFairness(snap, rid),
+  acceptTrade, rejectTrade, proposeTrade, findTradeThread, sendDm,
+  alert: sendAlert, warnIfNewsStale,
+};
+
+/** Offers we sent that a rival has up to three days to accept. Nothing
+ *  re-checked them in that window (T11), so every poll re-runs each one
+ *  through the bar we would apply if it came back to us. There is no withdraw
+ *  mutation, so a stale one is logged (once) for the record and for the DM
+ *  brief; it is not pulled. */
+const staleLogged = new Set<string>();
+export async function reviewOpenOffers(open: PendingTrade[], snap: LeagueSnapshot, deps: TradeWatchDeps): Promise<string[]> {
+  const stale: string[] = [];
+  const ours = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  for (const t of open) {
+    const { offer, theirRosterId } = offerFromTransaction({ adds: t.adds, drops: t.drops, roster_ids: t.rosterIds }, snap);
+    if (theirRosterId === null) continue;
+    const theirs = snap.rosterOf.get(theirRosterId) ?? [];
+    const ev = evaluateTradeTwoSided(offer, ours, theirs, outboundConfig(await deps.fairness(snap, theirRosterId)));
+    if (ev.verdict === "accept") { staleLogged.delete(t.transactionId); continue; }
+    stale.push(t.transactionId);
+    if (staleLogged.has(t.transactionId)) continue;
+    staleLogged.add(t.transactionId);
+    logEvent("coach", "trade-offer-stale", `Our open offer ${t.transactionId} to roster ${theirRosterId} would no longer clear our own bar; it cannot be withdrawn`, {
+      transaction_id: t.transactionId, theirRosterId, ourGain: ev.ourGain, theirGain: ev.theirGain, netValue: ev.netValue, requiredEdge: ev.requiredEdge,
+      blocks: [...ev.fairnessBlocks, ...ev.railBlocks],
+    });
+  }
+  return stale;
+}
+
 export async function handlePendingTrades(
   gql: Gql,
   leg: number,
   alreadyHandled: (id: string) => boolean,
   markHandled: (id: string, how: string) => void,
   db?: Database,
+  overrides: Partial<TradeWatchDeps> = {},
 ): Promise<HandledTrade[]> {
+  const deps: TradeWatchDeps = { ...REAL_DEPS, ...overrides };
+  const now = deps.now();
   const out: HandledTrade[] = [];
-  const trades: PendingTrade[] = await pendingTrades(gql, leg);
-  for (const t of trades) {
-    if (!t.rosterIds.includes(config.rosterId)) continue;
-    if (t.consenterIds.includes(config.rosterId)) continue; // we already agreed
-    if (alreadyHandled(t.transactionId)) continue;
+  const trades: PendingTrade[] = await deps.pendingTrades(gql, leg);
+  const incoming = trades.filter((t) =>
+    t.rosterIds.includes(config.rosterId) && !t.consenterIds.includes(config.rosterId) && !alreadyHandled(t.transactionId));
+  // Our own open offers come from the SAME read (they are the proposed trades
+  // we have consented to); the cap and the counter path count only the live
+  // ones (T12).
+  const open = liveOffers(trades.filter((t) => t.consenterIds.includes(config.rosterId)), now);
+  if (db) reconcileProposals(db, open, now);
+  if (!incoming.length && !open.length) return out;
+
+  // ONE snapshot per poll (T2). A roster read that cannot tell IR from active
+  // throws, and the poll skips rather than deciding on a guess (T3).
+  let snap: LeagueSnapshot;
+  try {
+    snap = await deps.snapshot(gql, leg);
+  } catch (e) {
+    logEvent("coach", "trade-snapshot-failed", `Skipping the trade poll: ${e instanceof Error ? e.message : String(e)}`, { error: String(e), pending: incoming.map((t) => t.transactionId) });
+    return out;
+  }
+  if (open.length) await reviewOpenOffers(open, snap, deps).catch((e) => logEvent("coach", "trade-review-failed", "Could not re-check our open offers", { error: String(e) }));
+
+  for (const t of incoming) {
+    // An expired or withdrawn offer still listed as proposed is not decided,
+    // only filed (T16).
+    if (tradeDead({ status: t.status }, now)) { markHandled(t.transactionId, "dead"); continue; }
 
     const tx = { adds: t.adds, drops: t.drops, roster_ids: t.rosterIds };
-    await warnIfNewsStale();
-    const { evaluation: ev, theirRosterId, isMultiParty } = await evaluateLiveOffer(tx);
-    const snap = await snapshot();
+    await deps.warnIfNewsStale();
+    const { evaluation: ev, theirRosterId, isMultiParty } = await deps.evaluate(tx, snap);
     const { offer } = offerFromTransaction(tx, snap);
     const sides: TradeSides = {
       receive: offer.receive.map((p) => p.name),
@@ -160,8 +246,27 @@ export async function handlePendingTrades(
     let counter: Proposal | null = null;
     let status = "";
     if (ev.verdict === "accept") {
-      const give = Object.entries(t.drops).filter(([, rid]) => rid === config.rosterId).map(([pid]) => pid);
-      status = await acceptTrade(gql, t.transactionId, leg, give);
+      // THE ACCEPT IS CHECKED (T8). A refusal by the drop breaker is a
+      // deferral: the offer is still good, the roster just moved too much
+      // this hour, so it is left unhandled and retried next poll, no alert.
+      // Anything else that stops the accept (a thrown write, a dead or empty
+      // status back from Sleeper) is filed as handled and alerted ONCE, so a
+      // broken accept is not re-evaluated every ninety seconds forever.
+      const give = offer.give.map((p) => p.playerId ?? "").filter(Boolean);
+      try {
+        status = await deps.acceptTrade(gql, t.transactionId, leg, give);
+        if (!acceptSucceeded(status)) throw new Error(`accept_trade returned status "${status}"`);
+      } catch (e) {
+        if (e instanceof DropRefused) {
+          logEvent("coach", "trade-deferred", `Trade ${t.transactionId} accept deferred: ${e.verdict.reason}`, { transaction_id: t.transactionId, reason: e.verdict.reason, give });
+          continue;
+        }
+        const msg = e instanceof Error ? e.message : String(e);
+        markHandled(t.transactionId, "accept-failed");
+        logEvent("coach", "trade-accept-failed", `Trade ${t.transactionId} evaluated ACCEPT but the accept did not take: ${msg}`, { transaction_id: t.transactionId, error: msg, status, sides });
+        await deps.alert("Trade accept failed", `Trade ${t.transactionId} (${sides.give.join(", ")} for ${sides.receive.join(", ")}) evaluated accept but Sleeper did not take it: ${msg}. It is filed as handled; decide it in the app.`).catch(() => {});
+        continue;
+      }
     } else {
       // A counter is a 2-party propose_trade by construction, so it makes no
       // sense against a three-way trade: we would be offering one rival a
@@ -169,13 +274,12 @@ export async function handlePendingTrades(
       // plain reject and an honest explanation, never a counter.
       if (db && theirRosterId !== null && !isMultiParty) {
         try {
-          const open = await outstandingOffers(gql, leg);
           const busy = open.some((o) => o.rosterIds.includes(theirRosterId));
           if (open.length < MAX_OPEN_OFFERS && !busy) {
             const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
             const theirRoster = snap.rosterOf.get(theirRosterId) ?? [];
-            const cfg = { ...DEFAULT_FAIRNESS, ...(await scheduleContext(theirRosterId)) };
-            counter = pickCounter(ourRoster, { managerId: String(theirRosterId), teamName: `roster ${theirRosterId}`, roster: theirRoster }, cfg, db, Date.now());
+            const cfg = await deps.fairness(snap, theirRosterId);
+            counter = pickCounter(ourRoster, { managerId: String(theirRosterId), teamName: `roster ${theirRosterId}`, roster: theirRoster }, cfg, db, now);
           }
         } catch (e) {
           logEvent("coach", "trade-counter-skipped", `Could not look for a counter to ${t.transactionId}`, { error: String(e) });
@@ -183,16 +287,10 @@ export async function handlePendingTrades(
       }
       if (counter) {
         try {
-          const adds: Record<string, number> = {}, drops: Record<string, number> = {};
-          for (const p of counter.offer.receive) { const id = snap.idByName.get(p.name); if (!id) throw new Error(`no id for ${p.name}`); adds[id] = snap.ourRosterId; drops[id] = theirRosterId!; }
-          for (const p of counter.offer.give)    { const id = snap.idByName.get(p.name); if (!id) throw new Error(`no id for ${p.name}`); adds[id] = theirRosterId!; drops[id] = snap.ourRosterId; }
-          const res = await proposeTrade(gql, {
-            adds, drops,
-            expiresAt: Math.floor((Date.now() + OFFER_TTL_DAYS * 86_400_000) / 1000),
-            rejectTransactionId: t.transactionId, rejectTransactionLeg: leg,
-          });
+          const spec = specFor(counter, snap, theirRosterId!, now);
+          const res = await deps.proposeTrade(gql, { ...spec, rejectTransactionId: t.transactionId, rejectTransactionLeg: leg });
           status = `countered:${res.status}`;
-          recordProposal(db!, counter, res.transactionId, Date.now());
+          recordProposal(db!, counter, res.transactionId, now);
           logEvent("coach", "trade-countered", `Rejected ${t.transactionId} and countered roster ${theirRosterId}: ${counter.why}`, {
             rejected: t.transactionId, transaction_id: res.transactionId, theirRosterId, ourGain: counter.ourGain, theirGain: counter.theirGain,
           });
@@ -201,14 +299,24 @@ export async function handlePendingTrades(
           counter = null;
         }
       }
-      if (!counter) status = await rejectTrade(gql, t.transactionId, leg);
+      if (!counter) {
+        try {
+          status = await deps.rejectTrade(gql, t.transactionId, leg);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          markHandled(t.transactionId, "reject-failed");
+          logEvent("coach", "trade-reject-failed", `Trade ${t.transactionId} evaluated REJECT but the reject did not take: ${msg}`, { transaction_id: t.transactionId, error: msg, sides });
+          await deps.alert("Trade reject failed", `Trade ${t.transactionId} evaluated reject but Sleeper did not take it: ${msg}. It is filed as handled; decide it in the app.`).catch(() => {});
+          continue;
+        }
+      }
     }
 
     let replied = false;
     try {
-      const dmId = await findTradeThread(gql, t.transactionId);
+      const dmId = await deps.findTradeThread(gql, t.transactionId);
       if (dmId) {
-        await sendDm(gql, dmId, tradeReplyText(ev, sides, counter));
+        await deps.sendDm(gql, dmId, tradeReplyText(ev, sides, counter));
         replied = true;
       }
     } catch (e) {

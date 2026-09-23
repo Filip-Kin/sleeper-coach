@@ -31,7 +31,7 @@
 // converts a bench player into a starter. Both deltas are genuinely positive.
 // That asymmetry, not generosity, is what makes a proposal acceptable.
 
-import { bestLineup, evaluateTrade, STARTING_SLOTS, DEFAULT_TRADE_CONFIG, type TradeConfig, type TradeOffer, type TradePlayer, type TradeEvaluation, type TradeVerdict } from "./trade.ts";
+import { bestLineup, evaluateTrade, STARTING_SLOTS, DEFAULT_TRADE_CONFIG, samePlayer, playerKey, without, afterTrade, type TradeConfig, type TradeOffer, type TradePlayer, type TradeEvaluation, type TradeVerdict } from "./trade.ts";
 
 function norm(n: string): string {
   return n.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
@@ -71,6 +71,10 @@ function ordinal(n: number): string {
 }
 
 export function refusedForInjury(p: TradePlayer): string | null {
+  // A player parked on the other roster's IR arrives unable to start and,
+  // unless he still qualifies, unable to go back on ours. The flag comes from
+  // the live roster read, not the injury string, which can lag or be blank.
+  if (p.onIr) return `${p.name} is on injured reserve on the other roster and would arrive unable to start`;
   const s = (p.injuryStatus ?? "").trim().toLowerCase();
   if (!s) return null;
   return REFUSE_STATUSES.has(s)
@@ -147,6 +151,11 @@ export interface FairnessConfig extends TradeConfig {
   upcomingWeeks: number[];
   /** Hard cap on the other side's gain, regardless of schedule dilution. */
   maxTheirGainPts: number;
+  /** Active-roster cap (roster_positions without IR). When known, a trade
+   *  whose net adds would put us over it is refused outright rather than
+   *  priced: Sleeper would process it and the daemon would then have to cut
+   *  somebody, which is a drop nobody evaluated. null = unknown, no check. */
+  rosterCapacity: number | null;
 }
 
 export const DEFAULT_FAIRNESS: FairnessConfig = {
@@ -180,6 +189,7 @@ export const DEFAULT_FAIRNESS: FairnessConfig = {
   // do not accept a plus 15 to them or something". Even a rival we never play
   // again can knock us out of the playoffs or beat the teams we need to lose.
   maxTheirGainPts: 15,
+  rosterCapacity: null,
 };
 
 // How much a rival's gain actually costs us. Rises as the season shortens.
@@ -198,7 +208,7 @@ export function requiredEdge(offer: TradeOffer, cfg: FairnessConfig, ourRoster?:
   // What we put at risk is what our lineup loses without the players we give.
   // Without a roster (unit tests of the formula itself) fall back to raw points.
   const stake = ourRoster
-    ? offer.give.reduce((m, p) => Math.max(m, marginalLineupValue(p.name, ourRoster)), 0)
+    ? offer.give.reduce((m, p) => Math.max(m, marginalLineupValue(p, ourRoster)), 0)
     : [...offer.receive, ...offer.give].reduce((m, p) => Math.max(m, Math.abs(p.points)), 0);
   return Math.max(cfg.flatMarginPts, stake * cfg.errorFraction);
 }
@@ -232,13 +242,13 @@ export function depthInsurance(
   // season value still counts in byeAwareLineupTotal, which is the right place.
   const available = roster.filter((p) => !p.onIr);
   const lineup = bestLineup(available, slots).starters;
-  const starting = new Set(lineup.map((s) => s.player?.name.toLowerCase()).filter(Boolean));
+  const starting = new Set(lineup.flatMap((s) => (s.player ? [playerKey(s.player)] : [])));
   let total = 0;
   for (const pos of cfg.depthPositions) {
     const n = lineup.filter((s) => s.player?.position === pos).length; // starters at pos, flex included
     if (!n) continue;
     const backups = available
-      .filter((p) => p.position === pos && !starting.has(p.name.toLowerCase()))
+      .filter((p) => p.position === pos && !starting.has(playerKey(p)))
       .sort((a, b) => b.points - a.points);
     backups.forEach((b, i) => {
       total += atLeastKOut(n, i + 1, cfg.injuryRate) * b.points * (1 - cfg.replacementFraction);
@@ -326,10 +336,8 @@ export function byeAwareLineupTotal(
 export function byeAwareGain(
   roster: TradePlayer[], offer: TradeOffer, weeks: readonly number[], slots: readonly string[] = STARTING_SLOTS,
 ): number {
-  const goneNames = new Set(offer.give.map((p) => p.name.toLowerCase()));
   const before = byeAwareLineupTotal(roster, weeks, slots);
-  const after = byeAwareLineupTotal(
-    [...roster.filter((p) => !goneNames.has(p.name.toLowerCase())), ...offer.receive], weeks, slots);
+  const after = byeAwareLineupTotal(afterTrade(roster, offer), weeks, slots);
   return Math.round((after - before) * 10) / 10;
 }
 
@@ -383,21 +391,14 @@ export function evaluateTradeMultiSided(
       ? byeAwareGain(o.roster, o.offer, weeks)
       : (() => {
           const before = bestLineup(o.roster).total;
-          const giveNames = new Set(o.offer.give.map((p) => p.name.toLowerCase()));
-          const after = bestLineup([
-            ...o.roster.filter((p) => !giveNames.has(p.name.toLowerCase())),
-            ...o.offer.receive,
-          ]).total;
+          const after = bestLineup(afterTrade(o.roster, o.offer)).total;
           return Math.round((after - before) * 10) / 10;
         })();
     return { rosterId: o.rosterId, theirGain, weight: o.weight ?? opponentWeight(cfg) };
   });
 
   const ourGainLineup = weeks.length ? byeAwareGain(ourRoster, offer, weeks) : ours.lineupDelta;
-  const afterOurs = [
-    ...ourRoster.filter((p) => !offer.give.some((g) => g.name.toLowerCase() === p.name.toLowerCase())),
-    ...offer.receive,
-  ];
+  const afterOurs = afterTrade(ourRoster, offer);
   const depthDelta = weeks.length
     ? Math.round((depthInsurance(afterOurs, cfg) - depthInsurance(ourRoster, cfg)) * 10) / 10
     : 0;
@@ -423,8 +424,7 @@ export function evaluateTradeMultiSided(
     const why = refusedForInjury(p) ?? refusedForDepth(p);
     if (why) fairnessBlocks.push(why);
   }
-  const unfilled = bestLineup(afterOurs).starters.filter((x) => x.player === null).map((x) => x.slot);
-  if (unfilled.length) fairnessBlocks.push(`would leave ${unfilled.join(", ")} unfillable`);
+  fairnessBlocks.push(...legalityBlocks(afterOurs, cfg));
   if (ourGain < cfg.minOwnGainPts) {
     fairnessBlocks.push(`our own lineup gains only ${ourGain}, below the floor of ${cfg.minOwnGainPts}`);
   }
@@ -436,10 +436,10 @@ export function evaluateTradeMultiSided(
       ? [
           `valued across weeks ${weeks[0]}-${weeks[weeks.length - 1]} with bye players removed, ` +
           `so a week where a position has nobody eligible costs what it really costs`,
-          `our lineup ${ourGainLineup >= 0 ? "+" : ""}${ourGainLineup} per week averaged over that run` +
-            (depthDelta ? `, ${depthDelta >= 0 ? "+" : ""}${depthDelta} for injury cover at ${cfg.depthPositions.join("/")}` : ""),
+          `our lineup ${ourGainLineup >= 0 ? "+" : ""}${ourGainLineup} season points, averaged week by week over that run` +
+            (depthDelta ? `, ${depthDelta >= 0 ? "+" : ""}${depthDelta} season points for injury cover at ${cfg.depthPositions.join("/")}` : ""),
         ]
-      : [`starting-lineup projection ${ours.before.toFixed(1)} -> ${ours.after.toFixed(1)} (${ourGain >= 0 ? "+" : ""}${ourGain})`]),
+      : [`starting-lineup projection ${ours.before.toFixed(1)} -> ${ours.after.toFixed(1)} (${ourGain >= 0 ? "+" : ""}${ourGain} season points)`]),
     // Named per roster, so a rival cannot obscure one leg's payday inside a
     // combined number, which is exactly the shape of the attempt this exists for.
     ...opponents.map((o) => `roster ${o.rosterId} lineup ${o.theirGain >= 0 ? "+" : ""}${o.theirGain}`),
@@ -482,11 +482,7 @@ export function evaluateTradeTwoSided(
 
   // Their side is the mirror image of the same swap.
   const theirBefore = bestLineup(theirRoster).total;
-  const theirNames = new Set(offer.receive.map((p) => p.name.toLowerCase()));
-  const theirAfter = bestLineup([
-    ...theirRoster.filter((p) => !theirNames.has(p.name.toLowerCase())),
-    ...offer.give,
-  ]).total;
+  const theirAfter = bestLineup(afterTrade(theirRoster, { receive: offer.give, give: offer.receive })).total;
   // Bye-aware where we know the remaining weeks, season totals otherwise. Both
   // sides get the same treatment: their bye structure is as real as ours.
   const weeks = cfg.upcomingWeeks ?? [];
@@ -497,10 +493,7 @@ export function evaluateTradeTwoSided(
   // Depth and the bye-aware lineup are both season-scale (the bye-aware total
   // averages season-total lineups across weeks). Only applied on the bye-aware
   // path, which is the live path; the legacy season-total path stays as it was.
-  const afterOurs = [
-    ...ourRoster.filter((p) => !offer.give.some((g) => g.name.toLowerCase() === p.name.toLowerCase())),
-    ...offer.receive,
-  ];
+  const afterOurs = afterTrade(ourRoster, offer);
   const depthDelta = weeks.length
     ? Math.round((depthInsurance(afterOurs, cfg) - depthInsurance(ourRoster, cfg)) * 10) / 10
     : 0;
@@ -541,14 +534,7 @@ export function evaluateTradeTwoSided(
     const why = refusedForInjury(p) ?? refusedForDepth(p);
     if (why) fairnessBlocks.push(why);
   }
-  // Never accept a trade that leaves a mandatory slot unfillable. Points are
-  // recoverable; an empty starting slot every week is not.
-  const afterRoster = [
-    ...ourRoster.filter((p) => !offer.give.some((g) => g.name.toLowerCase() === p.name.toLowerCase())),
-    ...offer.receive,
-  ];
-  const unfilled = bestLineup(afterRoster).starters.filter((x) => x.player === null).map((x) => x.slot);
-  if (unfilled.length) fairnessBlocks.push(`would leave ${unfilled.join(", ")} unfillable`);
+  fairnessBlocks.push(...legalityBlocks(afterOurs, cfg));
 
   // The one-sided reasons are written in SEASON TOTALS. Once the bye-aware
   // numbers are in play they contradict the decision (they said "lineup gain 0"
@@ -562,11 +548,11 @@ export function evaluateTradeTwoSided(
       ? [
           `valued across weeks ${weeks[0]}-${weeks[weeks.length - 1]} with bye players removed, ` +
           `so a week where a position has nobody eligible costs what it really costs`,
-          `our lineup ${ourGainLineup >= 0 ? "+" : ""}${ourGainLineup} per week averaged over that run` +
-            (depthDelta ? `, ${depthDelta >= 0 ? "+" : ""}${depthDelta} for injury cover at ${cfg.depthPositions.join("/")}` : ""),
+          `our lineup ${ourGainLineup >= 0 ? "+" : ""}${ourGainLineup} season points, averaged week by week over that run` +
+            (depthDelta ? `, ${depthDelta >= 0 ? "+" : ""}${depthDelta} season points for injury cover at ${cfg.depthPositions.join("/")}` : ""),
         ]
-      : [`starting-lineup projection ${ours.before.toFixed(1)} -> ${ours.after.toFixed(1)} (${ourGain >= 0 ? "+" : ""}${ourGain})`]),
-    `their lineup ${theirGain >= 0 ? "+" : ""}${theirGain}` +
+      : [`starting-lineup projection ${ours.before.toFixed(1)} -> ${ours.after.toFixed(1)} (${ourGain >= 0 ? "+" : ""}${ourGain} season points)`]),
+    `their lineup ${theirGain >= 0 ? "+" : ""}${theirGain} season points` +
       (weeks.length ? " on the same bye-aware basis" : ` (${theirBefore.toFixed(1)} -> ${theirAfter.toFixed(1)})`),
     `net of schedule: ${ourGain} - ${theirGain} x ${w.toFixed(2)} = ${netValue}, need ${need}`,
   ];
@@ -589,6 +575,24 @@ export function evaluateTradeTwoSided(
   if (fairnessBlocks.length) reasons.unshift(...fairnessBlocks);
 
   return { ...ours, verdict, reasons, ourGain, theirGain, edge, netValue, requiredEdge: need, fairnessBlocks };
+}
+
+/** The two ways a post-trade roster is illegal, in words. An empty mandatory
+ *  slot is a hole every week; an active count over the cap is a forced drop
+ *  nobody priced (T9). Points are recoverable, neither of these is. Rejecting
+ *  is the simpler correct answer: pricing a hypothetical drop into the trade
+ *  would mean choosing the drop here, and the drop table is not this module. */
+export function legalityBlocks(afterOurs: TradePlayer[], cfg: FairnessConfig): string[] {
+  const out: string[] = [];
+  const unfilled = bestLineup(afterOurs).starters.filter((x) => x.player === null).map((x) => x.slot);
+  if (unfilled.length) out.push(`would leave ${unfilled.join(", ")} unfillable`);
+  if (cfg.rosterCapacity !== null) {
+    const active = afterOurs.filter((p) => !p.onIr).length;
+    if (active > cfg.rosterCapacity) {
+      out.push(`roster would be illegal: ${active} active players after the trade against a cap of ${cfg.rosterCapacity}`);
+    }
+  }
+  return out;
 }
 // #endregion
 
@@ -633,9 +637,10 @@ export function autoDecideAllowed(
 // #endregion
 
 // #region outgoing proposals
-export function marginalLineupValue(name: string, roster: TradePlayer[], slots: readonly string[] = STARTING_SLOTS): number {
+export function marginalLineupValue(who: string | TradePlayer, roster: TradePlayer[], slots: readonly string[] = STARTING_SLOTS): number {
+  const target: Pick<TradePlayer, "name" | "playerId"> = typeof who === "string" ? { name: who } : who;
   const withHim = bestLineup(roster, slots).total;
-  const withoutHim = bestLineup(roster.filter((p) => norm(p.name) !== norm(name)), slots).total;
+  const withoutHim = bestLineup(roster.filter((p) => !samePlayer(target, p)), slots).total;
   return Math.round((withHim - withoutHim) * 10) / 10;
 }
 
@@ -649,7 +654,7 @@ export function giveEligibleForProposal(
   cfg: FairnessConfig = DEFAULT_FAIRNESS,
   slots: readonly string[] = STARTING_SLOTS,
 ): { ok: boolean; reason: string } {
-  const present = roster.find((p) => norm(p.name) === norm(player.name));
+  const present = roster.find((p) => samePlayer(player, p));
   if (!present) return { ok: false, reason: `"${player.name}" is not on our roster as read back` };
   if (cfg.rails.neverDrop.some((n) => norm(n) === norm(present.name))) {
     return { ok: false, reason: `"${present.name}" is on the never-drop list` };
@@ -666,11 +671,11 @@ export function giveEligibleForProposal(
   }
   const dedicated = dedicatedSlotsFor(present.position, slots);
   const samePos = roster.filter((p) => p.position === present.position).sort((a, b) => b.points - a.points);
-  const rankAtPos = samePos.findIndex((p) => norm(p.name) === norm(present.name)) + 1;
+  const rankAtPos = samePos.findIndex((p) => samePlayer(present, p)) + 1;
   if (rankAtPos > 0 && rankAtPos <= dedicated) {
     return { ok: false, reason: `"${present.name}" is our #${rankAtPos} ${present.position}, a dedicated-slot starter; a proposal never ships one` };
   }
-  const marg = marginalLineupValue(present.name, roster, slots);
+  const marg = marginalLineupValue(present, roster, slots);
   if (marg > cfg.surplusMaxLineupPts) {
     return { ok: false, reason: `"${present.name}" is worth ${marg} starting-lineup points to us, above the ${cfg.surplusMaxLineupPts}pt surplus line; he is core, not surplus` };
   }
@@ -691,8 +696,72 @@ export interface Proposal {
   theirGain: number;
   edge: number;
   byeRelief: number; // players taken off a crowded bye; negative makes one worse
-  score: number; // ourGain plus bye credit, the ranking key
+  score: number; // the ranking key: the smaller side's gain plus bye credit, less package size
   why: string;
+  /** Their side of it in positional terms, for the pitch. Never our number. */
+  theirReason: string;
+}
+
+/** What the proposer optimises, separate from what the acceptor requires.
+ *
+ *  The acceptor's bar (evaluateTradeTwoSided) is a floor: it says which deals
+ *  we would take. It says nothing about which of those a rival would take, and
+ *  ranking by our own gain produced offers like +111 to us against +9 to them,
+ *  which no manager accepts and which reads as a bot trying it on. Filip's
+ *  goal, 2026-08-31: "send out trades other managers might actually accept."
+ *  So outbound offers are ranked by the SMALLER side's gain, the lopsided ones
+ *  are cut by a ratio cap, and the ceiling on their gain is widened to a
+ *  per-week allowance because a deal that helps them a real amount is the
+ *  deal that gets accepted. Inbound thresholds are untouched: what we accept
+ *  from a probe is a different question from what we send. */
+export interface ProposerObjective {
+  /** Reject a candidate whose ourGain / theirGain is above this. */
+  maxGainRatio: number;
+  /** Outbound ceiling on their gain, in season points per remaining week. */
+  theirGainPtsPerWeek: number;
+  /** Package-size penalty per player, so a one-for-one beats a two-for-two of the same value. */
+  perPlayerPenalty: number;
+}
+export const DEFAULT_PROPOSER: ProposerObjective = {
+  maxGainRatio: 2,
+  theirGainPtsPerWeek: 1.5,
+  perPlayerPenalty: 0.5,
+};
+/** Does a candidate that already clears the acceptor's bar fit the objective? */
+export function fitsObjective(ourGain: number, theirGain: number, obj: ProposerObjective = DEFAULT_PROPOSER): boolean {
+  if (theirGain <= 0) return false;
+  return ourGain / theirGain <= obj.maxGainRatio;
+}
+/** The ranking key. */
+export function objectiveScore(p: { ourGain: number; theirGain: number; byeRelief: number; size: number }, cfg: FairnessConfig, obj: ProposerObjective = DEFAULT_PROPOSER): number {
+  return Math.round((Math.min(p.ourGain, p.theirGain) + p.byeRelief * cfg.byeReliefPts - p.size * obj.perPlayerPenalty) * 10) / 10;
+}
+/** The fairness config an OUTBOUND evaluation runs under: the acceptor's bar
+ *  with the their-gain ceiling widened to the per-week allowance. */
+export function outboundConfig(cfg: FairnessConfig, obj: ProposerObjective = DEFAULT_PROPOSER): FairnessConfig {
+  return { ...cfg, maxTheirGainPts: Math.max(cfg.maxTheirGainPts, obj.theirGainPtsPerWeek * Math.max(1, cfg.remainingWeeks)) };
+}
+
+/** Why the deal is good for THEM, in the terms a manager thinks in: which slot
+ *  our player takes on their team and how far ahead of the incumbent he is.
+ *  Nothing about our side, because "+30 to me" is the line that gets an offer
+ *  declined on principle. */
+export function positionalReason(theirRoster: TradePlayer[], theyReceive: TradePlayer[], theyGive: TradePlayer[], slots: readonly string[] = STARTING_SLOTS): string {
+  const before = bestLineup(theirRoster, slots).starters;
+  const after = bestLineup(afterTrade(theirRoster, { receive: theyReceive, give: theyGive }), slots).starters;
+  const lines: string[] = [];
+  for (const p of theyReceive) {
+    const idx = after.findIndex((s) => s.player && samePlayer(s.player, p));
+    if (idx < 0) { lines.push(`${p.name} is ${p.position} depth for you`); continue; }
+    const slot = after[idx]!.slot;
+    const incumbent = before[idx]?.player ?? null;
+    if (!incumbent) { lines.push(`${p.name} fills your empty ${slot} slot`); continue; }
+    const gap = Math.round((p.points - incumbent.points) * 10) / 10;
+    lines.push(gap > 0
+      ? `your ${slot} slot is ${gap} behind ${p.name}; he starts for you`
+      : `${p.name} starts at ${slot} for you`);
+  }
+  return lines.join("; ");
 }
 
 /** All subsets of `xs` with between 1 and `maxSize` members. */
@@ -732,8 +801,10 @@ export function proposeTrades(
   cfg: FairnessConfig = DEFAULT_FAIRNESS,
   limit = 10,
   maxPackage = PACKAGE_MAX,
+  objective: ProposerObjective = DEFAULT_PROPOSER,
 ): Proposal[] {
   const out: Proposal[] = [];
+  const evalCfg = outboundConfig(cfg, objective);
 
   // Only pieces our lineup can genuinely spare, measured by what it loses
   // without them rather than by raw projection. Taking the most valuable
@@ -754,7 +825,7 @@ export function proposeTrades(
     for (const give of giveSets) {
       for (const receive of receiveSets) {
         const offer: TradeOffer = { receive, give };
-        const ev = evaluateTradeTwoSided(offer, ourRoster, rival.roster, cfg);
+        const ev = evaluateTradeTwoSided(offer, ourRoster, rival.roster, evalCfg);
         // THE PROPOSER MUST USE THE ACCEPTOR'S BAR. This previously filtered on
         // its own weaker conditions (no blocks, theirGain > 0, ourGain above the
         // noise floor) and never asked whether the deal would actually be
@@ -764,8 +835,8 @@ export function proposeTrades(
         // is incoherent, and worse, the coach had already said so in a DM.
         if (ev.verdict !== "accept") continue;
         // They must actually gain too, or there is no reason for them to say
-        // yes. This is the ONLY condition the proposer adds beyond acceptance.
-        if (ev.theirGain <= 0) continue;
+        // yes, and not so much less than us that the offer reads as a try-on.
+        if (!fitsObjective(ev.ourGain, ev.theirGain, objective)) continue;
         const relief = byeRelief(offer, ourRoster, cfg);
         const names = (ps: TradePlayer[]) => ps.map((p) => `${p.name} (${p.position})`).join(" + ");
         out.push({
@@ -779,18 +850,19 @@ export function proposeTrades(
           // Prefer the SMALLEST package that achieves the gain. A two-for-two is
           // harder for a human to say yes to than a one-for-one worth the same,
           // and it churns more of the roster for the same result.
-          score: ev.ourGain + relief * cfg.byeReliefPts - (give.length + receive.length) * 0.5,
+          score: objectiveScore({ ourGain: ev.ourGain, theirGain: ev.theirGain, byeRelief: relief, size: give.length + receive.length }, cfg, objective),
           why:
             `we get ${names(receive)} for ${names(give)}: ` +
-            `our lineup +${ev.ourGain}, theirs +${ev.theirGain}` +
+            `our lineup +${ev.ourGain}, theirs +${ev.theirGain} season points` +
             (relief > 0 ? `, and it takes ${relief} off a crowded bye` : relief < 0 ? `, but it adds ${-relief} to a crowded bye` : ""),
+          theirReason: positionalReason(rival.roster, give, receive),
         });
       }
     }
   }
-  // Best for us first (bye relief and package-size penalty included), then by
-  // how attractive it is to them, since among equally good trades the one they
-  // are likeliest to accept is the one worth sending.
+  // Best balanced deal first, then by how attractive it is to them, since
+  // among equally balanced trades the one they are likeliest to accept is
+  // the one worth sending.
   out.sort((a, b) => b.score - a.score || b.theirGain - a.theirGain);
   return out.slice(0, limit);
 }
