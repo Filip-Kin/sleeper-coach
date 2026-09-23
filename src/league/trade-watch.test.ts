@@ -86,7 +86,6 @@ function fakeDeps(over: Partial<TradeWatchDeps> = {}): TradeWatchDeps {
   return {
     now: () => NOW,
     pendingTrades: async () => [],
-    outstandingOffers: async () => [],
     snapshot: async () => snap(),
     evaluate: async () => ({
       evaluation: { verdict: "accept", ourGain: 10, theirGain: 5, edge: 5, netValue: 9, requiredEdge: 3, railBlocks: [], fairnessBlocks: [], reasons: [], lineupDelta: 10, before: 0, after: 0 },

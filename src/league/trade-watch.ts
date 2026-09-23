@@ -16,7 +16,7 @@ import { config } from "../config.ts";
 import { logEvent } from "../log.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import {
-  pendingTrades, acceptTrade, rejectTrade, proposeTrade, outstandingOffers, listDms, threadMessages, sendDm,
+  pendingTrades, acceptTrade, rejectTrade, proposeTrade, listDms, threadMessages, sendDm,
   type Gql, type PendingTrade, type ProposalSpec,
 } from "./api.ts";
 import { DropRefused } from "./drop-ledger.ts";
@@ -130,7 +130,6 @@ export function acceptSucceeded(status: string): boolean {
 export interface TradeWatchDeps {
   now: () => number;
   pendingTrades: (gql: Gql, leg: number) => Promise<PendingTrade[]>;
-  outstandingOffers: (gql: Gql, leg: number) => Promise<PendingTrade[]>;
   snapshot: (gql: Gql, leg: number) => Promise<LeagueSnapshot>;
   evaluate: (tx: { adds: Record<string, number>; drops: Record<string, number>; roster_ids: number[] }, snap: LeagueSnapshot) =>
     Promise<{ evaluation: TwoSidedEvaluation | MultiSidedEvaluation; theirRosterId: number | null; isMultiParty: boolean }>;
@@ -145,7 +144,7 @@ export interface TradeWatchDeps {
 }
 const REAL_DEPS: TradeWatchDeps = {
   now: () => Date.now(),
-  pendingTrades, outstandingOffers,
+  pendingTrades,
   snapshot: (gql, leg) => snapshotWithPending(gql, leg),
   evaluate: (tx, snap) => evaluateLiveOffer(tx, {}, snap),
   fairness: (snap, rid) => liveFairness(snap, rid),
@@ -193,9 +192,10 @@ export async function handlePendingTrades(
   const trades: PendingTrade[] = await deps.pendingTrades(gql, leg);
   const incoming = trades.filter((t) =>
     t.rosterIds.includes(config.rosterId) && !t.consenterIds.includes(config.rosterId) && !alreadyHandled(t.transactionId));
-  // Our own open offers, read once per poll; the cap and the counter path
-  // both count only the live ones (T12).
-  const open = liveOffers(await deps.outstandingOffers(gql, leg), now);
+  // Our own open offers come from the SAME read (they are the proposed trades
+  // we have consented to); the cap and the counter path count only the live
+  // ones (T12).
+  const open = liveOffers(trades.filter((t) => t.consenterIds.includes(config.rosterId)), now);
   if (db) reconcileProposals(db, open, now);
   if (!incoming.length && !open.length) return out;
 
