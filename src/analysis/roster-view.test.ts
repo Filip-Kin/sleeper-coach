@@ -90,12 +90,14 @@ describe("6. depth cover: a man on IR covers nobody this week", () => {
     const healthy = [...base, P("RB3", "RB", 160, false)];
     expect(depthInsurance(healthy, DEFAULT_FAIRNESS)).toBeGreaterThan(depthInsurance(base, DEFAULT_FAIRNESS));
   });
-  test("and giving away the IR player still costs his season value", () => {
+  test("and giving away the IR player is refused by the rail, not priced by the lineup", () => {
+    // Since the 2026-09-23 audit (T6) a man on IR is out of every lineup
+    // total, so his season number cannot be what stops a trade; the rail is.
     const stash = P("Stash", "WR", 200, true);
     const offer = { receive: [P("Meh", "WR", 60)], give: [stash] };
-    const withHim = evaluateTradeTwoSided(offer, [...base, stash], base, DEFAULT_FAIRNESS).ourGain;
-    const without = evaluateTradeTwoSided(offer, base, base, DEFAULT_FAIRNESS).ourGain;
-    expect(withHim).toBeLessThan(without);
+    const ev = evaluateTradeTwoSided(offer, [...base, stash], base, DEFAULT_FAIRNESS);
+    expect(ev.verdict).toBe("reject");
+    expect(ev.railBlocks.join(" ")).toMatch(/injured reserve/);
   });
 });
 
