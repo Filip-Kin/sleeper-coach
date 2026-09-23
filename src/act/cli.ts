@@ -14,7 +14,7 @@
 // trade-capture) went with the browser on 2026-09-09.
 
 import { config } from "../config.ts";
-import { acceptTrade, probeToken, proposeTrade, rejectTrade, tokenGql, updateStarters, type ProposalSpec } from "../league/api.ts";
+import { acceptTrade, probeToken, proposeTrade, rejectTrade, tokenGql, updateStarters, type ProposalSpec, pendingTrades} from "../league/api.ts";
 import { assessToken, jwtExpiry, TOKEN_FILE, writeToken } from "../league/token.ts";
 
 const [command, ...args] = process.argv.slice(2);
@@ -76,8 +76,19 @@ async function main(): Promise<void> {
       if (!txid || (decision !== "accept" && decision !== "reject") || !Number.isInteger(leg)) {
         throw new Error("usage: act trade-respond <txid> accept|reject <week> [leagueId]");
       }
-      const fn = decision === "accept" ? acceptTrade : rejectTrade;
-      const status = await fn(tokenGql(), txid, leg, leagueId ?? config.leagueId);
+      const gql = tokenGql();
+      const lid = leagueId ?? config.leagueId;
+      let status: string;
+      if (decision === "accept") {
+        // The accept passes our give side through the drop breaker, so look the
+        // offer up rather than accepting blind.
+        const tx = (await pendingTrades(gql, leg, lid)).find((t) => t.transactionId === txid);
+        if (!tx) throw new Error(`trade ${txid} is not pending in leg ${leg} or ${leg - 1}`);
+        const give = Object.entries(tx.drops).filter(([, rid]) => rid === config.rosterId).map(([pid]) => pid);
+        status = await acceptTrade(gql, txid, leg, give, lid);
+      } else {
+        status = await rejectTrade(gql, txid, leg, lid);
+      }
       console.log(`${decision}ed trade ${txid}: ${status}`);
       break;
     }

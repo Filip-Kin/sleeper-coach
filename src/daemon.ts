@@ -12,7 +12,7 @@ import { tokenGql as leagueGql, dropPlayers, completedTrades, myRosterView, pend
 import { assessToken } from "./league/token.ts";
 import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
-import { mayDrop, type DropRecord } from "./analysis/drop-guard.ts";
+import { dropVerdict, DropRefused } from "./league/drop-ledger.ts";
 import { overCap, droppable } from "./analysis/roster-view.ts";
 import { maybePublishWeekly } from "./blog/auto.ts";
 import { allPosts } from "./blog/store.ts";
@@ -31,13 +31,11 @@ import { freezeState, assertWritesAllowed, freezeNow, FREEZE_FILE } from "./kill
 // handle it. Scheduled deadline wakeups (lineups, waivers) are systemd timers
 // (Phase E), not this loop.
 
-const STATE_DIR = process.env.COACH_STATE ?? "/data/sleeper-coach";
-const DB_PATH = process.env.COACH_DB ?? "/data/sleeper-coach/coach.db";
+import { STATE_DIR, DB_PATH, DRAFT_LOCK, KICKOFF_CACHE } from "./paths.ts";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 90_000);
 // While the draft orchestrator is running it owns every write to the league,
 // so the daemon stands down (trade handling, scheduled jobs, auth checks) until
 // the lock file goes away.
-const DRAFT_LOCK = "/data/sleeper-coach/draft-active";
 const draftActive = () => existsSync(DRAFT_LOCK);
 // Trades are the coach's call BY DESIGN, but the write path (respondTrade) is
 // still a stub that throws, so with this off a real offer produced a failed agent
@@ -62,15 +60,6 @@ db.run(`CREATE TABLE IF NOT EXISTS scheduled_runs (
   job TEXT PRIMARY KEY,
   last_run INTEGER
 )`);
-// Every automatic drop, so the circuit breaker in analysis/drop-guard.ts can
-// see a cascade forming across polls and restarts. Durable on purpose: the
-// 2026-09-19 cascade survived nothing, but a crash loop would.
-db.run(`CREATE TABLE IF NOT EXISTS auto_drops (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  dropped_at INTEGER NOT NULL
-)`);
-
 db.run(`CREATE TABLE IF NOT EXISTS drop_reactions (
   transaction_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`);
 db.run(`CREATE TABLE IF NOT EXISTS agent_runs (
@@ -81,14 +70,6 @@ db.run(`CREATE TABLE IF NOT EXISTS agent_runs (
 function alreadyHandled(txId: string): boolean {
   return db.query("SELECT 1 FROM seen_transactions WHERE transaction_id = ?").get(txId) !== null;
 }
-function autoDropHistory(): DropRecord[] {
-  return (db.query("SELECT name, dropped_at FROM auto_drops ORDER BY dropped_at DESC LIMIT 50").all() as { name: string; dropped_at: number }[])
-    .map((r) => ({ name: r.name, at: r.dropped_at }));
-}
-function recordAutoDrop(name: string, at: number): void {
-  db.run("INSERT INTO auto_drops (name, dropped_at) VALUES (?, ?)", [name, at]);
-}
-
 function markSeen(txId: string, status: string): void {
   db.run("INSERT OR REPLACE INTO seen_transactions (transaction_id, status, first_seen) VALUES (?, ?, ?)", [txId, status, Date.now()]);
 }
@@ -255,7 +236,6 @@ async function runJob(job: Job, occurrence: number): Promise<void> {
 // Kickoffs come from a cache written by the pick'em job itself, sourced from
 // Sleeper rather than a third party, and refreshed by the daily backstop pass
 // (which is also how flex scheduling gets picked up).
-const KICKOFF_CACHE = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-kickoffs.json`;
 let lastPickemPass = 0;
 
 async function cachedKickoffs(): Promise<number[]> {
@@ -457,7 +437,7 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     // over-cap fix needs one drop and then the roster is legal, so a healthy
     // coach never trips this. A loop that has decided to cut somebody every 90
     // seconds trips it on the second attempt and stops itself.
-    const verdict = mayDrop(autoDropHistory(), Date.now());
+    const verdict = dropVerdict();
     if (!verdict.allowed) {
       console.error(`[reconcile] REFUSING to drop: ${verdict.reason}`);
       logEvent("coach", "drop-blocked", `Refused an automatic drop: ${verdict.reason}`, {
@@ -482,7 +462,6 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     }
     try {
       const res = await dropPlayers(gql, ids);
-      for (const d of drops) recordAutoDrop(d.name, Date.now());
       logEvent("coach", "roster-dropped", `Dropped ${drops.map((d) => d.name).join(", ")} to get under the cap`, { status: res.status, drops: drops.map((d) => d.name) });
       // Roster changed: re-solve the lineup now rather than waiting for a timer.
       await resolveLineupNow("a trade completed and the roster changed");

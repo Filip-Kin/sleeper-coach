@@ -19,9 +19,12 @@ export const config = {
   //               -e SLEEPER_ROSTER_ID=1 ...
   // Staging league (created 2026-08-30, exact settings clone of the real one):
   //   league 1399830848848592896 "coach-staging DO NOT USE", draft 1399830849339338752.
-  leagueId: process.env.SLEEPER_LEAGUE_ID ?? "1389357604773322752",
-  draftId: process.env.SLEEPER_DRAFT_ID ?? "1389357604773322753",
-  rosterId: Number(process.env.SLEEPER_ROSTER_ID ?? "3"), // Filip's roster ("--dangerously-skip-perms")
+  // Under `bun test` the defaults are the STAGING league. A test that wants the
+  // real one has to say so with COACH_TEST_ALLOW_REAL=1. The 2026-09-23 audit
+  // found tests importing the daemon opened the production database.
+  leagueId: process.env.SLEEPER_LEAGUE_ID ?? (process.env.NODE_ENV === "test" && !process.env.COACH_TEST_ALLOW_REAL ? "1399830848848592896" : "1389357604773322752"),
+  draftId: process.env.SLEEPER_DRAFT_ID ?? (process.env.NODE_ENV === "test" && !process.env.COACH_TEST_ALLOW_REAL ? "1399830849339338752" : "1389357604773322753"),
+  rosterId: Number(process.env.SLEEPER_ROSTER_ID ?? (process.env.NODE_ENV === "test" && !process.env.COACH_TEST_ALLOW_REAL ? "1" : "3")),
 
   // The separate pick'em pool ("Da Pick Em"), a different Sleeper product with
   // sport "pickem:nfl" and its own GraphQL-only API. 500-team capacity, 5 real

@@ -14,6 +14,7 @@
 // weeks; until then this is the best available and is flagged in the summary.
 
 import { config } from "../config.ts";
+import { leagueRosters } from "../sleeper/graphql.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
 import { loadSeasonProjections } from "./projections.ts";
@@ -68,7 +69,7 @@ export async function evaluateTransactionForUs(tx: TxLike, cfg?: TradeConfig, ro
   const giveIds = Object.entries(tx.drops ?? {}).filter(([, rid]) => rid === rosterId).map(([pid]) => pid);
 
   const proj = await projectionIndex();
-  const rosters = await sleeper.rosters(config.leagueId);
+  const rosters = await leagueRosters(config.leagueId);
   const ours = rosters.find((r) => r.roster_id === rosterId);
   if (!ours) throw new Error(`evaluateTransactionForUs: roster ${rosterId} not found in league ${config.leagueId}`);
 

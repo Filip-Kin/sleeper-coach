@@ -48,10 +48,20 @@ export interface RosterView {
 
 const isTeamCode = (id: string): boolean => /^[A-Z]{2,4}$/.test(id);
 
-/** Build the view from one roster read. Pure. A roster from REST has
- *  `reserve: null` and no `player_map`; it degrades to "everyone is active",
- *  which is the pre-2026-09-19 behaviour, never a crash. */
-export function buildRosterView(roster: Roster): RosterView {
+export class RosterSourceError extends Error {
+  constructor(rosterId: number) {
+    super(`roster ${rosterId} came from a source with no player_map (the cached REST endpoint); IR cannot be told from active. Read it over GraphQL.`);
+    this.name = "RosterSourceError";
+  }
+}
+
+/** Build the view from one roster read. Pure. A roster from REST has no
+ *  `player_map` and a null `reserve`, so IR is indistinguishable from active.
+ *  In season that is an ERROR, not a degrade: the audit of 2026-09-23 showed
+ *  the fallback would offer an IR player as a starter and put him in the drop
+ *  table. Pass `allowRest` only for display code that does not decide anything. */
+export function buildRosterView(roster: Roster, opts: { allowRest?: boolean } = {}): RosterView {
+  if (!roster.player_map && !opts.allowRest && (roster.players?.length ?? 0) > 0) throw new RosterSourceError(roster.roster_id);
   const reserveIds = new Set(roster.reserve ?? []);
   const pm = roster.player_map ?? {};
   const owned: RosterEntry[] = (roster.players ?? []).map((id) => {

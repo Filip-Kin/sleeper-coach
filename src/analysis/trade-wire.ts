@@ -8,6 +8,7 @@
 // unreachable from the running system.
 
 import { config } from "../config.ts";
+import { leagueRosters } from "../sleeper/graphql.ts";
 import type { Roster } from "../sleeper/types.ts";
 import { tokenGql, pendingRosterDelta, applyRosterDelta, type Gql } from "../league/api.ts";
 import { sleeper } from "../sleeper/client.ts";
@@ -77,7 +78,7 @@ export async function snapshot(): Promise<LeagueSnapshot> {
     });
   }
 
-  const rosters = await sleeper.rosters(config.leagueId);
+  const rosters = await leagueRosters(config.leagueId);
   const rosterOf = tradeRostersFrom(rosters, playerById);
   const idByName = new Map<string, string>();
   const ownerIdOf = new Map<number, string>();
@@ -118,7 +119,7 @@ export async function snapshotWithPending(gql: Gql = tokenGql(), leg?: number): 
   const week = leg ?? Math.max(1, (await sleeper.nflState()).week ?? 1);
   const delta = await pendingRosterDelta(gql, week).catch(() => ({ incoming: [], outgoing: [] }));
   if (!delta.incoming.length && !delta.outgoing.length) return snap;
-  const current = (await sleeper.rosters(config.leagueId)).find((r) => r.roster_id === snap.ourRosterId);
+  const current = (await leagueRosters(config.leagueId)).find((r) => r.roster_id === snap.ourRosterId);
   const onIr = new Set(current?.reserve ?? []);
   const effectiveIds = applyRosterDelta(current?.players ?? [], delta);
   const rosterOf = new Map(snap.rosterOf);

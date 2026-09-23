@@ -84,7 +84,7 @@ async function main(): Promise<void> {
 
   const [league, rosters, players] = await Promise.all([
     sleeper.league(leagueId),
-    sleeper.rosters(leagueId),
+    leagueRosters(leagueId),
     loadPlayers(),
   ]);
   const slots = startingSlots(league.roster_positions);

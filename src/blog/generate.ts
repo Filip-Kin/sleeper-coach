@@ -147,7 +147,7 @@ async function weekReview(): Promise<Generated> {
     lines.push(`Your score ranked ${place} of ${ranked.length} in the league this week. Highest was ${ranked[0]!.points.toFixed(2)} by ${teamOf(ranked[0]!.roster_id)}.`);
     lines.push("Your starters and what they actually scored:");
     mine.starters.forEach((id, i) => lines.push(`  ${named(id)}: ${(mine.starters_points[i] ?? 0).toFixed(1)}`));
-    const ourView = ours ? buildRosterView(ours) : null;
+    const ourView = ours ? buildRosterView(ours, { allowRest: true }) : null;
     const benchIds = [...(ourView?.activeIds ?? [])].filter((id) => !mine.starters.includes(id));
     if (ourView?.reserve.length) lines.push(`On injured reserve: ${ourView.reserve.map((e) => e.name).join(", ")}`);
     if (benchIds.length) {
@@ -211,7 +211,7 @@ async function weekReview(): Promise<Generated> {
     const bestFor = (rid: number) => {
       const r = rosters.find((x) => x.roster_id === rid);
       if (!r?.players) return null;
-      return solveLineup(buildRosterWeek([...buildRosterView(r).activeIds], dump, idx, next), slots).total;
+      return solveLineup(buildRosterWeek([...buildRosterView(r, { allowRest: true }).activeIds], dump, idx, next), slots).total;
     };
     const usProj = bestFor(config.rosterId);
     const themProj = oppNext ? bestFor(oppNext.roster_id) : null;

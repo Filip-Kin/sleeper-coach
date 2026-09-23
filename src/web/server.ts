@@ -36,7 +36,7 @@ async function stateJson(): Promise<Response> {
   const ranked = rankByVor(projections, league).slice(0, 60);
 
   const me = rosters.find((r) => r.roster_id === config.rosterId);
-  const myView = me ? buildRosterView(me) : null;
+  const myView = me ? buildRosterView(me, { allowRest: true }) : null;
   const myPlayers = (myView?.owned ?? []).map((e) => {
     const p = players[e.playerId];
     return { id: e.playerId, name: p ? (p.full_name ?? `${p.first_name} ${p.last_name}`) : e.name, pos: e.position, team: e.team ?? "?", injury: e.injuryStatus, onIr: e.onIr };

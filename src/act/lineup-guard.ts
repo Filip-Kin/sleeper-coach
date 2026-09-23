@@ -33,7 +33,7 @@ import { sendAlert } from "../alert.ts";
 import { config } from "../config.ts";
 import { buildRosterView } from "../analysis/roster-view.ts";
 
-const KICKOFF_CACHE = `${process.env.STATE_DIR ?? "/data/sleeper-coach"}/pickem-kickoffs.json`;
+import { KICKOFF_CACHE } from "../paths.ts";
 
 // #region pure
 export interface LineupSwap { slot: string; out: string; in: string; why: string }

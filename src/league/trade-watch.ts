@@ -160,7 +160,8 @@ export async function handlePendingTrades(
     let counter: Proposal | null = null;
     let status = "";
     if (ev.verdict === "accept") {
-      status = await acceptTrade(gql, t.transactionId, leg);
+      const give = Object.entries(t.drops).filter(([, rid]) => rid === config.rosterId).map(([pid]) => pid);
+      status = await acceptTrade(gql, t.transactionId, leg, give);
     } else {
       // A counter is a 2-party propose_trade by construction, so it makes no
       // sense against a three-way trade: we would be offering one rival a
