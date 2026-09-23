@@ -66,7 +66,7 @@ test("the brief renders our outbound offers so the coach cannot deny one", async
     surplus: [], thin: [], askFor: [], deals: [], lastOffer: null,
     pendingFromUs: [{ give: ["Parker Washington"], get: ["Mark Andrews"] }],
   });
-  expect(text).toContain("I give Parker Washington, I get Mark Andrews");
+  expect(text).toContain("you give Parker Washington, you get Mark Andrews");
   expect(text).toContain("Never deny an offer you have made");
 });
 
