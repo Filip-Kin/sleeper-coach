@@ -32,7 +32,8 @@ import { logEvent } from "../log.ts";
 
 /** The git SHA baked into the image (Dockerfile ARG COACH_SHA, which Coolify
  *  fills from SOURCE_COMMIT). "unknown" outside a built image. */
-export const COACH_SHA = (process.env.COACH_SHA ?? process.env.SOURCE_COMMIT ?? "unknown").trim() || "unknown";
+const shaEnv = [process.env.COACH_SHA, process.env.SOURCE_COMMIT].map((s) => (s ?? "").trim()).find((s) => s && s !== "unknown");
+export const COACH_SHA = shaEnv ?? "unknown";
 export const CANARY_MARK = "boot-canary";
 export function canaryFreezeContent(sha = COACH_SHA): string {
   return `${CANARY_MARK} ${sha}\n`;
