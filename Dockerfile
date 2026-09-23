@@ -17,8 +17,17 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
 COPY . .
-RUN chmod +x bin/coach bin/act entrypoint.sh
+RUN chmod +x bin/coach bin/act entrypoint.sh scripts/soak.sh scripts/hooks/pre-push
 ENV PATH="/app/bin:${PATH}"
+
+# The git SHA this image was built from. Coolify passes SOURCE_COMMIT as a
+# build arg; a hand build can pass --build-arg COACH_SHA=$(git rev-parse HEAD).
+# The daemon logs a `deploy` event with it and the boot canary writes it into
+# the kill-switch file, so "what is running" is answerable from the activity
+# log and from `docker exec <c> env | grep COACH_SHA`. See DEPLOY.md.
+ARG SOURCE_COMMIT=unknown
+ARG COACH_SHA=$SOURCE_COMMIT
+ENV COACH_SHA=$COACH_SHA
 
 # Persistent state (the session token, SQLite, claude HOME, brain notes) lives
 # on a bind-mount at /data/sleeper-coach; the defaults in code point there.

@@ -16,6 +16,8 @@
     "web": "bun run src/web/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "./scripts/run-tests.sh",
+    "soak": "bash scripts/soak.sh",
+    "setup-hooks": "git config core.hooksPath scripts/hooks && echo 'hooks: scripts/hooks'",
     "pickem": "bun run src/pickem/run.ts",
     "pickem-backtest": "bun run src/pickem/backtest.ts"
   },
