@@ -76,10 +76,30 @@ describe("planLineup", () => {
     expect(plan.unfilled).toEqual(["K"]);
   });
 
-  test("never writes an empty slot where the site has a player", () => {
-    const rs = roster().filter((p) => p.playerId !== "SEA");
+  test("never empties a slot whose active occupant merely has no replacement", () => {
+    // An Out kicker with nobody behind him stays put (see the test above); the
+    // rule that matters is that an ACTIVE occupant is kept, not a phantom.
+    const rs = roster().map((p) => (p.playerId === "SEA" ? { ...p, injuryStatus: "Out" } : p));
     const plan = planLineup(CURRENT, rs, SLOTS, new Set());
     expect(plan.ids[6]).toBe("SEA");
+  });
+
+  // R9. An occupant who is not on the active roster (dropped, traded, or parked
+  // on IR while still listed as a starter) is a phantom, and a phantom is an
+  // empty slot: fill it if we can, and write it empty if we cannot, because
+  // Sleeper is already scoring it as empty.
+  test("an occupant not in the active set is treated as an empty slot and filled", () => {
+    const current = ["q1", "IRGUY", "r2", "w1", "w2", "k1", "SEA"];
+    const plan = planLineup(current, roster(), SLOTS, new Set());
+    expect(plan.changed).toBe(true);
+    expect(plan.ids).not.toContain("IRGUY");
+    expect(plan.ids[1]).toBe("r1");
+  });
+  test("a phantom with no replacement is written empty", () => {
+    const rs = roster().filter((p) => p.playerId !== "SEA");
+    const plan = planLineup(CURRENT, rs, SLOTS, new Set());
+    expect(plan.changed).toBe(true);
+    expect(plan.ids[6]).toBe("0");
   });
 });
 
