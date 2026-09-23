@@ -2,7 +2,8 @@ import { describe, expect, test, beforeEach } from "bun:test";
 import { rmSync } from "node:fs";
 import { dropPlayers, addFreeAgent, submitWaiverClaim, acceptTrade, pendingTrades, completedTrades, type Gql } from "./api.ts";
 import { DropRefused, dropHistory, resetLedgerForTests } from "./drop-ledger.ts";
-import { DB_PATH } from "../paths.ts";
+import { DB_PATH, FREEZE_FILE } from "../paths.ts";
+import { existsSync } from "node:fs";
 import { recentEvents } from "../log.ts";
 
 // The rails live INSIDE the write, so every caller gets them: the daemon, a
@@ -12,7 +13,7 @@ const L = "1399830848848592896";
 const ok = (field: string): Gql => async () => ({ data: { [field]: { transaction_id: "t1", status: "complete" } } });
 const recorder = (rows: Record<string, unknown>[]) => { const asked: string[] = []; const gql: Gql = async (q) => { asked.push(q); return { data: { league_transactions_by_status: rows } }; }; return { gql, asked }; };
 
-beforeEach(() => { resetLedgerForTests(); try { rmSync(DB_PATH); } catch { /* fresh */ } });
+beforeEach(() => { resetLedgerForTests(); for (const f of [DB_PATH, FREEZE_FILE]) { try { rmSync(f); } catch { /* fresh */ } } });
 
 describe("drop chokepoint", () => {
   test("dropPlayers records the drop and logs an event", async () => {
@@ -26,6 +27,9 @@ describe("drop chokepoint", () => {
     await expect(dropPlayers(gql, ["2"], 1, L, "test")).rejects.toBeInstanceOf(DropRefused);
     expect(sent).toBe(0);
     expect(recentEvents(5).some((e) => e.type === "drop-blocked")).toBe(true);
+    // A cascade freezes the coach at the chokepoint itself.
+    await Bun.sleep(20);
+    expect(existsSync(FREEZE_FILE)).toBe(true);
   });
   test("a free add with a drop and a claim with a drop are counted", async () => {
     await addFreeAgent(ok("league_create_transaction"), "10", "11", 1, L);

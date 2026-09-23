@@ -12,6 +12,8 @@ const HOME = process.env.HOME ?? "/data/sleeper-coach/config";
 // PATH may not include — resolve it absolutely.
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? `${HOME}/.local/bin/claude`;
 const MODEL = process.env.COACH_MODEL ?? "claude-opus-4-8";
+/** One step down when the installed CLI is too old for a model id. */
+const MODEL_FALLBACK: Record<string, string> = { "claude-opus-5-5": "claude-opus-5", "claude-fable-5-1": "claude-opus-5" };
 const EFFORT = process.env.COACH_EFFORT ?? "high";
 const SETTINGS = join(REPO_ROOT, "claude-settings.json");
 // A second settings file for anything driven by input we did not write: DMs from
@@ -52,6 +54,7 @@ export interface RunOptions {
   partial?: boolean; // stream partial deltas (default true); false = whole messages only
   model?: string; // override the model (e.g. a fast model for short quips)
   effort?: string; // override reasoning effort: low|medium|high|xhigh
+  noFallback?: boolean; // internal: set on the one retry after a model rejection
   tools?: string[]; // override the tool allowlist; [] = no tools (fastest, text-only)
   // Set for any run whose prompt contains text a rival wrote. Denies every tool,
   // and REPLACES the coach system prompt instead of appending to it, so an
@@ -164,5 +167,12 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   if (resultError) error = resultError;
   else if (exitCode !== 0) error = stderr.slice(0, 300) || `claude exited ${exitCode}`;
   else if (!text.trim()) error = stderr.slice(0, 300) || "no output from agent";
+  // A CLI too old for the requested model says so. Fall back ONE step, once,
+  // and say which model actually answered, rather than sending nothing.
+  const fallback = MODEL_FALLBACK[model];
+  if (error && /does not support this model|not a valid model|unknown model/i.test(`${error} ${stderr}`) && fallback && !opts.noFallback) {
+    console.warn(`[runner] ${model} rejected by the CLI; retrying once with ${fallback}`);
+    return runAgent({ ...opts, model: fallback, noFallback: true });
+  }
   return { sessionId, text: text.trim(), exitCode, error };
 }

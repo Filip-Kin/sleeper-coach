@@ -8,6 +8,11 @@
 # than a silent omission.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# Every test writes under the scratch state dir (src/paths.ts under NODE_ENV=test).
+# Start clean: a self-freeze written by one file's cascade test must not freeze
+# the next file's writes.
+export NODE_ENV=test
+rm -rf /tmp/sleeper-coach-test
 
 FOUND=$(find src -name '*.test.ts' | sort)
 fail=0

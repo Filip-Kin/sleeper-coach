@@ -24,7 +24,7 @@ function snap(): LeagueSnapshot {
   const playerById = new Map<string, TradePlayer>();
   const idByName = new Map<string, string>();
   for (const ps of rosterOf.values()) for (const p of ps) { playerById.set(p.playerId!, p); idByName.set(p.name, p.playerId!); }
-  return { playerById, rosterOf, ourRosterId: 3, idByName, ownerIdOf: new Map([[1, "u1"], [3, "u3"], [5, "u5"]]) };
+  return { playerById, rosterOf, ourRosterId: 3, idByName, ownerIdOf: new Map([[1, "u1"], [3, "u3"], [5, "u5"]]), week: 3, capacity: 16 };
 }
 const NAMES = new Map([["u1", "Cloud Nine"], ["u3", "Filip96"], ["u5", "Third Wheel"]]);
 

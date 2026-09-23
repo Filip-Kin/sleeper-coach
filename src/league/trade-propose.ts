@@ -139,7 +139,7 @@ export function ensureTable(db: Database): void {
  *  settings.expires_at, so the expiry is reconstructed from created + TTL,
  *  which is what every offer we send carries. */
 export function liveOffers(open: PendingTrade[], now: number): PendingTrade[] {
-  return open.filter((t) => !tradeDead({ status: t.status, settings: { expires_at: Math.floor(t.created / 1000) + OFFER_TTL_DAYS * 86_400 } }, now));
+  return open.filter((t) => !tradeDead({ status: t.status, settings: { expires_at: t.expiresAt ?? Math.floor(t.created / 1000) + OFFER_TTL_DAYS * 86_400 } }, now));
 }
 
 /** Settle trade_proposals rows against what Sleeper still lists (T12): a row

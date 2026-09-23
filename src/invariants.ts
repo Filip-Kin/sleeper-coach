@@ -154,7 +154,7 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
   {
     const open = new Set(input.outstandingOffers.map((o) => o.transactionId));
     const ghosts = input.proposalsDb
-      .filter((p) => p.status === "proposed" && p.transactionId && !open.has(p.transactionId))
+      .filter((p) => (p.status === "proposed" || p.status === "open") && p.transactionId && !open.has(p.transactionId))
       .map((p) => p.transactionId as string);
     out.push({
       name: "proposals", ok: ghosts.length === 0, action: "alert",

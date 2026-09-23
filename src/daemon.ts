@@ -13,6 +13,10 @@ import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
 import { DropRefused } from "./league/drop-ledger.ts";
 import { overCap } from "./analysis/roster-view.ts";
+import { heartbeat } from "./heartbeat.ts";
+import { bootCanary, releaseCanaryFreeze, canaryFreezeActive, logDeploy } from "./soak/canary.ts";
+import { runInvariants, collectInvariantInput } from "./invariants.ts";
+import { pruneDeadJobs } from "./soak/migrations.ts";
 import { activeRailRoster, chooseLegalForcedDrops } from "./analysis/reconcile-plan.ts";
 import { reconcileReserve } from "./act/reserve-reconcile.ts";
 import { RunLedger } from "./act/run-ledger.ts";
@@ -183,6 +187,7 @@ const JOB_COMMAND: Record<string, string[]> = {
   "free-agent": waiversLive
     ? ["bun", "run", "src/act/waiver-run.ts", "--live", "--adds-only"]
     : ["bun", "run", "src/act/waiver-run.ts", "--adds-only"],
+  "alert-digest": ["bun", "run", "scripts/alert-digest.ts"],
 };
 
 async function runJob(job: Job, occurrence: number): Promise<void> {
@@ -517,7 +522,21 @@ async function reactToCompletedTrades(gql: ReturnType<typeof leagueGql>, leg: nu
 }
 // #endregion
 
+const SOAK_POLLS = Number(process.env.SOAK_POLLS ?? 0);
+let polls = 0;
+
 async function pollOnce(): Promise<void> {
+  polls++;
+  heartbeat(); // the web server's /health reads this; a stuck poll goes 503 in 5 min
+  // A fresh container boots frozen (entrypoint writes `boot-canary <sha>`). The
+  // freeze lifts only after read-only checks pass: token, real league id,
+  // roster legal, matchup points nonzero in a scored week. A human freeze is
+  // never touched here.
+  if (canaryFreezeActive()) {
+    const c = await bootCanary();
+    if (c.ok) logEvent("system", "canary-pass", `Boot canary passed; freeze ${releaseCanaryFreeze()}.`);
+    else await sendAlert("Boot canary failed, still frozen", c.failures.join("; "), { key: "canary" }).catch(() => {});
+  }
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
   if (draftActive()) return; // the draft orchestrator owns the league while it runs
@@ -588,9 +607,24 @@ async function pollOnce(): Promise<void> {
       console.error(`[daemon] dm check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  // Runtime invariants, every 10th poll (15 min): roster legal on Sleeper, no
+  // starter on IR, claims have slots, offers we think are open still exist,
+  // scheduled jobs actually ran, drop and alert budgets. One push per invariant
+  // per day; the roster ones freeze. This is what tells us about a broken
+  // roster at 9 AM instead of Filip at 10:38.
+  if (polls % 10 === 1) {
+    try {
+      await runInvariants(await collectInvariantInput(db, gql, round));
+    } catch (err) {
+      console.error(`[daemon] invariants failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }
 
 async function main(): Promise<void> {
+  logDeploy();
+  pruneDeadJobs(db, JOBS);
   logEvent("daemon", "online", "Daemon started; watching for trades, auth and the weekly schedule.");
   console.log(`[daemon] polling every ${POLL_INTERVAL_MS / 1000}s, db=${DB_PATH}`);
   // A job the previous container started and never finished (killed by a
@@ -613,6 +647,7 @@ async function main(): Promise<void> {
       await runDueJobs();
       await pickemKickoffPass();
       if (!draftActive() && Date.now() - lastAuthCheck > AUTH_CHECK_MS) await checkAuth();
+      if (SOAK_POLLS && polls >= SOAK_POLLS) { logEvent("daemon", "soak-done", `Soak finished after ${polls} polls.`); process.exit(0); }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[daemon] poll error: ${msg}`);

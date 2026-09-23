@@ -104,11 +104,11 @@ test("the backoff schedule is 5 min, 30 min, 2 h, then daily", () => {
   expect(BACKOFF_MS).toEqual([5 * 60_000, 30 * 60_000, 2 * 3_600_000, 24 * 3_600_000]);
 });
 
-test("the DM model is Opus 5 at medium effort, passed explicitly", () => {
+test("the DM model is Opus 5.5 at medium effort, passed explicitly", () => {
   // Opus 5.5 cannot switch thinking off; effort is the only dial, so it is
   // never left to the runner default. The container CLI (2.1.223) rejects the
   // claude-opus-5-5 id until it is updated, hence the plain opus-5 default.
-  expect(DM_MODEL).toBe("claude-opus-5");
+  expect(DM_MODEL).toBe("claude-opus-5-5"); // one-step CLI fallback to claude-opus-5 lives in runner.ts
   expect(DM_EFFORT).toBe("medium");
 });
 
@@ -272,7 +272,7 @@ function fakeBrief(): DmBrief {
   const rosterOf = new Map<number, TradePlayer[]>();
   const playerById = new Map<string, TradePlayer>();
   for (const p of FIX) { (rosterOf.get(p.rosterId) ?? rosterOf.set(p.rosterId, []).get(p.rosterId)!).push(p); playerById.set(p.playerId!, p); }
-  const snap: LeagueSnapshot = { playerById, rosterOf, ourRosterId: 3, idByName: new Map(), ownerIdOf: new Map([[1, "999"], [3, "1267685386142887936"]]) };
+  const snap: LeagueSnapshot = { playerById, rosterOf, ourRosterId: 3, idByName: new Map(), ownerIdOf: new Map([[1, "999"], [3, "1267685386142887936"]]), week: 3, capacity: 16 };
   return {
     text: "TRADE FACTS: nothing on the table.",
     brief: { surplus: [], thin: [], askFor: [], deals: [], lastOffer: null, pendingFromUs: [] },

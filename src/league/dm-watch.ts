@@ -49,7 +49,7 @@ import {
   listDms, threadMessages, sendDm, pendingChatRequests, acceptChatRequest, proposeTrade, outstandingOffers,
   type Gql, type DmMessage, type DmThread, type ChatRequest, type PendingTrade, type ProposalSpec,
 } from "./api.ts";
-import { pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS } from "./trade-propose.ts";
+import { pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS, specFor, liveOffers} from "./trade-propose.ts";
 import { buildDmBrief, counterpartOpener, type DmBrief, type Counterpart } from "./dm-brief.ts";
 import { checkFacts, safeReply, type FactContext, type FactPlayer, type Violation } from "./dm-facts.ts";
 import { scheduleContext, type LeagueSnapshot } from "../analysis/trade-wire.ts";
@@ -89,7 +89,7 @@ export const STALE_PENDING_MS = 10 * 60_000;
  *  rejects the claude-opus-5-5 id ("version 2.1.280 or newer is required");
  *  once it is updated, DM_MODEL=claude-opus-5-5 in the environment switches
  *  without a deploy. */
-export const DM_MODEL = process.env.DM_MODEL ?? "claude-opus-5";
+export const DM_MODEL = process.env.DM_MODEL ?? "claude-opus-5-5";
 export const DM_EFFORT = process.env.DM_EFFORT ?? "medium";
 // #endregion
 
@@ -285,10 +285,8 @@ export async function counterOnRequest(a: CounterArgs): Promise<CounterOutcome> 
   const cfg = { ...DEFAULT_FAIRNESS, ...a.sched };
   const pick = pickCounter(ours, { managerId: String(a.theirRosterId), teamName: `roster ${a.theirRosterId}`, roster: theirs }, cfg, a.db, a.now);
   if (!pick) return none("They asked for an offer. Nothing on their roster clears your bar at a price you would pay right now, so say so plainly and invite them to try you.");
-  const adds: Record<string, number> = {}, drops: Record<string, number> = {};
-  for (const p of pick.offer.receive) { const id = a.snap.idByName.get(p.name); if (!id) throw new Error(`no id for ${p.name}`); adds[id] = a.snap.ourRosterId; drops[id] = a.theirRosterId; }
-  for (const p of pick.offer.give)    { const id = a.snap.idByName.get(p.name); if (!id) throw new Error(`no id for ${p.name}`); adds[id] = a.theirRosterId; drops[id] = a.snap.ourRosterId; }
-  const res = await a.propose({ adds, drops, expiresAt: Math.floor((a.now + OFFER_TTL_DAYS * 86_400_000) / 1000) });
+  // Keyed on player ids by specFor, never on names (two Josh Allens in the dump).
+  const res = await a.propose(specFor(pick, a.snap, a.theirRosterId, a.now));
   const give = pick.offer.give.map((p) => p.name), get = pick.offer.receive.map((p) => p.name);
   recordProposal(a.db, pick, res.transactionId, a.now);
   a.db.run("INSERT INTO dm_counters (roster_id, at, transaction_id, give, get) VALUES (?, ?, ?, ?, ?)",
@@ -364,7 +362,7 @@ const DEFAULT_IO: DmIo = {
   acceptRequests: acceptLeagueChatRequests,
   counter: async (gql, db, brief, theirRosterId, now) => {
     const week = Math.max(1, (await sleeper.nflState()).week ?? 1);
-    const open = await outstandingOffers(gql, week);
+    const open = liveOffers(await outstandingOffers(gql, week), now);
     const sched = await scheduleContext(theirRosterId);
     return counterOnRequest({ db, now, theirRosterId, snap: brief.snap, open, sched, propose: (spec) => proposeTrade(gql, spec) });
   },

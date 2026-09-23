@@ -31,6 +31,9 @@ if [ ! -x "${HOME}/.local/bin/claude" ]; then
     curl -fsSL https://claude.ai/install.sh | bash || echo "[entrypoint] claude install failed; check on next start"
 fi
 export PATH="${HOME}/.local/bin:${PATH}"
+# Keep the CLI current: the DM bot asks for claude-opus-5-5, which needs 2.1.280+.
+# Best effort with a short timeout; a failure here must never stop the boot.
+timeout 120 "${HOME}/.local/bin/claude" update >/dev/null 2>&1 || echo "[entrypoint] claude update skipped"
 
 # Boot frozen. Every container start writes `boot-canary <sha>` into the
 # kill-switch file, and the daemon removes it only once its read-only canary

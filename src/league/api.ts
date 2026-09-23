@@ -26,7 +26,8 @@
 // all dom manipulation since it seems we can do everything through graphql."
 
 import { config } from "../config.ts";
-import { assertWritesAllowed } from "../killswitch.ts";
+import { assertWritesAllowed, freezeNow } from "../killswitch.ts";
+import { sendAlert } from "../alert.ts";
 import { logEvent } from "../log.ts";
 import { legsToScan, tradeInFlight as ruleTradeInFlight } from "../sleeper/rules.ts";
 import { dropVerdict, recordDrop, DropRefused } from "./drop-ledger.ts";
@@ -150,6 +151,8 @@ export interface PendingTrade {
   adds: Record<string, number>;
   drops: Record<string, number>;
   created: number;
+  /** Sleeper's own expiry for a proposal (settings.expires_at, seconds), when present. */
+  expiresAt?: number | null;
 }
 
 /** Trades awaiting a response. Sleeper calls this status "proposed". */
@@ -161,7 +164,7 @@ export async function pendingTrades(gql: Gql, leg: number, leagueId = config.lea
   for (const l of legsToScan(leg)) {
     const body = await gql(
       `{league_transactions_by_status(league_id:"${safeId(leagueId)}",status:"proposed",leg:${l})` +
-      `{transaction_id status type roster_ids consenter_ids adds drops created}}`,
+      `{transaction_id status type roster_ids consenter_ids adds drops created settings}}`,
     );
     const raw = (unwrap(body, "league_transactions_by_status") ?? []) as Record<string, unknown>[];
     for (const t of raw) {
@@ -174,6 +177,7 @@ export async function pendingTrades(gql: Gql, leg: number, leagueId = config.lea
         rosterIds: (t.roster_ids as number[]) ?? [], consenterIds: (t.consenter_ids as number[]) ?? [],
         adds: (t.adds as Record<string, number>) ?? {}, drops: (t.drops as Record<string, number>) ?? {},
         created: Number(t.created ?? 0),
+        expiresAt: typeof (t.settings as { expires_at?: unknown } | null)?.expires_at === "number" ? (t.settings as { expires_at: number }).expires_at : null,
       });
     }
   }
@@ -387,6 +391,13 @@ function guardDrop(action: string, dropIds: string[], via: string): void {
   const verdict = dropVerdict();
   if (!verdict.allowed) {
     logEvent("coach", "drop-blocked", `Refused ${action}: ${verdict.reason}`, { wanted: dropIds, via, reason: verdict.reason, freeze: verdict.freeze });
+    // A second automatic drop inside the window is a runaway loop, not a
+    // decision. The coach freezes itself here, at the chokepoint, so every
+    // caller gets the same protection. Removing the FREEZE file lifts it.
+    if (verdict.freeze) {
+      void freezeNow(verdict.reason).catch(() => {});
+      void sendAlert("Coach froze itself: repeated drops", `${verdict.reason}. It wanted to ${action} (${dropIds.join(", ")}). Writes are frozen until the FREEZE file is removed.`, { key: "cascade" }).catch(() => {});
+    }
     throw new DropRefused(verdict, dropIds);
   }
 }
@@ -521,7 +532,7 @@ export async function completedTrades(gql: Gql, leg: number, leagueId = config.l
   for (const status of ["complete", "processed"]) for (const l of legsToScan(leg)) {
     const body = await gql(
       `{league_transactions_by_status(league_id:"${safeId(leagueId)}",status:"${status}",leg:${l})` +
-      `{transaction_id status type roster_ids consenter_ids adds drops created}}`,
+      `{transaction_id status type roster_ids consenter_ids adds drops created settings}}`,
     ).catch(() => ({} as Record<string, unknown>));
     const data = (body.data ?? {}) as Record<string, unknown>;
     const raw = (data.league_transactions_by_status ?? []) as Record<string, unknown>[];
@@ -667,6 +678,7 @@ export async function updateReserve(
     `mutation{roster_update_reserve(league_id:"${safeId(leagueId)}",roster_id:${Math.trunc(rosterId)},reserve:${list}){roster_id reserve}}`,
   );
   const r = (unwrap(body, "roster_update_reserve") ?? {}) as { reserve?: string[] };
+  logEvent("coach", "write-reserve", `Injured reserve set to [${(r.reserve ?? []).join(", ")}].`, { reserve: r.reserve ?? [], rosterId, leagueId });
   return r.reserve ?? [];
 }
 
