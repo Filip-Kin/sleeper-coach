@@ -15,6 +15,44 @@ const roster = () => [
 ];
 const CURRENT = ["q1", "r1", "r2", "w1", "w2", "k1", "SEA"];
 
+describe("planLineup swap margin", () => {
+  const withQ2 = (pts: number) => roster().map((p) => (p.playerId === "q2" ? { ...p, points: pts } : p));
+  test("an edge inside the margin leaves the incumbent in (Hurts 18.7, Prescott 18.8)", () => {
+    const plan = planLineup(CURRENT, withQ2(20.1), SLOTS, new Set(), 1);
+    expect(plan.changed).toBe(false);
+    expect(plan.ids[0]).toBe("q1");
+  });
+  test("an edge past the margin swaps, and the label shows the real projection", () => {
+    const plan = planLineup(CURRENT, withQ2(21.5), SLOTS, new Set(), 1);
+    expect(plan.changed).toBe(true);
+    expect(plan.ids[0]).toBe("q2");
+    expect(plan.swaps[0]?.out).toBe("Pq1 20.0");
+    expect(plan.swaps[0]?.in).toBe("Pq2 21.5");
+  });
+  test("an Out starter is replaced whatever the margin says", () => {
+    const rs = roster().map((p) => (p.playerId === "r1" ? { ...p, injuryStatus: "Out" } : p));
+    const plan = planLineup(CURRENT, rs, SLOTS, new Set(), 5);
+    expect(plan.ids).not.toContain("r1");
+    expect(plan.ids).toContain("r3");
+  });
+  test("a starter projected at zero gets no protection", () => {
+    const rs = roster().map((p) => (p.playerId === "w2" ? { ...p, points: 0 } : p));
+    const plan = planLineup(CURRENT, rs, SLOTS, new Set(), 1);
+    expect(plan.ids).not.toContain("w2");
+    expect(plan.ids).toContain("r3");
+  });
+  test("a forced swap does not drag a marginal one along with it", () => {
+    const rs = withQ2(20.1).map((p) => (p.playerId === "r1" ? { ...p, injuryStatus: "Out" } : p));
+    const plan = planLineup(CURRENT, rs, SLOTS, new Set(), 1);
+    expect(plan.ids[0]).toBe("q1");
+    expect(plan.ids).toContain("r3");
+    expect(plan.swaps.length).toBe(1);
+  });
+  test("margin 0 is the old behaviour", () => {
+    expect(planLineup(CURRENT, withQ2(20.1), SLOTS, new Set(), 0).ids[0]).toBe("q2");
+  });
+});
+
 describe("planLineup", () => {
   test("optimal lineup already set means no change", () => {
     const plan = planLineup(CURRENT, roster(), SLOTS, new Set());

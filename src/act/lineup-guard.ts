@@ -37,6 +37,15 @@ import { KICKOFF_CACHE } from "../paths.ts";
 import { FailureLedger, classifyLineupRefusal } from "./failure-ledger.ts";
 
 // #region pure
+/** A healthy starter is only replaced by a player projected at least this many
+ *  points better. On 2026-09-24 the guard benched Jalen Hurts for Dak Prescott
+ *  on 18.8 against 18.7, and on 09-22 it moved the same FLEX slot twice in
+ *  eight hours on 0.6 and 0.5. Measured over weeks 1-3: 96% of the moves a
+ *  healthy player's projection makes between locks are under 1.0, so an edge
+ *  that small is the projection breathing, not news. Every swap that was
+ *  about something real (2.7, 3.5, 4.9) clears it. */
+export const SWAP_MARGIN = Number(process.env.LINEUP_SWAP_MARGIN ?? "1");
+
 export interface LineupSwap { slot: string; out: string; in: string; why: string }
 export interface LineupPlan {
   ids: string[]; // slot order, "0" for an empty slot
@@ -60,14 +69,23 @@ function canonical(ids: string[], slots: string[]): string {
  *  dropped, traded away, or parked on IR while still listed) is a phantom, and
  *  a phantom is an empty slot. He is replaced when a body exists and written
  *  empty when none does, because Sleeper is already scoring the slot as empty. */
-export function planLineup(current: string[], candidates: LineupPlayer[], slots: string[], locked: Set<string>): LineupPlan {
+export function planLineup(current: string[], candidates: LineupPlayer[], slots: string[], locked: Set<string>, margin = SWAP_MARGIN): LineupPlan {
   const active = new Set(candidates.map((p) => p.playerId));
   const site = slots.map((_, i) => current[i] || "0");
   const cur = site.map((pid) => (pid !== "0" && !active.has(pid) ? "0" : pid));
   // 1. Locked starters stay where they are; locked bench players cannot come in.
   const pinned = cur.map((pid) => (pid !== "0" && locked.has(pid) ? pid : null));
   const pinnedSet = new Set(pinned.filter((p): p is string => p !== null));
-  const free = candidates.filter((p) => !pinnedSet.has(p.playerId) && !locked.has(p.playerId));
+  const starting = new Set(cur.filter((pid) => pid !== "0"));
+  // The incumbent keeps his slot unless the challenger beats him by `margin`.
+  // The solver sees the starter's projection plus the margin; everything a
+  // human reads (labels, totals) uses the real number. A starter projected
+  // at zero gets no help, and one the solver excludes for status (Out, bye,
+  // inactive) is excluded whatever his points say, so injury swaps are
+  // untouched.
+  const free = candidates
+    .filter((p) => !pinnedSet.has(p.playerId) && !locked.has(p.playerId))
+    .map((p) => (margin > 0 && p.points > 0 && starting.has(p.playerId) ? { ...p, points: p.points + margin } : p));
   const freeIdx = slots.map((_, i) => i).filter((i) => pinned[i] === null);
 
   // 2. Solve the slots that are still open with the players that can move.
