@@ -30,7 +30,7 @@ import { assessVeto, DEFAULT_VETO } from "./league/veto.ts";
 import { snapshot, scheduleContext } from "./analysis/trade-wire.ts";
 import { activeCapacity } from "./analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "./analysis/trade-fair.ts";
-import { freezeState, assertWritesAllowed } from "./killswitch.ts";
+import { freezeState, dropFreezeState, assertWritesAllowed } from "./killswitch.ts";
 
 // Long-running process the container execs. Mirrors the pit-podcast daemon
 // shape: an infinite poll loop with durable SQLite state, each cycle wrapped so
@@ -463,10 +463,14 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     logEvent("coach", "roster-reconcile", `Over cap by ${over}; dropping ${drops.map((d) => d.name).join(", ")}`, {
       over, drops: drops.map((d) => ({ name: d.name, playerId: d.playerId, cost: d.cost })),
     });
-    if (freezeState().frozen) {
+    // Both files stop a drop: the human FREEZE and the breaker's DROP_FREEZE.
+    // Asked here, before the write, so a frozen over-cap roster is one
+    // throttled alert rather than a "drop failed" push every poll.
+    const dropFreeze = dropFreezeState();
+    if (dropFreeze.frozen) {
       if (Date.now() - lastStuckAlert > STUCK_ALERT_MS) {
         lastStuckAlert = Date.now();
-        await sendAlert("Roster over cap (frozen)", `Would drop ${drops.map((d) => d.name).join(", ")} but writes are frozen.`).catch(() => {});
+        await sendAlert("Roster over cap (drops frozen)", `Would drop ${drops.map((d) => d.name).join(", ")} but ${dropFreeze.reason}.`).catch(() => {});
       }
       return;
     }

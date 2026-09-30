@@ -50,9 +50,9 @@ function input(over: Partial<InvariantInput> = {}, r: Roster = roster()): Invari
 const byName = (checks: InvariantCheck[]): Record<string, InvariantCheck> => Object.fromEntries(checks.map((c) => [c.name, c]));
 
 describe("a healthy world passes every invariant", () => {
-  test("all nine ok", () => {
+  test("all ten ok", () => {
     const c = evaluateInvariants(input());
-    expect(c.length).toBe(9);
+    expect(c.length).toBe(10);
     expect(c.filter((x) => !x.ok).map((x) => x.name)).toEqual([]);
   });
 });
@@ -109,6 +109,31 @@ describe("empty-slot", () => {
     const r = roster();
     r.starters = ["0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"];
     expect(byName(evaluateInvariants(input({}, r)))["empty-slot"]!.detail).toContain("QB empty with P p0/P p13");
+  });
+  test("a 0 in QB with the only spares Out or on bye is fine (nobody startable)", () => {
+    const r = roster({ injuries: { p0: "Out" } });
+    r.starters = ["0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"];
+    // p13 is the other QB; HOU's bye is week 8.
+    r.player_map!["p13"]!.team = "HOU";
+    const c = byName(evaluateInvariants(input({ state: { ...STATE, week: 8 } }, r)))["empty-slot"]!;
+    expect(c.ok).toBe(true);
+    // Week 3 (no bye): p13 is startable, so the hole is real.
+    expect(byName(evaluateInvariants(input({}, r)))["empty-slot"]!.detail).toContain("QB empty with P p13");
+  });
+  test("a Questionable spare still counts as startable", () => {
+    const r = roster({ injuries: { p0: "Out", p13: "Questionable" } });
+    r.starters = ["0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"];
+    expect(byName(evaluateInvariants(input({}, r)))["empty-slot"]!.ok).toBe(false);
+  });
+});
+
+describe("drop-freeze", () => {
+  test("absent passes, present is an alert-class failure carrying the reason", () => {
+    expect(byName(evaluateInvariants(input()))["drop-freeze"]!.ok).toBe(true);
+    const c = byName(evaluateInvariants(input({ dropFreeze: { frozen: true, reason: "drops frozen by the circuit breaker: 4 in 24h" } })))["drop-freeze"]!;
+    expect(c.ok).toBe(false);
+    expect(c.action).toBe("alert");
+    expect(c.detail).toContain("4 in 24h");
   });
 });
 
@@ -174,6 +199,16 @@ describe("drops", () => {
     const hist = Array.from({ length: DAILY_LIMIT + 1 }, (_, i) => ({ name: `d${i}`, at: NOW - 2 * 86_400_000 }));
     expect(byName(evaluateInvariants(input({ dropHistory: hist })))["drops"]!.ok).toBe(true);
   });
+  test("trade gives, filed claims and manual drops do not count", () => {
+    const hist = [
+      ...Array.from({ length: DAILY_LIMIT + 1 }, (_, i) => ({ name: `t${i}`, at: NOW - i * 60_000, via: "trade" })),
+      { name: "c", at: NOW - 5000, via: "claim" }, { name: "m", at: NOW - 6000, via: "manual" },
+      ...Array.from({ length: DAILY_LIMIT }, (_, i) => ({ name: `a${i}`, at: NOW - i * 3_600_000, via: "reconcile" })),
+    ];
+    const c = byName(evaluateInvariants(input({ dropHistory: hist })))["drops"]!;
+    expect(c.ok).toBe(true);
+    expect(c.detail).toContain(`${DAILY_LIMIT} automatic drop(s)`);
+  });
 });
 
 describe("alert-storm", () => {
@@ -186,6 +221,19 @@ describe("alert-storm", () => {
 });
 
 describe("runInvariants: dedupe and freeze", () => {
+  test("the default freeze writes DROP_FREEZE and leaves the human FREEZE alone", async () => {
+    const { existsSync, rmSync } = await import("node:fs");
+    const { FREEZE_FILE, DROP_FREEZE_FILE } = await import("./paths.ts");
+    for (const f of [FREEZE_FILE, DROP_FREEZE_FILE]) rmSync(f, { force: true });
+    const hist = Array.from({ length: DAILY_LIMIT + 1 }, (_, i) => ({ name: `d${i}`, at: NOW - i * 60_000, via: "reconcile" }));
+    const events: string[] = [];
+    const r = await runInvariants(input({ db: new Database(":memory:"), dropHistory: hist }), { alert: async () => {}, log: (_a, type) => { events.push(type); } });
+    expect(r.frozen).toEqual(["drops"]);
+    expect(existsSync(DROP_FREEZE_FILE)).toBe(true);
+    expect(existsSync(FREEZE_FILE)).toBe(false);
+    expect(events).toContain("drop-freeze");
+    rmSync(DROP_FREEZE_FILE, { force: true });
+  });
   test("alertDue is a 24 h gate", () => {
     expect(alertDue(0, NOW)).toBe(true);
     expect(alertDue(NOW - 23 * 3_600_000, NOW)).toBe(false);
@@ -213,7 +261,7 @@ describe("runInvariants: dedupe and freeze", () => {
     expect(r1.ok).toBe(false);
     expect(r1.frozen).toEqual(["drops"]);
     expect(r1.alerted.sort()).toEqual(["alert-storm", "drops"]);
-    expect(alerts.some((t) => t.startsWith("Coach froze itself: drops"))).toBe(true);
+    expect(alerts.some((t) => t.startsWith("Coach stopped dropping players: drops"))).toBe(true);
     // Same failure a minute later: nothing new goes out, no second freeze.
     const r2 = await runInvariants({ ...bad, now: NOW + 60_000 }, deps);
     expect(r2.alerted).toEqual([]);

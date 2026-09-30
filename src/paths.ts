@@ -11,6 +11,8 @@ const TEST_DIR = "/tmp/sleeper-coach-test";
 export const STATE_DIR = process.env.COACH_STATE ?? process.env.STATE_DIR ?? (UNDER_TEST ? TEST_DIR : PROD_DIR);
 export const DB_PATH = process.env.COACH_DB ?? `${STATE_DIR}/coach.db`;
 export const FREEZE_FILE = process.env.COACH_FREEZE_FILE ?? `${STATE_DIR}/FREEZE`;
+/** The drop circuit breaker's own marker. Blocks DROPS only; see killswitch.ts. */
+export const DROP_FREEZE_FILE = process.env.COACH_DROP_FREEZE_FILE ?? `${STATE_DIR}/DROP_FREEZE`;
 export const TOKEN_FILE = process.env.COACH_TOKEN_FILE ?? `${STATE_DIR}/sleeper-token`;
 export const DRAFT_LOCK = `${STATE_DIR}/draft-active`;
 export const KICKOFF_CACHE = `${STATE_DIR}/pickem-kickoffs.json`;
