@@ -55,6 +55,7 @@ import { checkFacts, safeReply, type FactContext, type FactPlayer, type Violatio
 import { scheduleContext, type LeagueSnapshot } from "../analysis/trade-wire.ts";
 import { DEFAULT_FAIRNESS, type FairnessConfig } from "../analysis/trade-fair.ts";
 import { sleeper } from "../sleeper/client.ts";
+import { pastTradeDeadline } from "../sleeper/rules.ts";
 
 // #region limits
 /** A ceiling loose enough that a real conversation never hits it, tight enough
@@ -251,6 +252,10 @@ export interface CounterArgs {
   /** Our open offers, every rival. */
   open: PendingTrade[];
   sched: Partial<FairnessConfig>;
+  /** pastTradeDeadline(week, league.settings) from the live league read. An
+   *  offer after the deadline is refused by Sleeper anyway; the reply should
+   *  say so instead of promising an inbox that stays empty. */
+  pastDeadline?: boolean;
   propose: (spec: ProposalSpec) => Promise<{ transactionId: string; status: string }>;
 }
 export interface CounterOutcome {
@@ -267,6 +272,9 @@ export interface CounterOutcome {
 export async function counterOnRequest(a: CounterArgs): Promise<CounterOutcome> {
   ensureDmTables(a.db);
   const none = (line: string): CounterOutcome => ({ line, justSent: null });
+  if (a.pastDeadline) {
+    return none("They asked for an offer, but the league's trade deadline has passed and no trade can go through now. Say the deadline has passed; do not offer or promise one.");
+  }
   if (a.open.some((o) => o.rosterIds.includes(a.theirRosterId))) {
     return none("They asked for an offer, but you already have one out to them awaiting their answer. Point them at it.");
   }
@@ -362,6 +370,9 @@ const DEFAULT_IO: DmIo = {
   acceptRequests: acceptLeagueChatRequests,
   counter: async (gql, db, brief, theirRosterId, now) => {
     const week = Math.max(1, (await sleeper.nflState()).week ?? 1);
+    const league = await sleeper.league(config.leagueId);
+    const pastDeadline = pastTradeDeadline(week, league.settings);
+    if (pastDeadline) return counterOnRequest({ db, now, theirRosterId, snap: brief.snap, open: [], sched: {}, pastDeadline, propose: (spec) => proposeTrade(gql, spec) });
     const open = liveOffers(await outstandingOffers(gql, week), now);
     const sched = await scheduleContext(theirRosterId);
     return counterOnRequest({ db, now, theirRosterId, snap: brief.snap, open, sched, propose: (spec) => proposeTrade(gql, spec) });
