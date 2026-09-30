@@ -15,13 +15,17 @@
 //   schedule            a job whose occurrence is past its late window and was
 //                       never marked, which means the loop was not running
 //   drops               more automatic drops in 24 h than the daily limit
+//                       (trade gives, filed claims and manual runs excluded)
+//   drop-freeze         the breaker's DROP_FREEZE marker is set: drops are
+//                       stopped until a human removes it (visible, not fatal)
 //   alert-storm         more than ten alerts in an hour
 //
 // Pure core (evaluateInvariants) over plain inputs, so every branch has a
 // fixture test; a thin wrapper (runInvariants) that dedupes the push to one per
-// invariant per 24 h through the invariant_alerts table and freezes the coach
+// invariant per 24 h through the invariant_alerts table and freezes DROPS
 // when an invariant says so. The freeze is the point: a coach that is provably
-// in a bad state must stop acting before it acts again.
+// dropping too much must stop dropping before it drops again. It does not
+// stop lineups or reserve moves; see killswitch.ts for why (2026-09-30).
 
 import type { Database } from "bun:sqlite";
 import type { League, NflState, Roster } from "./sleeper/types.ts";
@@ -37,8 +41,9 @@ import { activeCapacity } from "./analysis/roster-fit.ts";
 import { SLOT_ELIGIBILITY, startingSlots } from "./analysis/lineup.ts";
 import { assessToken, type TokenProbe } from "./league/token.ts";
 import { JOBS, jitterFor, lastOccurrence, type Job } from "./schedule.ts";
-import { DAILY_LIMIT, type DropRecord } from "./analysis/drop-guard.ts";
-import { freezeState, freezeNow } from "./killswitch.ts";
+import { DAILY_LIMIT, automaticDrops, type DropRecord } from "./analysis/drop-guard.ts";
+import { dropFreezeState, dropFreezeNow } from "./killswitch.ts";
+import { byeWeek } from "./data/byes.ts";
 import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
 
@@ -85,6 +90,8 @@ export interface InvariantInput {
   /** job name -> last_run occurrence, from scheduled_runs. */
   scheduledRuns: Record<string, number>;
   dropHistory: DropRecord[];
+  /** The breaker's own marker, from dropFreezeState(). Absent means not set. */
+  dropFreeze?: { frozen: boolean; reason: string };
   alertsLastHour: number;
   now?: number;
   jobs?: Job[];
@@ -123,10 +130,14 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
     });
   }
 
-  // empty-slot: a "0" with an eligible active bench player
+  // empty-slot: a "0" with an eligible, STARTABLE active bench player. A bench
+  // man on bye or carrying a non-playing designation cannot fill the slot, so
+  // he is not a reason to page; the lineup guard already knows it left the
+  // slot empty for want of a body.
   {
     const slots = startingSlots(input.league.roster_positions);
-    const bench = input.view.active.filter((e) => !starterSet.has(e.playerId));
+    const week = input.state.week;
+    const bench = input.view.active.filter((e) => !starterSet.has(e.playerId) && startable(e, week));
     const holes: string[] = [];
     if (ours) {
       slots.forEach((slot, i) => {
@@ -190,14 +201,22 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
     });
   }
 
-  // drops
+  // drops: automatic ones only. A deadline-week trade gives three players
+  // away in one write and that is not a cascade.
   {
-    const today = input.dropHistory.filter((d) => now - d.at < DAY_MS);
+    const today = automaticDrops(input.dropHistory).filter((d) => now - d.at < DAY_MS);
     const ok = today.length <= DAILY_LIMIT;
     out.push({
       name: "drops", ok, action: "freeze",
       detail: ok ? `${today.length} automatic drop(s) in 24 h (limit ${DAILY_LIMIT})` : `${today.length} automatic drops in 24 h, limit ${DAILY_LIMIT}: ${today.map((d) => d.name).join(", ")}`,
     });
+  }
+
+  // drop-freeze: not a failure of the world, a state a human has to clear.
+  // Alert-class so it is said once a day and shows in the checks list.
+  {
+    const f = input.dropFreeze ?? { frozen: false, reason: "" };
+    out.push({ name: "drop-freeze", ok: !f.frozen, action: "alert", detail: f.frozen ? f.reason : "drops allowed" });
   }
 
   // alert-storm
@@ -214,6 +233,15 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
 
 function nameOf(view: RosterView, id: string): string {
   return view.owned.find((e) => e.playerId === id)?.name ?? id;
+}
+/** Could this bench man actually start this week? Mirrors the solver's
+ *  availabilityOf without needing a projection row. */
+const NON_PLAYING = new Set(["OUT", "DOUBTFUL", "IR", "PUP", "NA", "SUS", "DNR", "COV"]);
+function startable(e: RosterView["active"][number], week: number): boolean {
+  if (e.onIr) return false;
+  if (byeWeek(e.team) === week) return false;
+  const s = (e.injuryStatus ?? "").trim().toUpperCase();
+  return !(s && NON_PLAYING.has(s));
 }
 // #endregion
 
@@ -244,15 +272,15 @@ export interface RunInvariantsDeps {
   log?: typeof logEvent;
 }
 
-/** Evaluate, then act: one push per failing invariant per 24 h, and a freeze
- *  the first time a freeze-class invariant fails while the coach is not
+/** Evaluate, then act: one push per failing invariant per 24 h, and a DROP
+ *  freeze the first time a freeze-class invariant fails while drops are not
  *  already frozen. Returns everything so the daemon can log a one-line
  *  summary. Never throws. */
 export async function runInvariants(input: InvariantInput, deps: RunInvariantsDeps = {}): Promise<InvariantResult> {
   const now = input.now ?? Date.now();
   const alert = deps.alert ?? sendAlert;
-  const freeze = deps.freeze ?? freezeNow;
-  const isFrozen = deps.frozen ?? (() => freezeState().frozen);
+  const freeze = deps.freeze ?? dropFreezeNow;
+  const isFrozen = deps.frozen ?? (() => dropFreezeState().frozen);
   const log = deps.log ?? logEvent;
   const checks = evaluateInvariants({ ...input, now });
   const alerted: string[] = [];
@@ -263,13 +291,13 @@ export async function runInvariants(input: InvariantInput, deps: RunInvariantsDe
       if (c.action === "freeze" && !isFrozen()) {
         await freeze(`invariant ${c.name}: ${c.detail}`);
         frozen.push(c.name);
-        log("system", "invariant-freeze", `Froze the coach: ${c.name} failed (${c.detail})`, { name: c.name, detail: c.detail });
+        log("system", "drop-freeze", `Drops frozen: ${c.name} failed (${c.detail})`, { name: c.name, detail: c.detail });
       }
       if (alertDue(lastInvariantAlert(input.db, c.name), now)) {
         markInvariantAlert(input.db, c.name, now);
         alerted.push(c.name);
         log("system", "invariant-failed", `${c.name}: ${c.detail}`, { name: c.name, detail: c.detail, action: c.action });
-        const title = c.action === "freeze" ? `Coach froze itself: ${c.name}` : `Invariant failed: ${c.name}`;
+        const title = c.action === "freeze" ? `Coach stopped dropping players: ${c.name}` : `Invariant failed: ${c.name}`;
         await alert(title, c.detail, { level: "now", key: `invariant:${c.name}` });
       }
     } catch (err) {
@@ -310,6 +338,7 @@ export async function collectInvariantInput(db: Database, gql: Gql, leg: number)
     outstandingOffers: offers.map((o) => ({ transactionId: o.transactionId })),
     proposalsDb, scheduledRuns,
     dropHistory: dropHistory(),
+    dropFreeze: dropFreezeState(),
     alertsLastHour: alertsLastHour(db, now),
     now,
   };

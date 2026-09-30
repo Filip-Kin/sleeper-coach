@@ -24,9 +24,13 @@ function open(): Database {
   return db;
 }
 
+/** Every recorded removal, newest first, with how it happened. The breaker
+ *  and the `drops` invariant filter this through automaticDrops(): a trade
+ *  give, a filed claim and a manual run are in the ledger for the record
+ *  and are never budget. */
 export function dropHistory(): DropRecord[] {
-  return (open().query("SELECT name, dropped_at FROM auto_drops ORDER BY dropped_at DESC LIMIT 50").all() as { name: string; dropped_at: number }[])
-    .map((r) => ({ name: r.name, at: r.dropped_at }));
+  return (open().query("SELECT name, dropped_at, via FROM auto_drops ORDER BY dropped_at DESC LIMIT 50").all() as { name: string; dropped_at: number; via: string }[])
+    .map((r) => ({ name: r.name, at: r.dropped_at, via: r.via }));
 }
 export function recordDrop(name: string, via: string, at = Date.now()): void {
   open().run("INSERT INTO auto_drops (name, dropped_at, via) VALUES (?, ?, ?)", [name, at, via]);

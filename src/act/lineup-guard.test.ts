@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { planLineup, parseTeamKickoffs, overlayRosterStatus, lockedPlayerIds } from "./lineup-guard.ts";
+import { planLineup, parseTeamKickoffs, overlayRosterStatus, lockedPlayerIds, kickoffCacheIsCurrent, readKickoffCache, cachedTeamKickoffs } from "./lineup-guard.ts";
+import { KICKOFF_CACHE } from "../paths.ts";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { LineupPlayer } from "../analysis/lineup.ts";
 import type { PlayersMap } from "../sleeper/types.ts";
 
@@ -151,6 +154,28 @@ describe("parseTeamKickoffs", () => {
   });
   test("tolerates a missing cache", () => {
     expect(parseTeamKickoffs(null).size).toBe(0);
+  });
+});
+
+describe("the kickoff cache is only trusted for the week it was built for", () => {
+  // 2026-09-30: a week-4 cache on a week-5 Wednesday said every game had
+  // kicked off. Every player pinned, every dropped player "on waivers".
+  test("kickoffCacheIsCurrent wants an exact week match; no week is stale", () => {
+    expect(kickoffCacheIsCurrent({ week: 5, games: [] }, 5)).toBe(true);
+    expect(kickoffCacheIsCurrent({ week: 4, games: [] }, 5)).toBe(false);
+    expect(kickoffCacheIsCurrent({ games: [] }, 5)).toBe(false);
+    expect(kickoffCacheIsCurrent(null, 5)).toBe(false);
+  });
+  test("a stale file reads as no cache: empty map, nobody locked", async () => {
+    mkdirSync(dirname(KICKOFF_CACHE), { recursive: true });
+    const past = Date.now() - 3 * 86_400_000;
+    writeFileSync(KICKOFF_CACHE, JSON.stringify({ week: 4, games: [{ startTime: past, label: "CHI@CAR" }] }));
+    expect(await readKickoffCache(5)).toBeNull();
+    expect((await cachedTeamKickoffs(5)).size).toBe(0);
+    expect(lockedPlayerIds([{ playerId: "1", team: "CHI" }], await cachedTeamKickoffs(5), Date.now()).size).toBe(0);
+    // The same file is the truth for its own week.
+    expect((await cachedTeamKickoffs(4)).get("CHI")).toBe(past);
+    rmSync(KICKOFF_CACHE, { force: true });
   });
 });
 

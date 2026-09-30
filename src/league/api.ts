@@ -26,11 +26,12 @@
 // all dom manipulation since it seems we can do everything through graphql."
 
 import { config } from "../config.ts";
-import { assertWritesAllowed, freezeNow } from "../killswitch.ts";
+import { assertWritesAllowed, dropFreezeState, dropFreezeNow } from "../killswitch.ts";
 import { sendAlert } from "../alert.ts";
 import { logEvent } from "../log.ts";
 import { legsToScan, tradeInFlight as ruleTradeInFlight } from "../sleeper/rules.ts";
 import { dropVerdict, recordDrop, DropRefused } from "./drop-ledger.ts";
+import { countsTowardBreaker } from "../analysis/drop-guard.ts";
 import { leagueRosters, sportInfo, SLEEPER_GRAPHQL } from "../sleeper/graphql.ts";
 import { buildRosterView, type RosterView } from "../analysis/roster-view.ts";
 import { jwtExpiry, MissingTokenError, readToken, type TokenProbe } from "./token.ts";
@@ -388,15 +389,30 @@ export async function outstandingOffers(gql: Gql, leg: number, leagueId = config
 function guardDrop(action: string, dropIds: string[], via: string): void {
   assertWritesAllowed(action);
   if (!dropIds.length) return;
+  // The breaker's own marker (DROP_FREEZE) stops drops and nothing else; the
+  // human FREEZE above stops everything. A DROP_FREEZE refusal is a
+  // DropRefused, so the reserve reconciler and the daemon treat it as
+  // "deferred" (one log line per poll) rather than a failed write (an alert).
+  const dropFreeze = dropFreezeState();
+  if (dropFreeze.frozen) {
+    throw new DropRefused({ allowed: false, freeze: true, reason: dropFreeze.reason }, dropIds);
+  }
+  // History-only rows (trade gives, filed claims, manual runs) are recorded
+  // below but never refused by the breaker: a deadline-week trade is not a
+  // runaway loop.
+  if (!countsTowardBreaker(via)) return;
   const verdict = dropVerdict();
   if (!verdict.allowed) {
-    logEvent("coach", "drop-blocked", `Refused ${action}: ${verdict.reason}`, { wanted: dropIds, via, reason: verdict.reason, freeze: verdict.freeze });
-    // A second automatic drop inside the window is a runaway loop, not a
-    // decision. The coach freezes itself here, at the chokepoint, so every
-    // caller gets the same protection. Removing the FREEZE file lifts it.
+    logEvent("coach", verdict.freeze ? "drop-blocked" : "drop-deferred", `${verdict.freeze ? "Refused" : "Deferred"} ${action}: ${verdict.reason}`, { wanted: dropIds, via, reason: verdict.reason, freeze: verdict.freeze, retryAt: verdict.retryAt ?? null });
+    // Over the daily limit is a runaway loop, not a decision. The coach stops
+    // DROPPING here, at the chokepoint, so every caller gets the same
+    // protection; lineups, reserve moves and the schedule carry on. Removing
+    // the DROP_FREEZE file lifts it. A cooldown deferral writes nothing: the
+    // caller retries after the window.
     if (verdict.freeze) {
-      void freezeNow(verdict.reason).catch(() => {});
-      void sendAlert("Coach froze itself: repeated drops", `${verdict.reason}. It wanted to ${action} (${dropIds.join(", ")}). Writes are frozen until the FREEZE file is removed.`, { key: "cascade" }).catch(() => {});
+      void dropFreezeNow(verdict.reason).catch(() => {});
+      logEvent("coach", "drop-freeze", `Drops frozen: ${verdict.reason}`, { wanted: dropIds, via });
+      void sendAlert("Coach stopped dropping players", `${verdict.reason}. It wanted to ${action} (${dropIds.join(", ")}). Lineups and reserve moves continue; remove DROP_FREEZE to allow drops again.`, { key: "cascade" }).catch(() => {});
     }
     throw new DropRefused(verdict, dropIds);
   }

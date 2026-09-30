@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  sendAlert, sendDigest, useAlertDbForTests, budgetDecision, composeDigest, recordAlert, markSent,
+  sendAlert, sendDigest, sendAlertOnce, keySeenSince, useAlertDbForTests, budgetDecision, composeDigest, recordAlert, markSent,
   nowPushesLastHour, mutedThisHour, alertsLastHour, pendingDigest, NOW_BUDGET_PER_HOUR, MUTE_KEY, type AlertRow,
 } from "./alert.ts";
 
@@ -99,5 +99,16 @@ describe("the digest", () => {
     expect(sent!.message).toContain("2x Quiet two: b");
     expect(pendingDigest(db).length).toBe(0);
     expect(await sendDigest()).toBeNull();
+  });
+});
+
+describe("sendAlertOnce", () => {
+  test("the second send with the same key inside the window is dropped; a new key or an old one goes", async () => {
+    expect(await sendAlertOnce("Unfillable slot", "TE", { key: "lineup-unfilled:3", withinMs: 86_400_000 })).toBe(true);
+    expect(await sendAlertOnce("Unfillable slot", "TE", { key: "lineup-unfilled:3", withinMs: 86_400_000 })).toBe(false);
+    expect(await sendAlertOnce("Unfillable slot", "TE", { key: "lineup-unfilled:4", withinMs: 86_400_000 })).toBe(true);
+    expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM alerts").get()?.n).toBe(2);
+    expect(keySeenSince(db, "lineup-unfilled:3", Date.now() - 1000)).toBe(true);
+    expect(keySeenSince(db, "lineup-unfilled:3", Date.now() + 1000)).toBe(false);
   });
 });

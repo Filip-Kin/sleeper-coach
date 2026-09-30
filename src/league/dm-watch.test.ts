@@ -398,6 +398,19 @@ test("a second counter ask inside 7 days sends no proposal; the first one stands
   expect(out.line).toContain("Nico Collins");
 });
 
+test("after the trade deadline no offer goes out and the reply says the deadline has passed", async () => {
+  const db = new Database(":memory:");
+  let proposed = 0;
+  const out = await counterOnRequest({
+    db, now: NOW, theirRosterId: 1, snap: fakeBrief().snap, open: [], sched: {}, pastDeadline: true,
+    propose: async () => { proposed++; return { transactionId: "tx1", status: "proposed" }; },
+  });
+  expect(proposed).toBe(0);
+  expect(out.justSent).toBeNull();
+  expect(out.line).toContain("deadline has passed");
+  expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM dm_counters").get()?.n).toBe(0);
+});
+
 test("an ask with an offer already out points at it and sends nothing", async () => {
   const db = new Database(":memory:");
   let proposed = 0;

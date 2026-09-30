@@ -29,7 +29,7 @@ import type { PlayersMap, Roster, ScoringSettings, SleeperPlayer } from "../slee
 import { tokenGql, updateStarters, currentStarters } from "../league/api.ts";
 import { freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
-import { sendAlert } from "../alert.ts";
+import { sendAlert, sendAlertOnce } from "../alert.ts";
 import { config } from "../config.ts";
 import { buildRosterView } from "../analysis/roster-view.ts";
 
@@ -185,15 +185,47 @@ export function overlayRosterStatus(dump: PlayersMap, roster: Pick<Roster, "play
 }
 // #endregion
 
+export interface KickoffCache { week?: number; updatedAt?: number; games?: { startTime?: number; label?: string }[] }
+
+/** Is this cache the current week's? A cache for another week is worse than
+ *  none: on 2026-09-30 a file from week 4 said every team had kicked off, so
+ *  the lineup guard pinned the whole roster and waiver-run marked every
+ *  dropped player as on waivers. A cache with no week at all (written before
+ *  the writer recorded one) is also refused. Pure. */
+export function kickoffCacheIsCurrent(cache: KickoffCache | null | undefined, currentWeek: number): boolean {
+  return cache?.week != null && Number(cache.week) === currentWeek;
+}
+
 // #region io
-export async function cachedTeamKickoffs(): Promise<Map<string, number>> {
+let staleCacheLogged = "";
+
+/** The pick'em kickoff cache, only when it is for `currentWeek`. Any other
+ *  reader of KICKOFF_CACHE should come through here. */
+export async function readKickoffCache(currentWeek: number): Promise<KickoffCache | null> {
   try {
     const f = Bun.file(KICKOFF_CACHE);
-    if (!(await f.exists())) return new Map();
-    return parseTeamKickoffs((await f.json()) as { games?: { startTime?: number; label?: string }[] });
+    if (!(await f.exists())) return null;
+    const cache = (await f.json()) as KickoffCache;
+    if (kickoffCacheIsCurrent(cache, currentWeek)) return cache;
+    const key = `${cache.week ?? "none"}->${currentWeek}`;
+    if (staleCacheLogged !== key) {
+      staleCacheLogged = key;
+      console.log(`[kickoffs] cache is for week ${cache.week ?? "(unset)"}, current week is ${currentWeek}; ignoring it until the pick'em job rewrites it`);
+      logEvent("coach", "kickoff-cache-stale", `Kickoff cache is for week ${cache.week ?? "(unset)"}, not ${currentWeek}; treating every game as not started.`, { cacheWeek: cache.week ?? null, currentWeek });
+    }
+    return null;
   } catch {
-    return new Map();
+    return null;
   }
+}
+
+/** Team -> kickoff ms for the current week, or an empty map (nobody locked)
+ *  when the cache is missing or for another week. `currentWeek` comes from
+ *  the caller's NFL state when it has one, else from sport_info here. */
+export async function cachedTeamKickoffs(currentWeek?: number): Promise<Map<string, number>> {
+  const week = currentWeek ?? (await sleeper.nflState().then((s) => s.week).catch(() => undefined));
+  if (!(week != null && week >= 1)) return new Map();
+  return parseTeamKickoffs(await readKickoffCache(week));
 }
 
 // League slots and scoring change once a season; cache them for an hour.
@@ -248,7 +280,7 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   const [dump, weekProj, kickoffs] = await Promise.all([
     loadPlayers(), // cached; only names and positions come from it now
     loadWeekProjections(state.season || config.season, week, scoring),
-    cachedTeamKickoffs(),
+    cachedTeamKickoffs(week),
   ]);
   // Players on IR are NOT lineup candidates. Sleeper will not start a reserve
   // player, so offering one is at best a rejected write and at worst a slot
@@ -295,7 +327,9 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     if (now - lastHeldNotice > NOTICE_MS) {
       lastHeldNotice = now;
       logEvent("coach", "lineup-held", `Lineup change wanted but the Sleeper token is not usable: ${summary}`, { week });
-      await sendAlert("Lineup change pending, Sleeper token not usable", summary).catch(() => {});
+      // The log line is hourly; the push is daily. A dead token is one fact,
+      // and the token invariant already pages for it once a day too.
+      await sendAlertOnce("Lineup change pending, Sleeper token not usable", summary, { key: "lineup-token", withinMs: 24 * 60 * 60_000 }).catch(() => {});
     }
     return plan;
   }

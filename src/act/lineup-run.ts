@@ -31,7 +31,7 @@ import { tokenGql, updateStarters, currentStarters } from "../league/api.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import { overlayRosterStatus, lockedPlayerIds, cachedTeamKickoffs, planLineup } from "./lineup-guard.ts";
 import { logEvent } from "../log.ts";
-import { sendAlert } from "../alert.ts";
+import { sendAlert, sendAlertOnce } from "../alert.ts";
 
 function flag(name: string): boolean {
   return process.argv.includes(`--${name}`);
@@ -40,6 +40,22 @@ function opt(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
+
+// #region pure
+/** What to do with a plan that has holes. An unfillable slot (a bye week, a
+ *  position with nobody healthy) used to refuse the WHOLE write and exit 1,
+ *  so the nine fillable slots stayed wrong and the daemon alerted twice (once
+ *  here, once for the non-zero exit). The hole is a fact about the roster,
+ *  not a reason to leave the rest of the lineup unset: write the plan, say
+ *  so once per week, exit 0. Pure, so the rule has a test. */
+export function unfilledNotice(plan: { unfilled: string[]; changed: boolean }, season: string, week: number): { key: string; message: string } | null {
+  if (!plan.unfilled.length) return null;
+  return {
+    key: `lineup-unfilled:${season}:${week}`,
+    message: `Week ${week}: ${plan.unfilled.join(", ")} cannot be filled from the active roster. The rest of the lineup ${plan.changed ? "was written" : "is already set"}; fill the slot in Sleeper or add a player.`,
+  };
+}
+// #endregion
 
 // The write. GraphQL roster_update_starters (one request, ~60 ms), verified by
 // an uncached league_rosters read-back. Verified live 2026-09-09: the mutation
@@ -113,7 +129,7 @@ async function main(): Promise<void> {
   // leave the rest of the lineup unset. The 90-second guard has always pinned
   // them; the locks did not, which was the last asymmetry between the two
   // writers. planLineup also refuses to empty a slot the site has filled.
-  const locked = lockedPlayerIds(candidates, await cachedTeamKickoffs(), Date.now());
+  const locked = lockedPlayerIds(candidates, await cachedTeamKickoffs(week), Date.now());
   // Plan from the week's matchup leg, which is what the app shows and scores.
   const onSite = await currentStarters(tokenGql(), week, mine.starters ?? [], rosterId, leagueId);
   const plan = planLineup(onSite, candidates, slots, locked);
@@ -158,11 +174,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  // A partial lineup must never be written: an empty slot in-season is a real
-  // problem for a human, not the coach.
-  if (plan.unfilled.length) {
-    await sendAlert("Lineup has an unfillable slot", `Week ${week}: ${plan.unfilled.join(", ")} could not be filled from the roster. No lineup was set.`);
-    throw new Error(`refusing to set a partial lineup (unfilled: ${plan.unfilled.join(", ")})`);
+  // An unfillable slot is said once per week, and the rest of the plan is
+  // still written below. See unfilledNotice.
+  const hole = unfilledNotice(plan, season, week);
+  if (hole) {
+    logEvent("coach", "lineup-unfilled", hole.message, { week, leagueId, unfilled: plan.unfilled });
+    await sendAlertOnce("Lineup has an unfillable slot", hole.message, { key: hole.key, withinMs: 7 * 24 * 3_600_000 });
   }
 
   // Nothing to do beats a pointless mutation on a live roster.
@@ -189,9 +206,11 @@ async function main(): Promise<void> {
   logEvent("coach", "lineup-set", `Week ${week} lineup set and verified, ${total.toFixed(1)} projected.`, { week, leagueId, ids, swaps: plan.swaps });
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error(`lineup-run failed: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  });
+if (import.meta.main) {
+  main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(`lineup-run failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    });
+}
