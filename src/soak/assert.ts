@@ -280,7 +280,7 @@ async function after(): Promise<void> {
       const claims = await pendingClaimSlots(tokenGql(), snap.week);
       const open = Math.max(0, live.cap - view.active.length);
       ok = claims.count <= open;
-      detail = `${claims.count} pending claim(s), ${open} open slot(s)`;
+      detail = `${claims.count} pending claim(s) with no drop, ${open} open slot(s)`;
     } catch (err) {
       ok = false;
       detail = `read failed: ${err instanceof Error ? err.message : String(err)}`;

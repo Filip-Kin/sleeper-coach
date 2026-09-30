@@ -185,8 +185,11 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
     out.push({
       name: "claim-slots", ok, action: "alert",
       detail: ok
-        ? `${input.pendingClaims.count} pending claim(s), ${openSlots} open slot(s)`
-        : `${input.pendingClaims.count} pending claim(s) need slots but only ${openSlots} open (${input.pendingClaims.adds.join(", ")})`,
+        // The count is claims that name NO drop: only those need a free slot.
+        // "0 pending claim(s)" read as "no claims" on 2026-09-30 while two
+        // self-financing claims were pending.
+        ? `${input.pendingClaims.count} pending claim(s) with no drop, ${openSlots} open slot(s)`
+        : `${input.pendingClaims.count} pending claim(s) with no drop need slots but only ${openSlots} open (${input.pendingClaims.adds.join(", ")})`,
     });
   }
 
