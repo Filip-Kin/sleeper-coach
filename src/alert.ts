@@ -103,6 +103,13 @@ export function budgetDecision(pushesThisHour: number, muteAlreadySent: boolean,
   return muteAlreadySent ? "silent" : "mute-notice";
 }
 
+/** Has an alert with this key been recorded since `since`? Pure over a handle. */
+export function keySeenSince(db: Database, key: string, since: number): boolean {
+  ensureAlertTables(db);
+  const row = db.query<{ n: number }, [string, number]>("SELECT count(*) AS n FROM alerts WHERE key = ? AND ts > ?").get(key, since);
+  return (row?.n ?? 0) > 0;
+}
+
 /** Everything in the last hour, any level, for the invariant that watches
  *  for an alert storm. */
 export function alertsLastHour(db: Database, now: number): number {
@@ -245,6 +252,25 @@ export async function sendAlert(title: string, message: string, opts: AlertOptio
   if (ok && d && id) {
     try { markSent(d, id); } catch { /* recorded already */ }
   }
+}
+
+/** sendAlert, unless the same key already went out inside `withinMs`. The
+ *  alerts table is the memory, so the throttle survives a restart and spans
+ *  the daemon and its spawned jobs (a Thursday lock and the Sunday lock are
+ *  different processes and would otherwise each say "unfillable slot").
+ *  Returns true when it sent. Never throws. */
+export async function sendAlertOnce(title: string, message: string, opts: AlertOptions & { withinMs: number }): Promise<boolean> {
+  if (!opts.key) throw new Error("sendAlertOnce needs a key");
+  try {
+    if (keySeenSince(db(), opts.key, Date.now() - opts.withinMs)) {
+      console.log(`[alert] (already sent within ${Math.round(opts.withinMs / 60_000)} min) ${title}: ${message}`);
+      return false;
+    }
+  } catch (err) {
+    console.error(`[alert] once-check failed, sending anyway: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  await sendAlert(title, message, { level: opts.level, key: opts.key });
+  return true;
 }
 
 /** The 09:00 ET job: one push with counts and the notable lines, then the
