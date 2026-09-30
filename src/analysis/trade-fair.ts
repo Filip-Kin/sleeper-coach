@@ -239,7 +239,8 @@ export function depthInsurance(
   // Depth cover is a THIS-WEEK question: who steps in when a starter goes
   // down. A player on IR can neither start nor step in, so he is out of both
   // the lineup and the backup list here, whatever his season value says. The
-  // season value still counts in byeAwareLineupTotal, which is the right place.
+  // season value still counts in byeAwareLineupTotal, which is the right place
+  // (bestLineup keeps him in the pool; this is the one caller that must not).
   const available = roster.filter((p) => !p.onIr);
   const lineup = bestLineup(available, slots).starters;
   const starting = new Set(lineup.flatMap((s) => (s.player ? [playerKey(s.player)] : [])));
@@ -584,7 +585,9 @@ export function evaluateTradeTwoSided(
  *  would mean choosing the drop here, and the drop table is not this module. */
 export function legalityBlocks(afterOurs: TradePlayer[], cfg: FairnessConfig): string[] {
   const out: string[] = [];
-  const unfilled = bestLineup(afterOurs).starters.filter((x) => x.player === null).map((x) => x.slot);
+  // A this-week question: a slot only a man on IR could fill is a hole until
+  // he is back, so he is left out here (bestLineup itself counts him).
+  const unfilled = bestLineup(afterOurs.filter((p) => !p.onIr)).starters.filter((x) => x.player === null).map((x) => x.slot);
   if (unfilled.length) out.push(`would leave ${unfilled.join(", ")} unfillable`);
   if (cfg.rosterCapacity !== null) {
     const active = afterOurs.filter((p) => !p.onIr).length;

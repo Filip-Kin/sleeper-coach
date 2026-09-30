@@ -104,12 +104,23 @@ const REPLACEMENT_POINTS: Record<string, number> = {
 };
 
 export function bestLineup(roster: TradePlayer[], slots: readonly string[] = STARTING_SLOTS): LineupResult {
-  // A player on injured reserve cannot be started, so he is not in the pool
-  // whatever his season number says. Before 2026-09-23 he was, and a trade
-  // giving him away was priced as if it emptied a starting slot (T6).
+  // A SEASON lineup: `points` is rest-of-season value (value.ts), the weekly
+  // tables summed to the championship, which are already zero in the weeks a
+  // hurt player is projected out. So a man on injured reserve is in the pool
+  // at that number, exactly as he would be on the bench with the same
+  // injury. The 2026-09-23 audit (T6) took him out, which was right while
+  // `points` was a full-season projection and became a double count on
+  // 2026-09-30 when it stopped being one: a rival whose quarterback was on IR
+  // for one week was valued with his backup starting all season, and the
+  // proposer built offers around the hole (ir-lineup.test.ts).
+  //
+  // Callers asking a THIS-WEEK question pass a roster without the IR players:
+  // legalityBlocks (can every slot be filled now) and depthInsurance (who
+  // steps in now). Giving an IR player away and receiving one are refused by
+  // rails, not priced here.
   // Players best-first; ties are broken by original order, which is irrelevant
   // to the total.
-  const ranked = roster.filter((p) => !p.onIr).map((p, i) => ({ p, i })).sort((a, b) => b.p.points - a.p.points);
+  const ranked = roster.map((p, i) => ({ p, i })).sort((a, b) => b.p.points - a.p.points);
   const used = new Set<number>();
   const filled: (TradePlayer | null)[] = slots.map(() => null);
 

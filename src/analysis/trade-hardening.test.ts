@@ -3,7 +3,7 @@
 // unmodified code first. Before the fixes: 3 pass, 11 fail (see the commit).
 import { describe, expect, test } from "bun:test";
 import { bestLineup, evaluateTrade, type TradePlayer } from "./trade.ts";
-import { evaluateTradeTwoSided, refusedForInjury, proposeTrades, DEFAULT_FAIRNESS, type FairnessConfig } from "./trade-fair.ts";
+import { evaluateTradeTwoSided, refusedForInjury, proposeTrades, legalityBlocks, DEFAULT_FAIRNESS, type FairnessConfig } from "./trade-fair.ts";
 import { tradeRostersFrom, offerFromTransaction, type LeagueSnapshot } from "./trade-wire.ts";
 import { assessVeto, DEFAULT_VETO } from "../league/veto.ts";
 import type { Roster } from "../sleeper/types.ts";
@@ -65,12 +65,23 @@ describe("T4 a received player carries the rival's onIr, and IR on the receive s
   });
 });
 
-describe("T6 lineup totals exclude IR; the give-away rail stays", () => {
-  test("bestLineup never starts an onIr player", () => {
+// T6 as written on 2026-09-23 took an IR player out of bestLineup, because
+// `points` was then a full-season projection and counted games he would miss.
+// Since 2026-09-30 `points` is rest-of-season value, which is already zero in
+// the weeks he is out, so the season lineup counts him (ir-lineup.test.ts has
+// the live case that forced it). What T6 was protecting is pinned below and
+// has not moved: an IR player is never given away, and the this-week checks
+// (legality, depth cover) leave him out.
+describe("T6 the season lineup counts IR at rest-of-season value; the give-away rail stays", () => {
+  test("bestLineup counts an onIr player at the points he carries", () => {
     const r = [P("Hurt QB", "QB", 300, { onIr: true }), P("Healthy QB", "QB", 200)];
     const l = bestLineup(r);
-    expect(l.starters.find((s) => s.slot === "QB")?.player?.name).toBe("Healthy QB");
-    expect(l.total).toBe(200 + 38 + 30);
+    expect(l.starters.find((s) => s.slot === "QB")?.player?.name).toBe("Hurt QB");
+    expect(l.total).toBe(300 + 38 + 30);
+  });
+  test("the this-week legality check does not: a slot only IR could fill is a hole", () => {
+    const r = [P("Hurt QB", "QB", 300, { onIr: true })];
+    expect(legalityBlocks(r, cfg()).join(" ")).toMatch(/QB/);
   });
   test("giving away an IR player is still a rail block", () => {
     const roster = ours.map((p) => (p.playerId === "5" ? { ...p, onIr: true } : p));

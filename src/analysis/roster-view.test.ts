@@ -91,8 +91,9 @@ describe("6. depth cover: a man on IR covers nobody this week", () => {
     expect(depthInsurance(healthy, DEFAULT_FAIRNESS)).toBeGreaterThan(depthInsurance(base, DEFAULT_FAIRNESS));
   });
   test("and giving away the IR player is refused by the rail, not priced by the lineup", () => {
-    // Since the 2026-09-23 audit (T6) a man on IR is out of every lineup
-    // total, so his season number cannot be what stops a trade; the rail is.
+    // The rail is what stops this trade, whatever the lineup maths says
+    // about him (the season lineup counts his rest-of-season value; see
+    // ir-lineup.test.ts).
     const stash = P("Stash", "WR", 200, true);
     const offer = { receive: [P("Meh", "WR", 60)], give: [stash] };
     const ev = evaluateTradeTwoSided(offer, [...base, stash], base, DEFAULT_FAIRNESS);
