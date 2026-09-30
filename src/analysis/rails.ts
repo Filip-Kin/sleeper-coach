@@ -24,6 +24,10 @@ export interface RailPlayer {
   onIr?: boolean;
   injuryStatus?: string; // Sleeper injury_status, if any
   returnsBeforePlayoffs?: boolean; // hurt but expected back before week 16
+  /** Full-season projection: the talent signal, the tie-break behind `points`. */
+  seasonPoints?: number;
+  /** Rank at his position on seasonPoints, 1 = best. */
+  seasonRank?: number;
   // Bye week, when known. Optional because the rails themselves do not care, but
   // trade and waiver scoring do: four of our starters share the week 8 bye, which
   // costs about 10.7 points in that week and is the worst single-week hole in the
@@ -43,14 +47,12 @@ export interface RailConfig {
   protectTopN: number;
   // A drop must be a clear UPGRADE, not a tie. Ties keep the incumbent, because
   // a tie plus transaction risk is a loss.
-  upgradeMarginPts: number;
   // Names that may never be dropped regardless of projection.
   neverDrop: string[];
 }
 
 export const DEFAULT_RAILS: RailConfig = {
   protectTopN: 12, // 10 starting slots + 2
-  upgradeMarginPts: 8,
   neverDrop: [],
 };
 
@@ -103,43 +105,4 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
     };
   }
   return { allowed: true, reason: `"${player.name}" is #${rank} of ${roster.length}, outside the protected top ${cfg.protectTopN}` };
-}
-
-// Is dropping `target` to add `incoming` a clear enough upgrade to be worth it?
-export function isUpgrade(
-  incoming: RailPlayer,
-  target: string,
-  roster: RailPlayer[],
-  cfg: RailConfig = DEFAULT_RAILS,
-): Verdict {
-  const gate = canDrop(target, roster, cfg);
-  if (!gate.allowed) return gate;
-  const player = roster.find((p) => norm(p.name) === norm(target))!;
-  const gain = incoming.points - player.points;
-  if (gain < cfg.upgradeMarginPts) {
-    return {
-      allowed: false,
-      reason: `${incoming.name} beats ${player.name} by only ${gain.toFixed(1)}pts, under the ${cfg.upgradeMarginPts}pt margin`,
-    };
-  }
-  return { allowed: true, reason: `${incoming.name} beats ${player.name} by ${gain.toFixed(1)}pts` };
-}
-
-// The cheapest legal drop for a given add, or null if there is none. Prefer
-// paths that cost nothing: an empty bench slot means no drop at all, which the
-// caller checks before ever getting here.
-export function chooseDrop(
-  incoming: RailPlayer,
-  roster: RailPlayer[],
-  cfg: RailConfig = DEFAULT_RAILS,
-): { name: string; reason: string } | null {
-  const candidates = roster
-    .slice()
-    .sort((a, b) => a.points - b.points) // worst first
-    .filter((p) => canDrop(p.name, roster, cfg).allowed);
-  for (const c of candidates) {
-    const v = isUpgrade(incoming, c.name, roster, cfg);
-    if (v.allowed) return { name: c.name, reason: v.reason };
-  }
-  return null;
 }

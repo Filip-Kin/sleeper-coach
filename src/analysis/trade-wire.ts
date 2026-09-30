@@ -16,9 +16,7 @@ import { leagueRosters } from "../sleeper/graphql.ts";
 import type { Roster } from "../sleeper/types.ts";
 import { tokenGql, pendingRosterDelta, applyRosterDelta, pendingTrades, type Gql, type PendingTrade } from "../league/api.ts";
 import { sleeper } from "../sleeper/client.ts";
-import { loadSeasonProjections } from "./projections.ts";
-import { rankByVor } from "./vor.ts";
-import { loadNews, applyNews } from "../data/news.ts";
+import { loadValues, liveStatusFromRosters } from "./value.ts";
 import { loadPlayers } from "../data/players.ts";
 import { byeWeek } from "../data/byes.ts";
 import { activeCapacity } from "./roster-fit.ts";
@@ -45,20 +43,6 @@ export interface LeagueSnapshot {
 }
 
 // #region pure pieces
-/** Statuses that keep a player off the field, as ros-projections.ts counts
- *  them. The stash rule ("hurt now, real talent, still time to come back")
- *  is the one the drop rails use; the trade rails claimed it for a year
- *  without ever receiving the flag (T5). Same rule, same inputs, computed
- *  here from the season board and the dump's injury status so the trade
- *  snapshot does not have to pull twelve weekly tables per poll. */
-const RESERVE_STATUSES = new Set(["IR", "PUP", "NA", "SUS", "DNR", "COV", "OUT", "DOUBTFUL"]);
-export const STASH_SEASON_MIN = 120;
-const CHAMPIONSHIP_WEEK = 17;
-export function stashFlag(injuryStatus: string | null | undefined, seasonPoints: number, week: number): boolean {
-  const injured = RESERVE_STATUSES.has((injuryStatus ?? "").trim().toUpperCase());
-  return injured && seasonPoints >= STASH_SEASON_MIN && week < CHAMPIONSHIP_WEEK;
-}
-
 /** Each roster as the trade engine values it. Pure, so the IR rule is testable.
  *  Throws when a roster came from the cached REST endpoint (no player_map):
  *  IR cannot be told from active there, and a snapshot that guessed offered an
@@ -104,33 +88,42 @@ export function applyPending(
 // #endregion
 
 // One fetch, reused for every offer in a poll cycle.
+//
+// VALUES. Every player carries the one rest-of-season value from value.ts:
+// the raw weekly tables summed to the championship, no news multiplier, and
+// the injury status the roster read reports right now. Until 2026-09-30 this
+// used the full-season projection scaled by the news dossier, which priced a
+// one-week Out player at 5% of himself, so the stash rail could never fire on
+// the trade and drop paths and a rival's offer for our Out WR1 would have
+// been accepted as a bargain.
 export async function snapshot(): Promise<LeagueSnapshot> {
   const [league, state] = await Promise.all([sleeper.league(config.leagueId), sleeper.nflState()]);
   const week = Math.max(1, state.week ?? 1);
-  const raw = await loadSeasonProjections(config.season, league.scoring_settings);
-  const news = await loadNews();
-  const board = rankByVor(applyNews(raw, news.byKey).adjusted, league, raw);
-  const byName = new Map(board.map((b) => [b.name, b]));
+  const rosters = await leagueRosters(config.leagueId);
+  const live = liveStatusFromRosters(rosters);
+  const values = await loadValues(state.season || config.season, week, league.scoring_settings, live);
   const dump = (await loadPlayers()) as Record<string, { full_name?: string; position?: string; injury_status?: string | null; team?: string | null; depth_chart_order?: number | null }>;
 
   const playerById = new Map<string, TradePlayer>();
   for (const [id, p] of Object.entries(dump)) {
     const name = p.full_name ?? id; // team defences have no full_name; the id IS the team
-    const b = byName.get(name);
-    if (!b && !p.position) continue;
+    const v = values.get(id);
+    if (!v && !p.position) continue;
+    const status = live.has(id) ? live.get(id) : (v?.injuryStatus ?? p.injury_status ?? null);
     playerById.set(id, {
       name,
       playerId: id,
-      position: p.position ?? b?.position ?? "",
-      points: b?.points ?? 0,
-      injuryStatus: p.injury_status ?? undefined,
-      returnsBeforePlayoffs: stashFlag(p.injury_status, b?.points ?? 0, week),
-      bye: byeWeek(p.team ?? b?.team ?? "") ?? undefined,
+      position: p.position ?? v?.position ?? "",
+      points: v?.value ?? 0,
+      seasonPoints: v?.seasonPoints ?? 0,
+      seasonRank: v?.seasonRank ?? 0,
+      injuryStatus: status ?? undefined,
+      returnsBeforePlayoffs: v?.stash ?? false,
+      bye: byeWeek(p.team ?? v?.team ?? "") ?? undefined,
       depthChartOrder: typeof p.depth_chart_order === "number" ? p.depth_chart_order : undefined,
     });
   }
 
-  const rosters = await leagueRosters(config.leagueId);
   const rosterOf = tradeRostersFrom(rosters, playerById);
   const idByName = new Map<string, string>();
   const ownerIdOf = new Map<number, string>();

@@ -69,23 +69,28 @@ const m3 = planOne(streamer, full, DEFAULT_WAIVERS);
 t("marginal on-waivers streamer = wait, not claim", m3.kind === "wait", `${m3.kind} (${m3.reason})`);
 
 // 4. On a full roster, a cleared player who does NOT improve the starting lineup
-//    is skipped, not churned in: dropping a bench body for a non-starter is not a
-//    clear upgrade and risks cutting someone who matters. And whatever happens,
-//    the injured stash is never the drop target.
-const modest = avail("Modest WR", "WR", 145, false); // cleared, but never cracks our lineup
+//    but beats our cheapest swappable bench body by a real per-week margin is a
+//    BENCH SWAP (Filip, 2026-09-30: "their average is eight, his is ten, swap
+//    them"). The drop is the lowest-value swappable bench player, never the
+//    stash and never a QB/K/DEF for a WR.
+const modest = avail("Modest WR", "WR", 145, false); // never cracks our lineup; beats Gainwell (90) by 55 over 14 weeks
 const m4 = planOne(modest, full, DEFAULT_WAIVERS);
-t("full-roster non-lineup-improving add is skipped, drops nobody", m4.kind === "skip" && m4.drop === null, `${m4.kind}/${m4.drop}`);
+t("full-roster bench upgrade is a free-add dropping the cheapest swappable body", m4.kind === "free-add" && m4.drop === "Kenny Gainwell", `${m4.kind}/${m4.drop}`);
 t("full-roster add never proposes dropping the stash", m4.drop !== "Breece Hall", `${m4.kind}/${m4.drop}`);
+// 4a. A bench body that does NOT clear the per-week bar is left alone.
+const marginal = avail("Marginal WR", "WR", 100, false); // +10 over Gainwell across 14 weeks: noise
+const m4a = planOne(marginal, full, DEFAULT_WAIVERS);
+t("a bench swap under the per-week bar is skipped", m4a.kind === "skip", `${m4a.kind}/${m4a.drop} (${m4a.reason})`);
 
 // 4b. THE cross-position trap (regression for the draft-night capped-position
 //     bug): a high-ROS backup QB is available, but he never starts over our
 //     starting QB, and dropping our only kicker (or anyone) to roster him does
 //     not improve the lineup. The engine must SKIP, never propose dropping the
 //     kicker for a third QB just because 250 > 130 on raw points.
-const backupQb = avail("Backup QB", "QB", 250, false); // huge raw ROS, but redundant
+const backupQb = avail("Backup QB", "QB", 250, false); // huge raw ROS, redundant in the lineup
 const m4b = planOne(backupQb, full, DEFAULT_WAIVERS);
-t("never drops a needed player to roster a redundant high-ROS position", m4b.kind === "skip", `${m4b.kind}/${m4b.drop} (${m4b.reason})`);
-t("the redundant-QB skip never targets the kicker", m4b.drop !== "Tyler Bass", String(m4b.drop));
+t("a redundant QB only ever replaces our own backup QB, never the kicker", m4b.drop === "Bo Nix", `${m4b.kind}/${m4b.drop} (${m4b.reason})`);
+t("the redundant-QB add never targets the kicker", m4b.drop !== "Tyler Bass", String(m4b.drop));
 
 // 5. A player who beats nobody by the margin is skipped, not forced.
 const junk = avail("Junk Guy", "RB", 50, false);
@@ -164,7 +169,7 @@ t("a real points gap wins despite the bye debit", gapRanked[0]?.add === "Big On 
 //     cleared player who cannot improve a full roster is skipped even with a
 //     crowded bye in play and even though he is not on it (which would credit
 //     him): the gate is the lineup delta, not the bye.
-const modestBye = planOne(modest, full, DEFAULT_WAIVERS, new Set([7]));
+const modestBye = planOne(marginal, full, DEFAULT_WAIVERS, new Set([7]));
 t("bye credit cannot manufacture an add past the lineup gate", modestBye.kind === "skip", `${modestBye.kind} (byeCredit ${modestBye.byeCredit})`);
 
 // 10. IR opportunity detection surfaces a costless roster expansion, but only for

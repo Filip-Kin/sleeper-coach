@@ -1,4 +1,4 @@
-import { canDrop, isUpgrade, chooseDrop, DEFAULT_RAILS, type RailPlayer } from "./rails.ts";
+import { canDrop, DEFAULT_RAILS, type RailPlayer } from "./rails.ts";
 
 // A realistic 16-man roster: 12 good, 4 fringe.
 const roster: RailPlayer[] = [
@@ -42,22 +42,6 @@ t("allows dropping a fringe player", nix.allowed, nix.reason);
 // 4. An unknown name is refused rather than guessed at.
 const ghost = canDrop("Someone Notonroster", roster);
 t("refuses a name that is not on the roster", !ghost.allowed, ghost.reason);
-
-// 5. A marginal upgrade is refused; a clear one is allowed.
-const marginal: RailPlayer = { name: "Marginal Guy", position: "RB", points: 90 };
-const clear: RailPlayer = { name: "Clear Upgrade", position: "RB", points: 170 };
-t("refuses a tie/marginal upgrade", !isUpgrade(marginal, "Bo Nix", roster).allowed);
-t("allows a clear upgrade", isUpgrade(clear, "Bo Nix", roster).allowed);
-
-// 6. chooseDrop picks the worst LEGAL player, never the stash.
-const chosen = chooseDrop(clear, roster);
-t("chooseDrop returns a candidate", chosen !== null);
-t("chooseDrop never picks the injured stash", chosen?.name !== "Breece Hall", String(chosen?.name));
-console.log(`        -> would drop ${chosen?.name}: ${chosen?.reason}`);
-
-// 7. With nothing worth upgrading, chooseDrop returns null rather than forcing one.
-const weak: RailPlayer = { name: "Weak Pickup", position: "RB", points: 50 };
-t("chooseDrop returns null when no drop is justified", chooseDrop(weak, roster) === null);
 
 // 8. never-drop overrides projection entirely.
 const cfg = { ...DEFAULT_RAILS, neverDrop: ["Bo Nix"] };

@@ -96,9 +96,9 @@ export function overCap(view: RosterView, capacity: number): number {
  *  is excluded structurally, not by a filter somebody has to remember, because
  *  cutting a man already on IR frees no slot and just loses the player. The
  *  rail roster is matched by id so a name spelt two ways cannot slip through. */
-export function droppable(view: RosterView, railRoster: RailPlayer[], cfg: RailConfig = DEFAULT_RAILS): RailPlayer[] {
+export function droppable(view: RosterView, railRoster: RailPlayer[], cfg: RailConfig = DEFAULT_RAILS, also: Set<string> = new Set()): RailPlayer[] {
   return railRoster.filter((p) => {
-    if (p.playerId ? !view.activeIds.has(p.playerId) : p.onIr) return false;
+    if (p.playerId ? !(view.activeIds.has(p.playerId) || also.has(p.playerId)) : p.onIr) return false;
     return canDrop(p.name, railRoster, cfg).allowed;
   });
 }

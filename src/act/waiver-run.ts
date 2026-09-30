@@ -24,11 +24,12 @@ import { rankByVor } from "../analysis/vor.ts";
 import { buildRosterView, takenAcrossLeague } from "../analysis/roster-view.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
-import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve } from "../league/api.ts";
+import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve, currentStarters as legStarters } from "../league/api.ts";
 import { streamNeeds, pickStreamer, type StreamCandidate } from "../analysis/streaming.ts";
-import { chooseForcedDrops } from "../analysis/roster-fit.ts";
+import { chooseLegalForcedDrops } from "../analysis/reconcile-plan.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
-import { loadRestOfSeason } from "../analysis/ros-projections.ts";
+import { loadValues, liveStatusFromRosters, toRail, weeksLeft } from "../analysis/value.ts";
+import { DropIntentStore, decideIntent } from "./drop-intent.ts";
 import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
 import {
@@ -114,37 +115,27 @@ async function main(): Promise<void> {
     console.log(`  in-flight trade: +${delta.incoming.length} incoming, -${delta.outgoing.length} outgoing already reflected in the roster`);
   }
 
-  // Rest-of-season is the right currency for a keep/drop decision (a weekly
-  // number makes a hurt starter look worthless).
-  const ros = await loadRestOfSeason(season, week, league.scoring_settings);
-
-  // Our roster as RailPlayers, on ROS points, carrying the stash flag the rails
-  // depend on. Injury status is LIVE from the roster read's player_map laid
-  // over the daily dump (R10): the dump is up to 24 h stale, which is how a
-  // player ruled Out on Saturday was still "Questionable" to Sunday's run.
+  // THE value (value.ts): rest-of-season points from the raw weekly tables,
+  // live injury status from the roster read, one stash rule. Every keep, drop,
+  // add and claim below reads it and nothing else.
+  const ros = await loadValues(season, week, league.scoring_settings, liveStatusFromRosters(rosters));
   const liveStatus = overlayRosterStatus(players, mine);
   const roster: RailPlayer[] = myPlayerIds.map((id) => {
-    const r = ros.get(id);
+    const v = ros.get(id);
     const dump = liveStatus[id];
-    const name = dump?.full_name ?? (dump ? `${dump.first_name} ${dump.last_name}`.trim() : r?.name ?? id);
-    const position = dump?.position ?? r?.position ?? (/^[A-Z]{2,4}$/.test(id) ? "DEF" : "?");
-    // team drives the bye lookup; a DEF's team abbreviation IS its id.
-    const team = dump?.team ?? r?.team ?? (/^[A-Z]{2,4}$/.test(id) ? id : undefined);
-    return {
-      playerId: id,
-      onIr: false, // the analysis roster is the ACTIVE set; reserve was excluded above
-      name,
-      position,
-      points: r?.points ?? 0,
-      injuryStatus: dump?.injury_status ?? r?.injuryStatus ?? undefined,
-      returnsBeforePlayoffs: r?.returnsBeforePlayoffs ?? false,
-      bye: byeWeek(team) ?? undefined, // for the upcoming-bye lookahead and tie-break
-    };
+    const name = dump?.full_name ?? (dump ? `${dump.first_name} ${dump.last_name}`.trim() : v?.name ?? id);
+    const position = dump?.position ?? v?.position ?? (/^[A-Z]{2,4}$/.test(id) ? "DEF" : "?");
+    const team = dump?.team ?? v?.team ?? (/^[A-Z]{2,4}$/.test(id) ? id : undefined);
+    const base: RailPlayer = v ? toRail(v) : { playerId: id, name, position, points: 0 };
+    return { ...base, name, position, onIr: false, injuryStatus: dump?.injury_status ?? base.injuryStatus, bye: byeWeek(team) ?? undefined };
   });
   const nameOf = new Map(roster.map((p) => [p.playerId ?? "", p.name]));
   // This week's starters as the site has them. Never dropped, never stashed,
   // before their games lock (R7). The lineup guard owns who starts.
-  const currentStarters = (mine.starters ?? []).map((id) => nameOf.get(id)).filter((n): n is string => !!n);
+  // The starters Sleeper will score this week are the matchup leg's, not the
+  // roster array's (api.ts matchupLegStarters).
+  const starterIds = await legStarters(tokenGql(), week, mine.starters ?? [], rosterId, leagueId).catch(() => mine.starters ?? []);
+  const currentStarters = starterIds.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
 
   // Players spoken for by our own pending claims (R6): the adds leave the
   // candidate pool, the drops leave the drop table.
@@ -162,7 +153,7 @@ async function main(): Promise<void> {
   // acquiring is still rostered (by them) until it processes. A trade frees
   // nobody to waivers. Only OUR roster view (above) reflects the delta.
   const rostered = takenAcrossLeague(rosters); // IR included: a stashed player is not a free agent
-  const unrostered = withoutPendingAdds(Array.from(ros.values()).filter((p) => !rostered.has(p.playerId) && p.points > 0), pending.adds);
+  const unrostered = withoutPendingAdds(Array.from(ros.values()).filter((p) => !rostered.has(p.playerId) && p.value > 0), pending.adds);
 
   // Rank by VALUE OVER REPLACEMENT, not raw points. Raw rest-of-season points
   // always put quarterbacks on top, because a starting QB outscores a starting
@@ -176,13 +167,13 @@ async function main(): Promise<void> {
   for (const r of rankByVor(
     unrostered.map((p) => ({
       playerId: p.playerId, name: p.name, position: p.position, team: p.team,
-      points: p.points, ptsPpr: p.points, adp: 999, injuryStatus: p.injuryStatus, stats: {},
+      points: p.value, ptsPpr: p.value, adp: 999, injuryStatus: p.injuryStatus, stats: {},
     })),
     league,
   )) vorOf.set(r.playerId, r.vor);
 
   const availableRos = unrostered
-    .sort((a, b) => (vorOf.get(b.playerId) ?? 0) - (vorOf.get(a.playerId) ?? 0) || b.points - a.points)
+    .sort((a, b) => (vorOf.get(b.playerId) ?? 0) - (vorOf.get(a.playerId) ?? 0) || b.value - a.value)
     .slice(0, MAX_CANDIDATES);
 
   // On waivers, PER PLAYER (R5): dropped inside waiver_clear_days, or his team
@@ -206,11 +197,7 @@ async function main(): Promise<void> {
   for (const p of ros.values()) if (p.name) idByName.set(p.name, p.playerId);
 
   const available: AvailablePlayer[] = availableRos.map((p) => ({
-    name: p.name,
-    position: p.position,
-    points: p.points,
-    injuryStatus: p.injuryStatus ?? undefined,
-    returnsBeforePlayoffs: p.returnsBeforePlayoffs,
+    ...toRail(p),
     onWaivers: isOnWaivers(p.playerId, p.team),
     bye: byeWeek(p.team) ?? undefined, // so a candidate on a crowded bye is debited
   }));
@@ -240,6 +227,7 @@ async function main(): Promise<void> {
     startingSlots: slots,
     irEligible,
     currentStarters,
+    weeksLeft: weeksLeft(week),
   };
 
   // Look ahead for a crowded STARTER bye we still have time to relieve (the
@@ -281,7 +269,7 @@ async function main(): Promise<void> {
     // chooseForcedDrops already refuses to empty a mandatory slot or cut a stash.
     const drop = rosterState.openBenchSlots > 0
       ? null
-      : chooseForcedDrops(roster, 1, streamCfg, [...need.coveringFor, ...currentStarters], rails)[0]?.name ?? null;
+      : chooseLegalForcedDrops(view, roster, 1, streamCfg, rails, [...need.coveringFor, ...currentStarters])[0]?.name ?? null;
     if (rosterState.openBenchSlots <= 0 && !drop) continue; // no legal way to make room
     const picked = pool.find((a) => a.name === pick.add);
     const onWaivers = picked ? isOnWaivers(picked.playerId, picked.team) : true;
@@ -384,10 +372,35 @@ async function main(): Promise<void> {
     return id;
   };
 
+  // TWO LOOKS before any move that costs a player (a drop or an IR stash). The
+  // first live run records the exact move; a later run, at least 30 minutes on,
+  // must plan the same move from fresh data before it is written. A move into
+  // an open slot costs nobody and goes at once. (drop-intent.ts; the schedule
+  // runs each job twice for this.) Filip, 2026-09-30: no rushing.
+  const intents = new DropIntentStore();
+  const nowMs2 = Date.now();
+  const confirmed = (kind: string, add: string, cost: string | null): boolean => {
+    if (!cost) return true;
+    const prefix = `waiver:${kind}:${add}:`;
+    const key = `${prefix}${cost}`;
+    intents.settle(prefix, key, nowMs2);
+    const gate = decideIntent(intents.get(key), nowMs2);
+    if (gate.action === "go") { intents.delete(key); return true; }
+    if (gate.action === "record") {
+      intents.put({ key, firstSeen: nowMs2, note: `${kind} ${add} costing ${cost}` });
+      console.log(`  ${kind} ${add} (costs ${cost}): recorded, confirming on the next run`);
+      logEvent("coach", "waiver-intent", `Would ${kind} ${add} costing ${cost}; confirming on a later run.`, { week, leagueId, kind, add, cost });
+    } else {
+      console.log(`  ${kind} ${add} (costs ${cost}): waiting for the confirmation window`);
+    }
+    return false;
+  };
+
   // Streaming first: it covers a slot that would otherwise score zero, which is
   // worth more than any marginal ROS upgrade. A stream claim takes the single
   // per-cycle claim; a stream free-add costs no priority.
   let claimUsed = false;
+  if (stream && !confirmed("stream", stream.add, stream.drop)) stream = null;
   if (stream) {
     try {
       if (stream.onWaivers && doClaims) {
@@ -458,6 +471,7 @@ async function main(): Promise<void> {
   };
 
   for (const m of doAdds ? freeAdds : []) {
+    if (!confirmed("add", m.add, m.drop ?? (m.irStash ? `stash ${m.irStash}` : null))) continue;
     try {
       if (m.dropPath === "ir-stash" && m.irStash && !(await stashToIr(m.irStash))) {
         // No slot was freed, so the add cannot land. Try the next candidate
@@ -502,7 +516,7 @@ async function main(): Promise<void> {
     }
   }
 
-  if (claim && doClaims && !claimUsed) {
+  if (claim && doClaims && !claimUsed && confirmed("claim", claim.add, claim.drop)) {
     try {
       const res = await submitWaiverClaim(gql, resolve(claim.add), claim.drop ? resolve(claim.drop) : null);
       console.log(`  claimed ${claim.add}${claim.drop ? ` (dropping ${claim.drop})` : ""} [${res.status}]`);

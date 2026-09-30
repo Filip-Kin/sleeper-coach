@@ -26,27 +26,30 @@ export function activeRailRoster(view: RosterView, railRoster: RailPlayer[]): Ra
 }
 
 /** `count` drops chosen over the full active roster, every one of which passes
- *  droppable(). When the solver picks a name the rails protect (a backup QB
+ *  droppable(). `keep` names are never cut (this week's starters, a pending
+ *  claim's drop, a player just traded for). `alsoDroppable` are ids outside
+ *  the active set that may still be cut (the IR player being activated). When the solver picks a name the rails protect (a backup QB
  *  whose season points rank him in the top twelve but whose removal costs
  *  nothing), that name is pinned as a keep and the solver runs again, so a
  *  legal answer is found whenever one exists. Fewer than `count` means the
  *  rails leave no legal way, and the caller alerts a human. */
 export function chooseLegalForcedDrops(
   view: RosterView, full: RailPlayer[], count: number, cfg: FairnessConfig, rails: RailConfig = DEFAULT_RAILS,
+  keep: string[] = [], alsoDroppable: Set<string> = new Set(),
 ): LegalDrop[] {
   if (count <= 0) return [];
   const allowed = new Map<string, string>();
-  for (const p of droppable(view, full, rails)) allowed.set(p.name.toLowerCase(), p.playerId ?? "");
-  const keep: string[] = [];
+  for (const p of droppable(view, full, rails, alsoDroppable)) allowed.set(p.name.toLowerCase(), p.playerId ?? "");
+  const pinned: string[] = [...keep];
   for (let attempt = 0; attempt <= full.length; attempt++) {
-    const drops = chooseForcedDrops(full, count, cfg, keep, rails);
+    const drops = chooseForcedDrops(full, count, cfg, pinned, rails);
     const bad = drops.filter((d) => !allowed.has(d.name.toLowerCase()));
     if (!bad.length) {
       return drops
         .map((d) => ({ ...d, playerId: allowed.get(d.name.toLowerCase()) ?? "" }))
         .filter((d) => d.playerId !== "");
     }
-    keep.push(...bad.map((d) => d.name));
+    pinned.push(...bad.map((d) => d.name));
   }
   return [];
 }

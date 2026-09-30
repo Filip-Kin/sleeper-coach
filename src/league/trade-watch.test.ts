@@ -15,7 +15,8 @@ import {
   runProposer, pairKey, onCooldown, liveOffers, reconcileProposals, ensureTable, OFFER_TTL_DAYS, type ProposerIo,
 } from "./trade-propose.ts";
 import { IntentStore } from "../analysis/trade-intent.ts";
-import { applyPending, stashFlag, type LeagueSnapshot } from "../analysis/trade-wire.ts";
+import { applyPending, type LeagueSnapshot } from "../analysis/trade-wire.ts";
+import { isStash } from "../analysis/value.ts";
 import { fitsObjective, objectiveScore, outboundConfig, DEFAULT_FAIRNESS, DEFAULT_PROPOSER, type FairnessConfig } from "../analysis/trade-fair.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
 
@@ -71,14 +72,14 @@ describe("T2 one snapshot per poll, and a player already leaving is gone from it
 });
 
 describe("T5 the stash flag reaches the trade snapshot", () => {
-  test("hurt now, real talent, season still to play: a stash", () => {
-    expect(stashFlag("IR", 200, 4)).toBe(true);
-    expect(stashFlag("Out", 200, 4)).toBe(true);
+  test("hurt now, startable-tier talent, season still to play: a stash", () => {
+    expect(isStash("WR", 8, "IR", 4)).toBe(true);
+    expect(isStash("RB", 18, "Out", 4)).toBe(true);
   });
-  test("questionable, or a scrub, or the championship week: not a stash", () => {
-    expect(stashFlag("Questionable", 200, 4)).toBe(false);
-    expect(stashFlag("IR", 50, 4)).toBe(false);
-    expect(stashFlag("IR", 200, 17)).toBe(false);
+  test("questionable, or outside the tier, or the championship week: not a stash", () => {
+    expect(isStash("WR", 8, "Questionable", 4)).toBe(false);
+    expect(isStash("RB", 60, "IR", 4)).toBe(false);
+    expect(isStash("WR", 8, "IR", 17)).toBe(false);
   });
 });
 

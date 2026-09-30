@@ -23,7 +23,9 @@ import { DEFAULT_FAIRNESS, type FairnessConfig } from "../analysis/trade-fair.ts
 import { DEFAULT_RAILS, type RailConfig, type RailPlayer } from "../analysis/rails.ts";
 import { activeRailRoster, chooseLegalForcedDrops, type LegalDrop } from "../analysis/reconcile-plan.ts";
 import { snapshot, scheduleContext } from "../analysis/trade-wire.ts";
-import { dropPlayers, updateReserve, myRosterView, type Gql } from "../league/api.ts";
+import { dropPlayers, updateReserve, myRosterView, currentStarters, type Gql } from "../league/api.ts";
+import { railsWithPendingDrops, pendingClaimPlayers } from "./pending-claims.ts";
+import { DropIntentStore, decideIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
 import { weekGames } from "../blog/auto.ts";
 import { freezeState } from "../killswitch.ts";
@@ -36,36 +38,58 @@ export interface ReserveDecision {
   playerId: string;
   name: string;
   injuryStatus: string | null;
-  action: "activate" | "stuck";
-  /** The forced drop that makes room, when the active roster is full. */
+  /** activate: take him off IR (with `drop` first when the roster is full).
+   *  release: he is himself the least valuable body, so he is dropped instead.
+   *  stuck: the rails allow no cut. */
+  action: "activate" | "release" | "stuck";
+  /** The forced drop that makes room, when the active roster is full. For
+   *  "release" this is the IR player himself. */
   drop: LegalDrop | null;
-  /** The reserve list to write. */
+  /** The reserve list to write (unused for "release": dropping him clears it). */
   reserveAfter: string[];
   reason: string;
 }
 
-/** One activation per call: the first stale reserve player, with a drop when
- *  the active roster is at the cap. A second stale player waits for the next
- *  poll, because each activation changes the roster the next decision needs
- *  and the drop breaker allows one automatic drop an hour anyway. */
+/** One activation per call: the first stale reserve player.
+ *
+ *  THE RULE (Filip, 2026-09-30): when the roster is full, the player cut is
+ *  the one worth least for the rest of the season, and the man coming off IR
+ *  is a candidate like anyone else. On 09-30 this path cut Travis Etienne
+ *  (RB26 rest-of-season) to make room for Rico Dowdle (RB32) because it only
+ *  looked at active players and priced every bench player at zero. `keep`
+ *  is this week's starters plus the drop side of any pending claim; those
+ *  are never cut. `slotsHeld` is the number of active slots a pending claim
+ *  with no drop will need. */
 export function planReserveActivation(args: {
   view: RosterView; settings: Settings; cap: number; railRoster: RailPlayer[]; cfg: FairnessConfig; rails?: RailConfig;
+  keep?: string[]; slotsHeld?: number;
 }): ReserveDecision[] {
   const { view, settings, cap, railRoster, cfg } = args;
   const rails = args.rails ?? DEFAULT_RAILS;
+  const keep = args.keep ?? [];
+  const slotsHeld = args.slotsHeld ?? 0;
   const stale = staleReserve(view, settings);
   const e = stale[0];
   if (!e) return [];
   const status = e.injuryStatus ?? "healthy";
   const reserveAfter = view.reserve.map((r) => r.playerId).filter((id) => id !== e.playerId);
   const base = { playerId: e.playerId, name: e.name, injuryStatus: e.injuryStatus, reserveAfter };
-  if (view.active.length < cap) {
+  if (view.active.length + slotsHeld < cap) {
     return [{ ...base, action: "activate", drop: null, reason: `${e.name} is ${status}, not IR-eligible in this league; an active slot is free` }];
   }
   const full = activeRailRoster(view, railRoster);
-  const drop = chooseLegalForcedDrops(view, full, 1, cfg, rails)[0];
+  // The IR player as a cut candidate, valued like everyone else.
+  const self = railRoster.find((p) => p.playerId === e.playerId);
+  const selfRail: RailPlayer = self
+    ? { ...self, onIr: false }
+    : { playerId: e.playerId, name: e.name, position: e.position ?? "", points: 0, onIr: false, injuryStatus: e.injuryStatus ?? undefined };
+  const union = [...full.filter((p) => p.playerId !== e.playerId), selfRail];
+  const drop = chooseLegalForcedDrops(view, union, 1, cfg, rails, keep, new Set([e.playerId]))[0];
   if (!drop) {
     return [{ ...base, action: "stuck", drop: null, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and the rails allow no drop` }];
+  }
+  if (drop.playerId === e.playerId) {
+    return [{ ...base, action: "release", drop, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and he is the least valuable body for the rest of the season (${Math.round(drop.cost)} points), so he is released rather than activated` }];
   }
   return [{ ...base, action: "activate", drop, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full, so ${drop.name} goes (${drop.reason})` }];
 }
@@ -126,6 +150,7 @@ export interface ReserveDeps {
   now?: number;
   /** Injected for tests; defaults to the live reads. */
   view?: RosterView;
+  intents?: DropIntentStore;
 }
 
 /** One pass. Returns the decision acted on, or null when there was nothing to
@@ -161,14 +186,18 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   }
 
   const cap = activeCapacity(league.roster_positions);
-  let railRoster: RailPlayer[] = [];
-  let cfg: FairnessConfig = DEFAULT_FAIRNESS;
-  if (view.active.length >= cap) {
-    const snap = await snapshot();
-    railRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
-    cfg = { ...DEFAULT_FAIRNESS, ...(await scheduleContext(null)) };
-  }
-  const plan = planReserveActivation({ view, settings: league.settings, cap, railRoster, cfg, rails: DEFAULT_FAIRNESS.rails })[0];
+  // Everything the cut must respect, read now: this week's starters (the
+  // matchup leg), the drop side and slot needs of our pending claims, and
+  // every player's rest-of-season value with live injury status.
+  const snap = await snapshot();
+  const railRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  const cfg: FairnessConfig = { ...DEFAULT_FAIRNESS, ...(await scheduleContext(null)) };
+  const starters = await currentStarters(deps.gql, week, []).catch(() => [] as string[]);
+  const nameOf = new Map(view.owned.map((e) => [e.playerId, e.name]));
+  const keep = starters.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
+  const pending = await pendingClaimPlayers(deps.gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
+  const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, railRoster, pending.drops);
+  const plan = planReserveActivation({ view, settings: league.settings, cap, railRoster, cfg, rails, keep, slotsHeld: pending.slotsNeeded })[0];
   if (!plan) return null;
 
   if (plan.action === "stuck") {
@@ -181,19 +210,45 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   }
 
   if (plan.drop) {
+    // Two looks before the cut: the same decision from fresh data at least
+    // MIN_AGE_MS apart. Nothing about an illegal roster is urgent at this
+    // resolution, and every one of this month's bad drops was a single read.
+    const intents = deps.intents ?? new DropIntentStore();
+    const prefix = `ir-activate:${plan.playerId}:`;
+    const key = `${prefix}${plan.action}:${plan.drop.playerId}`;
+    intents.settle(prefix, key, now);
+    const gate = decideIntent(intents.get(key), now);
+    if (gate.action === "record") {
+      intents.put({ key, firstSeen: now, note: plan.reason });
+      logEvent("coach", "ir-activate-intent", `Would ${plan.action === "release" ? "release" : `drop ${plan.drop.name} and activate`} ${plan.name}; confirming on a later look. ${plan.reason}`, { player: plan.playerId, drop: plan.drop.playerId, action: plan.action });
+      return null;
+    }
+    if (gate.action === "wait") return null;
+
+    const via = plan.action === "release" ? "ir-release" : "ir-activate";
     try {
-      await dropPlayers(deps.gql, [plan.drop.playerId], config.rosterId, config.leagueId, "ir-activate");
+      await dropPlayers(deps.gql, [plan.drop.playerId], config.rosterId, config.leagueId, via);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof DropRefused) {
-        // The breaker decided. Not a failure: the next poll after the cooldown tries again.
-        logEvent("coach", "ir-activate-deferred", `Drop of ${plan.drop.name} to activate ${plan.name} refused by the breaker: ${err.verdict.reason}`, { player: plan.playerId, drop: plan.drop.playerId });
+        logEvent("coach", "ir-activate-deferred", `Drop of ${plan.drop.name} for ${plan.name} refused by the breaker: ${err.verdict.reason}`, { player: plan.playerId, drop: plan.drop.playerId });
         return null;
       }
-      logEvent("coach", "ir-activate-failed", `Could not drop ${plan.drop.name} to activate ${plan.name}: ${msg}`, { player: plan.playerId, drop: plan.drop.playerId });
+      logEvent("coach", "ir-activate-failed", `Could not drop ${plan.drop.name} for ${plan.name}: ${msg}`, { player: plan.playerId, drop: plan.drop.playerId });
       if (deferrals.mayAlert(plan.playerId, now)) await sendAlert("IR activation failed", `${plan.reason}. The drop failed: ${msg}`).catch(() => {});
       deferrals.deferFor(plan.playerId, now, HOUR);
       return null;
+    }
+    intents.delete(key);
+    if (plan.action === "release") {
+      const after = await myRosterView();
+      if (after.ownedIds.has(plan.playerId)) {
+        logEvent("coach", "ir-activate-failed", `Released ${plan.name} but he is still on the roster after read-back`, { player: plan.playerId });
+        return null;
+      }
+      logEvent("coach", "ir-released", `${plan.name} released from injured reserve. ${plan.reason}.`, { player: plan.playerId, injuryStatus: plan.injuryStatus, reserve: after.reserve.map((e) => e.playerId), active: after.active.length });
+      deferrals.clear(plan.playerId);
+      return plan;
     }
   }
 

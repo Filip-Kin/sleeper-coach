@@ -56,6 +56,15 @@ export interface WaiverConfig {
   // treat relieving it as an explicit objective while there is still time to act
   // (the week-8 hole is a week-7 job). Default 2.
   byeLookaheadWeeks: number;
+  // BENCH SWAPS (Filip, 2026-09-30): "there's a running back we have whose
+  // projected average for the rest of the season is eight, and a free agent
+  // whose average is ten: swap them." A swap that changes no starter still
+  // counts when the incoming player beats the outgoing one at a swappable
+  // position by this many points PER REMAINING WEEK. A drop is for the
+  // season, so the bar is a real per-week gap, not a rounding error.
+  benchSwapMarginPerWeek: number;
+  // The same for a claim, which costs our waiver position: higher.
+  benchClaimMarginPerWeek: number;
 }
 
 export const DEFAULT_WAIVERS: WaiverConfig = {
@@ -66,6 +75,8 @@ export const DEFAULT_WAIVERS: WaiverConfig = {
   crowdedByeAt: 3, // same threshold as the trade engine's byeRelief
   byeReliefPts: 4, // same modest tie-break weight as trades
   byeLookaheadWeeks: 2,
+  benchSwapMarginPerWeek: 1.0,
+  benchClaimMarginPerWeek: 2.0,
 };
 
 // A player available to add. `onWaivers` is the pricing switch: true means a
@@ -96,6 +107,8 @@ export interface RosterState {
    *  lineup guard decides who starts, and a drop table that can name DK
    *  Metcalf is the 2026-09-23 audit's finding R7. */
   currentStarters?: string[];
+  /** Weeks left in the fantasy season, to turn a per-week margin into points. */
+  weeksLeft?: number;
 }
 
 export type MoveKind = "free-add" | "waiver-claim" | "wait" | "skip";
@@ -124,8 +137,11 @@ export interface WaiverMove {
   reason: string;
 }
 
+// The rest-of-season lineup. `points` already prices the weeks a hurt player
+// misses, so his status is NOT passed: with it, solveLineup benched an Out
+// WR1 for the whole rest of the season and any drop of him read as free.
 function asLineup(p: RailPlayer): LineupPlayer {
-  return { playerId: p.name, name: p.name, position: p.position, points: p.points, injuryStatus: p.injuryStatus };
+  return { playerId: p.name, name: p.name, position: p.position, points: p.points };
 }
 
 // The true value of a transaction, measured on the STARTING LINEUP: how many ROS
@@ -143,18 +159,52 @@ function lineupDelta(
   incoming: AvailablePlayer,
   dropName: string | null,
   state: RosterState,
-): { gain: number; starts: boolean } {
-  const baseline = solveLineup(state.roster.map(asLineup), state.startingSlots).total;
-  const kept = state.roster.filter((p) => p.name !== dropName).map(asLineup);
+  rails: RailConfig = DEFAULT_RAILS,
+  stashName: string | null = null,
+): { gain: number; starts: boolean; benchGain: number } {
+  // For an IR-stash path the question is how much the add helps the lineup
+  // we can field WITHOUT the stashed man (he cannot start from IR), so he is
+  // out of both sides. He is still ours and still valued everywhere else.
+  const base = stashName ? state.roster.filter((p) => p.name !== stashName) : state.roster;
+  const baseline = solveLineup(base.map(asLineup), state.startingSlots).total;
+  const kept = base.filter((p) => p.name !== dropName).map(asLineup);
   const after = solveLineup([...kept, asLineup(incoming)], state.startingSlots);
   const starts = after.starters.some((s) => s.playerId === incoming.name);
-  return { gain: Math.round((after.total - baseline) * 10) / 10, starts };
+  // Bench gain: what the add is worth against the man he replaces. For a
+  // drop path that is the dropped player; for a no-drop path (open slot, IR
+  // stash) it is the cheapest bench body we could otherwise have cut, since
+  // that is who the add is really being compared with.
+  const dropped = dropName ? state.roster.find((p) => p.name === dropName) ?? null : cheapestSwappable(incoming.position, state, rails);
+  const benchGain = dropped && swappable(incoming.position, dropped.position)
+    ? Math.round((incoming.points - dropped.points) * 10) / 10
+    : 0;
+  return { gain: Math.round((after.total - baseline) * 10) / 10, starts, benchGain };
+}
+
+function cheapestSwappable(position: string, state: RosterState, rails: RailConfig): RailPlayer | null {
+  const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
+  let best: RailPlayer | null = null;
+  for (const p of state.roster) {
+    if (starters.has(p.name.toLowerCase()) || !swappable(position, p.position)) continue;
+    if (!canDrop(p.name, state.roster, rails).allowed) continue;
+    if (!best || p.points < best.points) best = p;
+  }
+  return best;
+}
+
+/** Positions a bench swap may cross: the same one, or within the FLEX group.
+ *  Never QB, K or DEF against anything else: a third quarterback beating a
+ *  fifth receiver on points is the draft-night trap. */
+const FLEX_GROUP = new Set(["RB", "WR", "TE"]);
+export function swappable(a: string, b: string): boolean {
+  return a === b || (FLEX_GROUP.has(a) && FLEX_GROUP.has(b));
 }
 
 interface PathEval {
   path: DropPath;
   drop: string | null;
   gain: number; // starting-lineup ROS delta of taking this path
+  benchGain: number; // incoming minus dropped at a swappable position, else 0
   starts: boolean; // does the add start after it
   reason: string;
   irStash?: string; // set only on the "ir-stash" path
@@ -183,7 +233,7 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   // as irOpportunities ranks them, never a current starter.
   const stashable = stashCandidates(state, cfg);
   const irStashable = stashable[0];
-  if (state.openIrSlots > 0 && irStashable) {
+  if (state.openIrSlots > 0 && irStashable && worthStashing(irStashable, state, cfg)) {
     paths.push({ path: "ir-stash", drop: null, irStash: irStashable.name, reason: `stash ${irStashable.name} (${irStashable.injuryStatus ?? "injured"}) on IR (no drop)` });
   }
   // Every canDrop-ALLOWED player is a candidate drop. canDrop is the authority on
@@ -198,11 +248,30 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   }
 
   const evals = paths.map((p) => {
-    const { gain, starts } = lineupDelta(incoming, p.drop, state);
-    return { ...p, gain, starts };
+    const { gain, starts, benchGain } = lineupDelta(incoming, p.drop, state, cfg.rails, p.irStash ?? null);
+    return { ...p, gain, starts, benchGain };
   });
-  evals.sort((a, b) => b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path]);
+  // Best lineup gain first; among equals drop nobody; then the bigger bench gain.
+  evals.sort((a, b) => b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path] || b.benchGain - a.benchGain);
   return evals;
+}
+
+/** Parking a player on IR is not free: he comes back, and then somebody has
+ *  to make room. So an automatic stash is for a player worth keeping: a
+ *  protected stash (hurt, startable-tier talent), a multi-week designation
+ *  (IR, PUP), or at least more rest-of-season value than the cheapest body
+ *  we could drop instead. On 2026-09-27 a day-to-day Out Rico Dowdle was
+ *  stashed to add Tyjae Spears; when he flipped to Questionable the
+ *  activation cut Travis Etienne. */
+export function worthStashing(p: RailPlayer, state: Pick<RosterState, "roster" | "currentStarters">, cfg: Pick<WaiverConfig, "rails">): boolean {
+  if (p.returnsBeforePlayoffs) return true;
+  const st = (p.injuryStatus ?? "").toUpperCase();
+  if (st === "IR" || st === "PUP") return true;
+  const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
+  const cheapest = state.roster
+    .filter((q) => q.name !== p.name && !starters.has(q.name.toLowerCase()) && canDrop(q.name, state.roster, cfg.rails).allowed)
+    .reduce<number | null>((m, q) => (m === null || q.points < m ? q.points : m), null);
+  return cheapest === null || p.points > cheapest; // nobody else may be cut: the stash is the only room there is
 }
 
 // With no league flags only IR and PUP qualify. The live run always passes the
@@ -263,8 +332,12 @@ export function planOne(
   const best = evalPaths(incoming, state, cfg)[0];
   if (!best) return skip("no legal path: nothing on the roster may be dropped and no slot is open");
 
-  const { gain, starts, path, drop } = best;
+  const { gain, starts, path, drop, benchGain } = best;
   const irStash = best.irStash ?? null;
+  const weeks = Math.max(1, state.weeksLeft ?? 14);
+  const swapBar = cfg.benchSwapMarginPerWeek * weeks;
+  const claimSwapBar = cfg.benchClaimMarginPerWeek * weeks;
+  const benchUpgrade = (drop !== null || path === "ir-stash") && benchGain >= swapBar;
   const droppedPlayer = drop ? state.roster.find((p) => p.name === drop) ?? null : null;
   const byeCredit = byeCreditFor(incoming, droppedPlayer, crowdedByes, cfg);
   const byeNote =
@@ -276,26 +349,33 @@ export function planOne(
   // point gap suggests. This is the guard against dropping a needed player (our
   // only kicker, say) to roster a higher-scoring but redundant position.
   const needsDrop = drop !== null;
-  if (needsDrop && gain <= 0) {
+  if (needsDrop && gain < 0) {
     return skip(`no add improves the lineup without weakening it (best option ${describe(best)} nets ${gain} ROS)`);
   }
+  // An IR stash is a deferred drop (he comes back), so it clears the same bar as one.
+  const costsSomething = needsDrop || path === "ir-stash";
 
   if (!incoming.onWaivers) {
     // Cleared waivers: costless. Into an open slot, take any positive-ROS depth
-    // (drops nobody). If it entails a drop, require a real lineup improvement.
-    if (needsDrop && gain < cfg.freeAddMarginPts) {
-      return skip(`free agent, but the only add lifts the lineup just +${gain} ROS (needs a drop; under the ${cfg.freeAddMarginPts}pt bar)`);
+    // (drops nobody). If it entails a drop, require a real lineup improvement,
+    // OR a real bench upgrade at a swappable position (the 2026-09-30 rule).
+    if (costsSomething && gain < cfg.freeAddMarginPts && !benchUpgrade) {
+      return skip(`free agent, but ${describe(best)} lifts the lineup just +${gain} ROS and the bench ${benchGain >= 0 ? "+" : ""}${benchGain} (needs ${cfg.freeAddMarginPts} lineup or ${cfg.benchSwapMarginPerWeek}/week bench)`);
     }
     const how = drop ? `drop ${drop}` : path === "ir-stash" ? best.reason : "open bench slot, no drop";
-    return move("free-add", false, `free agent, costless — ${how}${starts ? `; starts for us (+${gain} ROS)` : `; +${gain} ROS depth`}`);
+    const why = starts ? `; starts for us (+${gain} ROS)` : benchUpgrade ? `; bench upgrade +${benchGain} ROS (${(benchGain / weeks).toFixed(1)}/week)` : `; +${gain} ROS depth`;
+    return move("free-add", false, `free agent, costless — ${how}${why}`);
   }
 
-  // On waivers: burning a queue position. High bar, on the LINEUP improvement.
+  // On waivers: burning a queue position. High bar: a real LINEUP improvement
+  // from a player who starts, or a bench upgrade of claim size.
   const bigEnough = gain >= cfg.claimMarginPts;
   const startsOk = starts || !cfg.claimMustStart;
-  if (bigEnough && startsOk) {
+  const benchClaim = drop !== null && benchGain >= claimSwapBar;
+  if ((bigEnough && startsOk) || benchClaim) {
     const how = drop ? `drop ${drop}` : "no drop";
-    return move("waiver-claim", true, `worth a priority burn: +${gain} ROS to the lineup${starts ? " (he starts)" : ""} — ${how}`);
+    const why = bigEnough && startsOk ? `+${gain} ROS to the lineup${starts ? " (he starts)" : ""}` : `bench upgrade +${benchGain} ROS (${(benchGain / weeks).toFixed(1)}/week)`;
+    return move("waiver-claim", true, `worth a priority burn: ${why} — ${how}`);
   }
   // Not worth going last: wait for him to clear, then free-add for nothing.
   const why = !bigEnough

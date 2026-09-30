@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { activeCapacity, overCapBy, removalCost, chooseForcedDrops } from "./roster-fit.ts";
+import { activeCapacity, overCapBy, chooseForcedDrops } from "./roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "./trade-fair.ts";
 
 const P = (name: string, position: string, points: number, extra: Record<string, unknown> = {}) =>
@@ -23,13 +23,17 @@ const roster = [
 ];
 const cfg = { ...DEFAULT_FAIRNESS, upcomingWeeks: Array.from({length:15},(_,i)=>i+1), remainingWeeks: 15, headToHeadRemaining: 2 };
 
-test("removal cost is marginal value, not raw projection", () => {
-  // Prescott projects 303 but is our backup QB: removing him barely moves the
-  // team, so his removal cost is far below his projection.
-  const prescott = removalCost("Prescott", roster, cfg);
-  expect(prescott).toBeLessThan(50);
-  // McCaffrey is our RB1 and starts every week: dropping him is very costly.
-  expect(removalCost("McCaffrey", roster, cfg)).toBeGreaterThan(prescott);
+test("a forced drop is the lowest rest-of-season value, never a starter-level player", () => {
+  // Filip, 2026-09-30: a drop is for the season. The bench is Prescott (303),
+  // Etienne (207), Downs (140): Downs goes first, then Etienne. The backup QB
+  // is worth more than both for the rest of the season and stays.
+  const drops = chooseForcedDrops(roster, 2, cfg);
+  expect(drops.map((d) => d.name)).toEqual(["Downs", "Etienne"]);
+});
+
+test("ties break on full-season talent, never on list order", () => {
+  const tied = [...roster, P("A-first", "WR", 100, { seasonPoints: 150 }), P("B-second", "WR", 100, { seasonPoints: 120 })];
+  expect(chooseForcedDrops(tied, 1, cfg)[0]?.name).toBe("B-second");
 });
 
 test("forced drops pick the cheapest-to-lose players", () => {

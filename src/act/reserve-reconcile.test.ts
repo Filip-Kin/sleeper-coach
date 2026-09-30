@@ -86,3 +86,26 @@ describe("R1: deferral and alert throttling", () => {
     expect(d.mayAlert("collins", 25 * 3_600_000)).toBe(true);
   });
 });
+
+describe("the IR player is himself a cut candidate (Filip, 2026-09-30)", () => {
+  test("a stale IR player worth less than every bench body is released, nobody else is cut", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const cheap = rail.map((p) => (p.playerId === "collins" ? { ...p, points: 20 } : p));
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: cheap, cfg })[0]!;
+    expect(plan.action).toBe("release");
+    expect(plan.drop?.playerId).toBe("collins");
+  });
+  test("this week's starters and a pending claim's drop are never the cut", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    // wr6 (45) is the cheapest; pinned as a starter it must be skipped, then rb5 (50)
+    // is pinned as a pending claim's drop, so wr5 (55) goes.
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: rail, cfg, keep: ["P wr6", "P rb5"] })[0]!;
+    expect(plan.action).toBe("activate");
+    expect(plan.drop?.playerId).toBe("wr5");
+  });
+  test("a slot held for a pending no-drop claim is not a free slot", () => {
+    const { view, rail } = fixture(15, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: rail, cfg, slotsHeld: 1 })[0]!;
+    expect(plan.drop).not.toBeNull();
+  });
+});
