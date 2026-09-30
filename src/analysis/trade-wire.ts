@@ -16,7 +16,7 @@ import { leagueRosters } from "../sleeper/graphql.ts";
 import type { Roster } from "../sleeper/types.ts";
 import { tokenGql, pendingRosterDelta, applyRosterDelta, pendingTrades, type Gql, type PendingTrade } from "../league/api.ts";
 import { sleeper } from "../sleeper/client.ts";
-import { loadValues, liveStatusFromRosters } from "./value.ts";
+import { loadValues, liveStatusFromRosters, scalePts } from "./value.ts";
 import { loadPlayers } from "../data/players.ts";
 import { byeWeek } from "../data/byes.ts";
 import { activeCapacity } from "./roster-fit.ts";
@@ -202,7 +202,16 @@ export function otherSides(tx: Tx, snap: LeagueSnapshot): { rosterId: number; of
 
 // How many remaining regular-season weeks, and how many of those we play them.
 // Their gain is diluted by exactly this, so getting it wrong changes decisions.
-export async function scheduleContext(theirRosterId: number | null): Promise<{ remainingWeeks: number; headToHeadRemaining: number; upcomingWeeks: number[] }> {
+/** The point thresholds in FairnessConfig/TradeConfig that were written for a
+ *  full 17-week season and now sit on a rest-of-season scale. */
+export const SCALED_PTS: (keyof FairnessConfig)[] = ["flatMarginPts", "rosterSlotCostPts", "surplusMaxLineupPts", "maxTheirGainPts", "rejectBelowPts", "acceptAbovePts", "minOwnGainPts", "requireOurEdgePts"];
+
+export type ScheduleContext = { remainingWeeks: number; headToHeadRemaining: number; upcomingWeeks: number[] } & Partial<Pick<FairnessConfig, "flatMarginPts" | "rosterSlotCostPts" | "surplusMaxLineupPts" | "maxTheirGainPts" | "rejectBelowPts" | "acceptAbovePts" | "minOwnGainPts" | "requireOurEdgePts">>;
+
+/** Spread over DEFAULT_FAIRNESS at every live entry point, so every trade,
+ *  cut and veto evaluation sees the remaining schedule AND thresholds scaled
+ *  to the rest of the season (value.ts seasonScale). */
+export async function scheduleContext(theirRosterId: number | null): Promise<ScheduleContext> {
   const state = await sleeper.nflState();
   const league = await sleeper.league(config.leagueId);
   const playoffStart = league.settings.playoff_week_start ?? 16;
@@ -212,7 +221,9 @@ export async function scheduleContext(theirRosterId: number | null): Promise<{ r
   // bye players removed. A count alone cannot tell you which weeks have holes.
   const upcomingWeeks: number[] = [];
   for (let w = week; w < playoffStart; w++) upcomingWeeks.push(w);
-  if (theirRosterId === null) return { remainingWeeks, headToHeadRemaining: 0, upcomingWeeks };
+  const scaled = scalePts(DEFAULT_FAIRNESS, week, SCALED_PTS);
+  const thresholds = Object.fromEntries(SCALED_PTS.map((k) => [k, scaled[k]])) as Partial<FairnessConfig>;
+  if (theirRosterId === null) return { remainingWeeks, headToHeadRemaining: 0, upcomingWeeks, ...thresholds };
   // Count real remaining meetings from the published matchups rather than
   // assuming an even schedule: an 8-team league does not always give exactly two.
   let h2h = 0;
@@ -226,7 +237,7 @@ export async function scheduleContext(theirRosterId: number | null): Promise<{ r
       // A week that is not published yet simply does not count.
     }
   }
-  return { remainingWeeks, headToHeadRemaining: h2h, upcomingWeeks };
+  return { remainingWeeks, headToHeadRemaining: h2h, upcomingWeeks, ...thresholds };
 }
 
 /** The fairness config for a live evaluation against one rival: defaults,

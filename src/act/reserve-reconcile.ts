@@ -193,7 +193,9 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   const railRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
   const cfg: FairnessConfig = { ...DEFAULT_FAIRNESS, ...(await scheduleContext(null)) };
   const starters = await currentStarters(deps.gql, week, []).catch(() => [] as string[]);
-  const nameOf = new Map(view.owned.map((e) => [e.playerId, e.name]));
+  // Names as the RAIL roster spells them (a defense is "SEA" there and
+  // "Seattle Seahawks" in the view), since the chooser matches on rail names.
+  const nameOf = new Map(railRoster.map((p) => [p.playerId ?? "", p.name]));
   const keep = starters.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
   const pending = await pendingClaimPlayers(deps.gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
   const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, railRoster, pending.drops);
@@ -216,11 +218,17 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
     const intents = deps.intents ?? new DropIntentStore();
     const prefix = `ir-activate:${plan.playerId}:`;
     const key = `${prefix}${plan.action}:${plan.drop.playerId}`;
-    intents.settle(prefix, key, now);
+    const restarts = intents.settle(prefix, key, now);
     const gate = decideIntent(intents.get(key), now);
     if (gate.action === "record") {
       intents.put({ key, firstSeen: now, note: plan.reason });
-      logEvent("coach", "ir-activate-intent", `Would ${plan.action === "release" ? "release" : `drop ${plan.drop.name} and activate`} ${plan.name}; confirming on a later look. ${plan.reason}`, { player: plan.playerId, drop: plan.drop.playerId, action: plan.action });
+      logEvent("coach", "ir-activate-intent", `Would ${plan.action === "release" ? "release" : `drop ${plan.drop.name} and activate`} ${plan.name}; confirming on a later look. ${plan.reason}`, { player: plan.playerId, drop: plan.drop.playerId, action: plan.action, restarts });
+      if (restarts >= 3) {
+        // The decision keeps changing between looks, so nothing ever confirms
+        // and the roster stays illegal. That needs eyes, not more patience.
+        logEvent("coach", "ir-activate-stuck", `${plan.name}: the cut decision has changed ${restarts} times without confirming; the roster stays illegal`, { player: plan.playerId, restarts });
+        if (deferrals.mayAlert(plan.playerId, now)) await sendAlert("IR activation cannot settle", `${plan.name}: the cut decision keeps changing (${restarts} restarts). ${plan.reason}`).catch(() => {});
+      }
       return null;
     }
     if (gate.action === "wait") return null;
@@ -244,6 +252,7 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
       const after = await myRosterView();
       if (after.ownedIds.has(plan.playerId)) {
         logEvent("coach", "ir-activate-failed", `Released ${plan.name} but he is still on the roster after read-back`, { player: plan.playerId });
+        deferrals.deferFor(plan.playerId, now, HOUR);
         return null;
       }
       logEvent("coach", "ir-released", `${plan.name} released from injured reserve. ${plan.reason}.`, { player: plan.playerId, injuryStatus: plan.injuryStatus, reserve: after.reserve.map((e) => e.playerId), active: after.active.length });

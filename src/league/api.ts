@@ -423,7 +423,7 @@ function recordDrops(dropIds: string[], via: string, names?: string[]): void {
 
 export async function submitWaiverClaim(
   gql: Gql, addPlayerId: string, dropPlayerId: string | null,
-  rosterId = config.rosterId, leagueId = config.leagueId,
+  rosterId = config.rosterId, leagueId = config.leagueId, via = "claim",
 ): Promise<{ transactionId: string; status: string }> {
   const args = [
     `league_id:"${safeId(leagueId)}"`,
@@ -433,12 +433,12 @@ export async function submitWaiverClaim(
   if (dropPlayerId) {
     args.push(`k_drops:["${safePlayerId(dropPlayerId)}"]`, `v_drops:[${Math.trunc(rosterId)}]`);
   }
-  guardDrop("submit a waiver claim", dropPlayerId ? [dropPlayerId] : [], "claim");
+  guardDrop("submit a waiver claim", dropPlayerId ? [dropPlayerId] : [], via);
   const body = await gql(`mutation{submit_waiver_claim(${args.join(",")}){transaction_id status}}`);
   const r = (unwrap(body, "submit_waiver_claim") ?? {}) as { transaction_id?: string; status?: string };
   // A claim's drop is counted when it is FILED: Wednesday processes every claim
   // at once, and three claims naming three drops is the cascade shape again.
-  if (dropPlayerId) recordDrops([dropPlayerId], "claim");
+  if (dropPlayerId) recordDrops([dropPlayerId], via);
   logEvent("coach", "write-claim", `Waiver claim filed: add ${addPlayerId}${dropPlayerId ? `, drop ${dropPlayerId}` : ""}.`, { add: addPlayerId, drop: dropPlayerId, rosterId, leagueId, transactionId: r.transaction_id, status: r.status });
   return { transactionId: String(r.transaction_id ?? ""), status: String(r.status ?? "") };
 }
@@ -447,7 +447,7 @@ export async function submitWaiverClaim(
  *  which is why the analysis prefers it whenever the player is unclaimed. */
 export async function addFreeAgent(
   gql: Gql, addPlayerId: string, dropPlayerId: string | null,
-  rosterId = config.rosterId, leagueId = config.leagueId,
+  rosterId = config.rosterId, leagueId = config.leagueId, via = "free-add",
 ): Promise<{ transactionId: string; status: string }> {
   const args = [
     `type:"free_agent"`,
@@ -458,10 +458,10 @@ export async function addFreeAgent(
   if (dropPlayerId) {
     args.push(`k_drops:["${safePlayerId(dropPlayerId)}"]`, `v_drops:[${Math.trunc(rosterId)}]`);
   }
-  guardDrop("add a free agent", dropPlayerId ? [dropPlayerId] : [], "free-add");
+  guardDrop("add a free agent", dropPlayerId ? [dropPlayerId] : [], via);
   const body = await gql(`mutation{league_create_transaction(${args.join(",")}){transaction_id status}}`);
   const r = (unwrap(body, "league_create_transaction") ?? {}) as { transaction_id?: string; status?: string };
-  if (dropPlayerId) recordDrops([dropPlayerId], "free-add");
+  if (dropPlayerId) recordDrops([dropPlayerId], via);
   logEvent("coach", "write-add", `Free agent added: ${addPlayerId}${dropPlayerId ? `, dropped ${dropPlayerId}` : ""}.`, { add: addPlayerId, drop: dropPlayerId, rosterId, leagueId, transactionId: r.transaction_id, status: r.status });
   return { transactionId: String(r.transaction_id ?? ""), status: String(r.status ?? "") };
 }

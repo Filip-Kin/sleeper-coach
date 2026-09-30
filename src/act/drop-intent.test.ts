@@ -18,3 +18,16 @@ describe("two looks before an automatic drop", () => {
     expect(s.get("ir-activate:7569:drop:7543")).toBeNull();
   });
 });
+
+describe("a decision that keeps changing is counted", () => {
+  test("settle returns how many times the prefix restarted inside the window", () => {
+    const s = new DropIntentStore(`/tmp/sleeper-coach-test/intents-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+    let n = s.settle("reconcile:", "reconcile:a", 1000); s.put({ key: "reconcile:a", firstSeen: 1000, note: "" });
+    expect(n).toBe(0);
+    n = s.settle("reconcile:", "reconcile:b", 2000); s.put({ key: "reconcile:b", firstSeen: 2000, note: "" });
+    expect(n).toBe(1);
+    n = s.settle("reconcile:", "reconcile:c", 3000);
+    expect(n).toBe(2);
+    expect(s.all().map((i) => i.key)).toEqual([]); // b was removed, c not put yet; bookkeeping rows hidden
+  });
+});

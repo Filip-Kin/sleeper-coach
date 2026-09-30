@@ -128,10 +128,27 @@ describe("2026-09-19: seventeen entries with Collins on IR", () => {
     const active = [...active0930.filter((p) => p.name !== "Tyjae Spears"), P("Jayden Reed", "Doubtful"), P("Rico Dowdle")];
     const ir = [P("Nico Collins", "Out", true)];
     expect(active.length).toBe(17);
-    const drops = chooseForcedDrops([...active], 1, cfg, STARTERS_0930);
+    // The IR player is in the chooser's input (as the daemon's union would
+    // have him if he were ever passed) with the onIr flag: the rail refuses
+    // him whatever his value.
+    const drops = chooseForcedDrops([...active, { ...ir[0]!, points: 1, seasonPoints: 1 }], 1, cfg, STARTERS_0930);
     expect(drops.length).toBe(1);
     expect(["Nico Collins", "Jayden Reed", "Travis Etienne", ...STARTERS_0930]).not.toContain(drops[0]!.name);
     expect(drops[0]!.name).toBe("Kenny Gainwell");
     expect(ir[0]!.returnsBeforePlayoffs).toBe(true);
+  });
+});
+
+describe("review 2026-09-30: drops that tie on lineup gain", () => {
+  test("an incoming starter makes every bench drop equal on gain; the cut is still the cheapest body, never list order", () => {
+    // Bench listed with the most valuable first. Old code took the first.
+    const bench = [P("Jalen Hurts"), P("Kenny Gainwell"), P("Mark Andrews"), P("Tyjae Spears")];
+    const starters = STARTERS_0930.map((n) => P(n));
+    const state: RosterState = { roster: [...starters, ...bench], openBenchSlots: 0, openIrSlots: 0, startingSlots: SLOTS, currentStarters: STARTERS_0930, weeksLeft: 14 };
+    const stud: AvailablePlayer = { ...P("Nico Collins"), onWaivers: false }; // starts at WR over Downs
+    const m = planOne(stud, state, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(m.startsForUs).toBe(true);
+    expect(m.drop).toBe("Kenny Gainwell");
   });
 });

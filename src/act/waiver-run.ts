@@ -30,6 +30,7 @@ import { chooseLegalForcedDrops } from "../analysis/reconcile-plan.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
 import { loadValues, liveStatusFromRosters, toRail, weeksLeft } from "../analysis/value.ts";
 import { DropIntentStore, decideIntent } from "./drop-intent.ts";
+import { DropRefused } from "../league/drop-ledger.ts";
 import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
 import {
@@ -413,10 +414,15 @@ async function main(): Promise<void> {
         console.log(`  streamed (free add) ${stream.add} for week ${stream.forWeek}${stream.drop ? ` (dropping ${stream.drop})` : ""} [${res.status}]`);
         logEvent("coach", "waiver-stream", `Added ${stream.add} to cover week ${stream.forWeek} ${stream.position}${stream.drop ? `, dropping ${stream.drop}` : ""}.`, { week, forWeek: stream.forWeek, add: stream.add, drop: stream.drop, position: stream.position, via: "free-add", transaction_id: res.transactionId, status: res.status });
       }
+      intents.settle("waiver:", "", nowMs2);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logEvent("coach", "waiver-stream-failed", `Stream ${stream.add} failed: ${msg}`, { week, add: stream.add });
-      if (live) await sendAlert("Stream pickup failed", `Week ${stream.forWeek}: ${stream.add} — ${msg}`);
+      if (err instanceof DropRefused) {
+        logEvent("coach", "waiver-stream-deferred", `Stream ${stream.add} deferred by the breaker: ${err.verdict.reason}`, { week, add: stream.add });
+      } else {
+        logEvent("coach", "waiver-stream-failed", `Stream ${stream.add} failed: ${msg}`, { week, add: stream.add });
+        if (live) await sendAlert("Stream pickup failed", `Week ${stream.forWeek}: ${stream.add} — ${msg}`);
+      }
     }
   }
 
@@ -470,8 +476,12 @@ async function main(): Promise<void> {
     }
   };
 
-  for (const m of doAdds ? freeAdds : []) {
-    if (!confirmed("add", m.add, m.drop ?? (m.irStash ? `stash ${m.irStash}` : null))) continue;
+  // Only the BEST current move is ever written, and only when it is the same
+  // move a previous run recorded (two looks). A lesser move is not written
+  // just because its own record aged: the second look must agree with the
+  // first about what the best move is.
+  for (const m of (doAdds ? freeAdds : []).slice(0, 1)) {
+    if (!confirmed("add", m.add, m.drop ?? (m.irStash ? `stash ${m.irStash}` : null))) break;
     try {
       if (m.dropPath === "ir-stash" && m.irStash && !(await stashToIr(m.irStash))) {
         // No slot was freed, so the add cannot land. Try the next candidate
@@ -506,10 +516,18 @@ async function main(): Promise<void> {
       logEvent("coach", via === "claim" ? "waiver-claim" : "waiver-add", `${via === "claim" ? "Claimed" : "Added free agent"} ${m.add}${m.drop ? `, dropping ${m.drop}` : ""}.`, {
         week, leagueId, add: m.add, drop: m.drop, transaction_id: res.transactionId, status: res.status, via,
       });
-      // One transaction per pass, so a batch cannot leave a half-applied roster.
+      // One transaction per pass, so a batch cannot leave a half-applied
+      // roster; every other recorded waiver intent is stale now.
+      intents.settle("waiver:", "", nowMs2);
       break;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof DropRefused) {
+        // The breaker decided; the next confirming run after the cooldown tries again.
+        console.log(`  ${m.add}: drop deferred by the breaker (${err.verdict.reason})`);
+        logEvent("coach", "waiver-add-deferred", `Free-agent add ${m.add} deferred by the breaker: ${err.verdict.reason}`, { week, leagueId, add: m.add });
+        break;
+      }
       logEvent("coach", "waiver-add-failed", `Free-agent add ${m.add} failed: ${msg}`, { week, leagueId, add: m.add });
       if (live) await sendAlert("Free-agent add failed", `Week ${week}: ${m.add} — ${msg}`);
       throw err;
@@ -524,8 +542,13 @@ async function main(): Promise<void> {
         week, leagueId, add: claim.add, drop: claim.drop, gainPts: claim.gainPts,
         transaction_id: res.transactionId, status: res.status,
       });
+      intents.settle("waiver:", "", nowMs2);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof DropRefused) {
+        logEvent("coach", "waiver-claim-deferred", `Waiver claim ${claim.add} deferred by the breaker: ${err.verdict.reason}`, { week, leagueId, add: claim.add });
+        return;
+      }
       logEvent("coach", "waiver-claim-failed", `Waiver claim ${claim.add} failed: ${msg}`, { week, leagueId, add: claim.add });
       if (live) await sendAlert("Waiver claim failed", `Week ${week}: ${claim.add} — ${msg}`);
       throw err;

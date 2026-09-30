@@ -29,6 +29,7 @@ import { allPosts } from "./blog/store.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
 import { handleDms } from "./league/dm-watch.ts";
 import { assessVeto, DEFAULT_VETO } from "./league/veto.ts";
+import { scalePts } from "./analysis/value.ts";
 import { snapshot, scheduleContext } from "./analysis/trade-wire.ts";
 import { activeCapacity } from "./analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "./analysis/trade-fair.ts";
@@ -392,7 +393,8 @@ async function reviewOthersTrades(leg: number): Promise<void> {
       { transactionId: t.transactionId, rosterIds: t.rosterIds, adds: t.adds, drops: t.drops },
       snap.rosterOf,
       (id) => snap.playerById.get(id) ?? { name: id, position: "", points: 0 },
-      DEFAULT_VETO,
+      // The collusion line was written in full-season points; values are rest-of-season now.
+      scalePts(DEFAULT_VETO, leg, ["lopsidedWinnerPts", "lopsidedLoserPts"]),
     );
     logEvent("coach", "veto-review", `Trade ${t.transactionId} between rosters ${t.rosterIds.join(", ")}: ${a.verdict}. ${a.reason}`, {
       transaction_id: t.transactionId, verdict: a.verdict, gain: a.gain,
@@ -450,11 +452,15 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     // pending claim; hold the slots a pending no-drop claim needs.
     const week = Math.max(1, (await sleeper.nflState()).week || 1);
     const starterIds = await currentStarters(gql, week, []).catch(() => [] as string[]);
-    const nameOf = new Map(view.owned.map((e) => [e.playerId, e.name]));
+    // Names as the rail roster spells them (a defense is "SEA" there).
+    const nameOf = new Map(full.map((p) => [p.playerId ?? "", p.name]));
     const keep = starterIds.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
     const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
     const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, full, pending.drops);
-    const need = over + pending.slotsNeeded;
+    // Only the overflow is cut. A pending no-drop claim needs a slot, but a
+    // claim can lose on priority; the waiver job holds the slot, it is not
+    // made by cutting somebody now.
+    const need = over;
     const drops = chooseLegalForcedDrops(view, full, need, cfg, rails, keep);
 
     if (drops.length < need) {
@@ -477,11 +483,16 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     const intents = new DropIntentStore();
     const prefix = "reconcile:";
     const key = `${prefix}${drops.map((d) => d.playerId).sort().join("+")}`;
-    intents.settle(prefix, key, Date.now());
+    const restarts = intents.settle(prefix, key, Date.now());
     const gate = decideIntent(intents.get(key), Date.now());
     if (gate.action === "record") {
       intents.put({ key, firstSeen: Date.now(), note: drops.map((d) => d.name).join(", ") });
-      logEvent("coach", "roster-reconcile-intent", `Over cap by ${over}; would drop ${drops.map((d) => d.name).join(", ")}; confirming on a later look`, { over, drops: drops.map((d) => d.name) });
+      logEvent("coach", "roster-reconcile-intent", `Over cap by ${over}; would drop ${drops.map((d) => d.name).join(", ")}; confirming on a later look`, { over, drops: drops.map((d) => d.name), restarts });
+      if (restarts >= 3 && Date.now() - lastStuckAlert > STUCK_ALERT_MS) {
+        lastStuckAlert = Date.now();
+        logEvent("coach", "roster-overcap-stuck", `Over cap by ${over}; the cut decision has changed ${restarts} times without confirming`, { over, restarts });
+        await sendAlert("Over-cap cut cannot settle", `The cut decision keeps changing (${restarts} restarts); the roster stays over the cap.`).catch(() => {});
+      }
       return;
     }
     if (gate.action === "wait") return;
@@ -524,6 +535,7 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
 
 // #region waiver intent confirmation
 let lastWaiverConfirm = 0;
+let waiverConfirmFailures = 0;
 /** One confirming run per recorded waiver intent that has aged past the
  *  minimum, at most once every 20 minutes. The run re-plans from fresh data
  *  and writes only if it reaches the same move. */
@@ -539,7 +551,11 @@ async function confirmWaiverIntents(): Promise<void> {
   if (!kinds.has("claim") && !kinds.has("stream")) args.push("--adds-only");
   else if (!kinds.has("add") && !kinds.has("stream")) args.push("--claims-only");
   logEvent("coach", "waiver-confirm", `Confirming ${due.length} recorded waiver move(s): ${due.map((i) => i.note).join("; ")}`, { keys: due.map((i) => i.key) });
-  await runOneOff("waiver-confirm", args);
+  const code = await runOneOff("waiver-confirm", args);
+  // A run that fails before it can decide (token, network) is not retried
+  // every twenty minutes for six hours: three failures back off two hours.
+  waiverConfirmFailures = code === 0 ? 0 : waiverConfirmFailures + 1;
+  if (waiverConfirmFailures >= 3) { lastWaiverConfirm = now + 2 * 3_600_000 - 20 * 60_000; waiverConfirmFailures = 0; }
 }
 // #endregion
 

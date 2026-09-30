@@ -18,6 +18,8 @@ import { STATE_DIR } from "../paths.ts";
 
 export const MIN_AGE_MS = 30 * 60_000;
 export const MAX_AGE_MS = 6 * 3_600_000;
+/** Bookkeeping rows in the store: how often a decision under a prefix restarted. */
+const RESTART_KEY = "__restarts__:";
 
 export interface DropIntent { key: string; firstSeen: number; note: string }
 export type IntentDecision = { action: "record" } | { action: "wait"; readyAt: number } | { action: "go"; firstSeen: number };
@@ -41,14 +43,26 @@ export class DropIntentStore {
   get(key: string): DropIntent | null { return this.read()[key] ?? null; }
   put(intent: DropIntent): void { const all = this.read(); all[intent.key] = intent; this.write(all); }
   delete(key: string): void { const all = this.read(); delete all[key]; this.write(all); }
-  /** Forget intents older than maxAgeMs, and every intent under `prefix` other than `keep`
-   *  (the decision changed, so the old one no longer counts). */
-  settle(prefix: string, keep: string, now: number, maxAgeMs = MAX_AGE_MS): void {
+  /** Forget intents older than maxAgeMs, and every intent under `prefix` other
+   *  than `keep` (the decision changed, so the old one no longer counts).
+   *  Returns how many times the decision under `prefix` has restarted within
+   *  maxAgeMs, so a caller can notice a decision that never settles. */
+  settle(prefix: string, keep: string, now: number, maxAgeMs = MAX_AGE_MS): number {
     const all = this.read();
+    let changed = 0;
     for (const [k, v] of Object.entries(all)) {
-      if (now - v.firstSeen > maxAgeMs || (k.startsWith(prefix) && k !== keep)) delete all[k];
+      if (k.startsWith(RESTART_KEY)) continue;
+      if (now - v.firstSeen > maxAgeMs) { delete all[k]; continue; }
+      if (k.startsWith(prefix) && k !== keep) { delete all[k]; changed++; }
     }
+    const rk = `${RESTART_KEY}${prefix}`;
+    const prev = all[rk];
+    const count = prev && now - prev.firstSeen <= maxAgeMs ? Number(prev.note) + changed : changed;
+    if (count > 0) all[rk] = { key: rk, firstSeen: prev && now - prev.firstSeen <= maxAgeMs ? prev.firstSeen : now, note: String(count) };
+    else delete all[rk];
     this.write(all);
+    return count;
   }
-  all(): DropIntent[] { return Object.values(this.read()); }
+  /** Every real intent (bookkeeping rows excluded). */
+  all(): DropIntent[] { return Object.values(this.read()).filter((i) => !i.key.startsWith(RESTART_KEY)); }
 }

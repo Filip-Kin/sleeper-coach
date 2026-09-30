@@ -176,3 +176,22 @@ export function liveStatusFromRosters(rosters: { player_map?: Record<string, { i
   for (const r of rosters) for (const [id, p] of Object.entries(r.player_map ?? {})) if (p) out.set(id, p.injury_status ?? null);
   return out;
 }
+
+/** Thresholds written in full-season points (a 5-point "noise" floor, a
+ *  15-point ceiling on what a trade may hand a rival, a 40-point collusion
+ *  line) shrink with the season now that every value is rest-of-season.
+ *  weeksLeft / 17, floored so the last weeks are not all noise. */
+export function seasonScale(week: number): number {
+  return Math.max(0.25, weeksLeft(week) / LAST_WEEK);
+}
+
+/** Scale every point-denominated threshold on a config by seasonScale. */
+export function scalePts<T extends object>(cfg: T, week: number, keys: (keyof T)[]): T {
+  const k = seasonScale(week);
+  const out = { ...cfg };
+  for (const key of keys) {
+    const v = out[key];
+    if (typeof v === "number") (out as Record<keyof T, unknown>)[key] = Math.round(v * k * 10) / 10;
+  }
+  return out;
+}

@@ -188,7 +188,7 @@ function cheapestSwappable(position: string, state: RosterState, rails: RailConf
   for (const p of state.roster) {
     if (starters.has(p.name.toLowerCase()) || !swappable(position, p.position)) continue;
     if (!canDrop(p.name, state.roster, rails).allowed) continue;
-    if (!best || p.points < best.points) best = p;
+    if (!best || p.points < best.points || (p.points === best.points && (p.seasonPoints ?? 0) < (best.seasonPoints ?? 0))) best = p;
   }
   return best;
 }
@@ -253,8 +253,20 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
     const { gain, starts, benchGain } = lineupDelta(incoming, p.drop, state, cfg.rails, p.irStash ?? null);
     return { ...p, gain, starts, benchGain };
   });
-  // Best lineup gain first; among equals drop nobody; then the bigger bench gain.
-  evals.sort((a, b) => b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path] || b.benchGain - a.benchGain);
+  // Best lineup gain first; among equals drop nobody; then the bigger bench
+  // gain; and finally, among drops that still tie (an incoming starter makes
+  // every bench drop equal), the cheapest body by the cut order. Never list
+  // order: that is how an 80-point back went before a 5-point second defense.
+  const cutKey = (e: { drop: string | null }): [number, number, string] => {
+    const p = e.drop ? state.roster.find((r) => r.name === e.drop) : undefined;
+    return p ? [p.points, p.seasonPoints ?? 0, p.name] : [Number.POSITIVE_INFINITY, 0, ""];
+  };
+  evals.sort((a, b) => {
+    const d = b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path] || b.benchGain - a.benchGain;
+    if (d) return d;
+    const [ap, as, an] = cutKey(a); const [bp, bs, bn] = cutKey(b);
+    return ap - bp || as - bs || an.localeCompare(bn);
+  });
   return evals;
 }
 

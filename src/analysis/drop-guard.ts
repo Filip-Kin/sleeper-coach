@@ -30,7 +30,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** The `via` values that are the coach acting on its own and so count toward
  *  the breaker. Everything else ("trade", "claim", "manual", a test's "test")
  *  is history only. */
-export const AUTOMATIC_VIA: ReadonlySet<string> = new Set(["reconcile", "ir-activate", "free-add", "stream"]);
+export const AUTOMATIC_VIA: ReadonlySet<string> = new Set(["reconcile", "ir-activate", "ir-release", "free-add", "stream"]);
 export function countsTowardBreaker(via: string | undefined): boolean {
   return via === undefined || AUTOMATIC_VIA.has(via);
 }

@@ -28,7 +28,6 @@ import { loadValues, liveStatusFromRosters, toRail, cutOrder, type PlayerValue }
 import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { logEvent } from "../log.ts";
-import { recordDrop } from "../league/drop-ledger.ts";
 import { pendingClaimPlayers } from "./pending-claims.ts";
 
 const args = process.argv.slice(2);
@@ -36,8 +35,14 @@ const cmd = args[0] ?? "";
 const WRITE = args.includes("--write");
 const opt = (k: string): string | undefined => { const i = args.indexOf(`--${k}`); return i >= 0 ? args[i + 1] : undefined; };
 const OVERRIDE = opt("override");
-const name = args.slice(1).filter((a, i, all) => !a.startsWith("--") && !(i > 0 && all[i - 1]?.startsWith("--")) ).join(" ").trim();
-const dropName = opt("drop");
+// Words up to the first flag are the target; the words after --drop up to the
+// next flag are the drop. Quoting is optional either way.
+const rest = args.slice(1);
+const firstFlag = rest.findIndex((a) => a.startsWith("--"));
+const name = (firstFlag < 0 ? rest : rest.slice(0, firstFlag)).join(" ").trim();
+const dropIdx = rest.indexOf("--drop");
+const dropWords = dropIdx < 0 ? [] : rest.slice(dropIdx + 1, (() => { const n = rest.slice(dropIdx + 1).findIndex((a) => a.startsWith("--")); return n < 0 ? rest.length : dropIdx + 1 + n; })());
+const dropName = dropWords.length ? dropWords.join(" ") : undefined;
 
 if (!cmd || !name) {
   console.log("usage: roster-move.ts <drop|add|claim|activate|stash> <player name> [--drop <name>] [--write] [--override <reason>]");
@@ -57,7 +62,11 @@ const taken = new Set(rosters.flatMap((r) => r.players ?? []));
 
 const byName = (n: string): PlayerValue | undefined => {
   const q = n.toLowerCase();
-  return [...values.values()].find((v) => v.name.toLowerCase() === q) ?? [...values.values()].find((v) => v.name.toLowerCase().includes(q));
+  const exact = [...values.values()].find((v) => v.name.toLowerCase() === q);
+  if (exact) return exact;
+  const partial = [...values.values()].filter((v) => v.name.toLowerCase().includes(q));
+  if (partial.length > 1) { console.error(`"${n}" matches ${partial.map((v) => v.name).join(", ")}; be exact`); process.exit(2); }
+  return partial[0];
 };
 const fmt = (v: PlayerValue | undefined, id: string): string => v
   ? `${v.name.padEnd(24)} ${v.position.padEnd(3)} ${String(v.valueAvg).padStart(5)}/wk  ROS ${String(Math.round(v.value)).padStart(4)}  season ${String(Math.round(v.seasonPoints)).padStart(4)} (${v.position}${v.seasonRank})  ${v.injuryStatus ?? "healthy"}${v.stash ? "  STASH" : ""}`
@@ -106,7 +115,6 @@ switch (cmd) {
     checkCut(target);
     if (!WRITE) { console.log("\n(dry) would drop him. Add --write."); break; }
     const r = await dropPlayers(gql, [target.playerId], config.rosterId, config.leagueId, "manual");
-    recordDrop(target.name, "manual");
     logEvent("coach", "manual-move", `Manual drop of ${target.name}.`, { drop: target.playerId, values: { drop: target }, override: OVERRIDE ?? null, status: r.status });
     console.log(`dropped [${r.status}]`);
     break;
@@ -126,14 +134,13 @@ switch (cmd) {
     let r: { transactionId: string; status: string };
     try {
       r = cmd === "add"
-        ? await addFreeAgent(gql, target.playerId, drop?.playerId ?? null)
-        : await submitWaiverClaim(gql, target.playerId, drop?.playerId ?? null);
+        ? await addFreeAgent(gql, target.playerId, drop?.playerId ?? null, config.rosterId, config.leagueId, "manual")
+        : await submitWaiverClaim(gql, target.playerId, drop?.playerId ?? null, config.rosterId, config.leagueId, "manual");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/on waivers/i.test(msg)) { console.error("Sleeper: he is on waivers. Re-run with `claim`."); process.exit(2); }
       throw err;
     }
-    if (drop) recordDrop(drop.name, "manual");
     logEvent("coach", "manual-move", `Manual ${cmd}: ${target.name}${drop ? `, dropping ${drop.name}` : ""}.`, { cmd, add: target.playerId, drop: drop?.playerId ?? null, values: { add: target, drop }, override: OVERRIDE ?? null, status: r.status, transactionId: r.transactionId });
     console.log(`${cmd} [${r.status}] ${r.transactionId}`);
     break;
@@ -148,7 +155,7 @@ switch (cmd) {
       checkCut(drop);
     }
     if (!WRITE) { console.log(`\n(dry) would ${full ? `drop ${drop!.name} and ` : ""}activate him. Add --write.`); break; }
-    if (full) { await dropPlayers(gql, [drop!.playerId], config.rosterId, config.leagueId, "manual"); recordDrop(drop!.name, "manual"); }
+    if (full) await dropPlayers(gql, [drop!.playerId], config.rosterId, config.leagueId, "manual");
     const back = await updateReserve(gql, view.reserve.map((e) => e.playerId).filter((id) => id !== target.playerId));
     logEvent("coach", "manual-move", `Manual activation of ${target.name}${drop ? `, dropping ${drop.name}` : ""}.`, { activate: target.playerId, drop: drop?.playerId ?? null, reserve: back, override: OVERRIDE ?? null });
     console.log(`activated; IR now [${back.join(", ")}]`);
