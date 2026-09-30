@@ -184,10 +184,13 @@ function lineupDelta(
 
 function cheapestSwappable(position: string, state: RosterState, rails: RailConfig): RailPlayer | null {
   const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
+  // Same-position comparison, so the top-N rail is off here as it is for the
+  // same-position drop path in evalPaths; every other rail holds.
+  const swapRails: RailConfig = { ...rails, protectTopN: 0 };
   let best: RailPlayer | null = null;
   for (const p of state.roster) {
     if (starters.has(p.name.toLowerCase()) || !swappable(position, p.position)) continue;
-    if (!canDrop(p.name, state.roster, rails).allowed) continue;
+    if (!canDrop(p.name, state.roster, swapRails).allowed) continue;
     if (!best || p.points < best.points || (p.points === best.points && (p.seasonPoints ?? 0) < (best.seasonPoints ?? 0))) best = p;
   }
   return best;
@@ -241,10 +244,21 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   // Every canDrop-ALLOWED player is a candidate drop. canDrop is the authority on
   // what may leave the roster; we pick among the allowed ones by lineup delta.
   // A current-week starter is never on the table (R7).
+  //
+  // One widening (2026-09-30 review): a better player at the SAME position may
+  // replace a bench player the top-N rail protects. That rail stops a good
+  // player being dropped for a streamer; a same-position upgrade leaves the
+  // bench stronger where it stood. Without it the swap could only ever reach
+  // the two cheapest bench bodies (two quarterbacks fill the top of the list,
+  // kicker and defense the bottom), and no free-agent receiver could replace
+  // our one bench receiver. Never-drop, the stash, IR and a pending claim's
+  // drop are checked with the top-N rail off and still refuse.
   const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
+  const upgradeRails: RailConfig = { ...cfg.rails, protectTopN: 0 };
   for (const p of state.roster) {
     if (starters.has(p.name.toLowerCase())) continue;
-    if (canDrop(p.name, state.roster, cfg.rails).allowed) {
+    const upgrade = swappable(incoming.position, p.position) && incoming.points > p.points;
+    if (canDrop(p.name, state.roster, cfg.rails).allowed || (upgrade && canDrop(p.name, state.roster, upgradeRails).allowed)) {
       paths.push({ path: "drop", drop: p.name, reason: `drop ${p.name}` });
     }
   }
@@ -253,17 +267,33 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
     const { gain, starts, benchGain } = lineupDelta(incoming, p.drop, state, cfg.rails, p.irStash ?? null);
     return { ...p, gain, starts, benchGain };
   });
-  // Best lineup gain first; among equals drop nobody; then the bigger bench
-  // gain; and finally, among drops that still tie (an incoming starter makes
-  // every bench drop equal), the cheapest body by the cut order. Never list
-  // order: that is how an 80-point back went before a 5-point second defense.
+  // Best lineup gain first; among equals drop nobody. Then who leaves:
+  //
+  //  - When the lineup gain alone justifies the add (he starts, by enough),
+  //    every bench drop is equal on gain and the one who leaves is the value
+  //    rule's answer: the cheapest body by the cut order, whatever his
+  //    position. Ranking by bench gain here would cut a 148-point receiver
+  //    ahead of a 120-point tight end because the newcomer is a receiver.
+  //  - When it does not, the add can only count as a bench upgrade, which is
+  //    same-position: the bigger bench gain first (the cheapest body at his
+  //    position), then the cut order.
+  //
+  // Never list order: that is how an 80-point back went before a 5-point
+  // second defense.
   const cutKey = (e: { drop: string | null }): [number, number, string] => {
     const p = e.drop ? state.roster.find((r) => r.name === e.drop) : undefined;
     return p ? [p.points, p.seasonPoints ?? 0, p.name] : [Number.POSITIVE_INFINITY, 0, ""];
   };
+  const lineupEnough = (e: { gain: number; starts: boolean }): boolean => incoming.onWaivers
+    ? e.gain >= cfg.claimMarginPts && (e.starts || !cfg.claimMustStart)
+    : e.gain >= cfg.freeAddMarginPts;
   evals.sort((a, b) => {
-    const d = b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path] || b.benchGain - a.benchGain;
+    const d = b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path];
     if (d) return d;
+    if (!(lineupEnough(a) && lineupEnough(b))) {
+      const g = b.benchGain - a.benchGain;
+      if (g) return g;
+    }
     const [ap, as, an] = cutKey(a); const [bp, bs, bn] = cutKey(b);
     return ap - bp || as - bs || an.localeCompare(bn);
   });

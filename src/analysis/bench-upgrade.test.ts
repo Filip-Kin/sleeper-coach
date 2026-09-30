@@ -1,0 +1,92 @@
+// "If an available player's rest-of-season average beats a bench player's,
+// make that swap." (Filip, 2026-09-30.)
+//
+// The bench swap is same-position, and it could only ever reach the two
+// cheapest bench bodies: canDrop protects the top twelve by rest-of-season
+// points, two quarterbacks sit near the top of that list, and the kicker and
+// the defense sit at the bottom of it. On the live roster of 2026-09-30, with
+// both pending claims processed (incidents/league.ts), that left Rico Dowdle
+// and Mark Andrews as the only players any add could replace. Josh Downs, the
+// one receiver on the bench, ranked tenth: no free-agent receiver, however
+// good, could take his place unless he was good enough to start.
+//
+// The top-N rail exists so a good player is not dropped for a streamer. A
+// better player at the same position is not that. Every other rail still
+// holds: never-drop, a stash, a pending claim's drop, this week's starters.
+import { describe, expect, test } from "bun:test";
+import { planOne, DEFAULT_WAIVERS, type AvailablePlayer, type RosterState } from "./waivers.ts";
+import type { RailPlayer } from "./rails.ts";
+import { LEAGUE, OURS, fx, idOf, tradePlayer } from "./incidents/league.ts";
+
+const swapIn: Record<string, string> = { [idOf("Tyjae Spears")]: idOf("Travis Etienne"), [idOf("Kenny Gainwell")]: idOf("Jacory Croskey-Merritt") };
+const mine = LEAGUE.rosters.find((r) => r.rosterId === OURS)!;
+const roster: RailPlayer[] = mine.players.map((id) => tradePlayer(swapIn[id] ?? id, { onIr: false }));
+const starters = mine.starters.map((id) => fx(id).name);
+const SLOTS = LEAGUE.rosterPositions.filter((s) => s !== "BN");
+const state: RosterState = { roster, openBenchSlots: 0, openIrSlots: 0, startingSlots: SLOTS, currentStarters: starters, weeksLeft: 14 };
+/** A real free agent with his value set for the case. */
+const fa = (name: string, value: number, onWaivers = false): AvailablePlayer => ({ ...tradePlayer(idOf(name)), points: value, onWaivers });
+
+describe("a same-position upgrade may replace a top-twelve bench player", () => {
+  test("the roster of the day: Downs is tenth by rest-of-season points, inside the protected twelve", () => {
+    const rank = roster.slice().sort((a, b) => b.points - a.points).findIndex((p) => p.name === "Josh Downs") + 1;
+    expect(rank).toBe(10);
+  });
+  test("a free receiver 1.6 a week better than Downs replaces him", () => {
+    const m = planOne(fa("Malik Washington", 170), state, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(m.drop).toBe("Josh Downs");
+    expect(m.benchGainPts).toBeCloseTo(170 - 148.4, 0);
+  });
+  test("under a point a week he does not: a drop is for a real gap", () => {
+    const m = planOne(fa("Malik Washington", 155), state, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("skip");
+  });
+  test("the real Malik Washington (143) is below Downs (148): nothing", () => {
+    const m = planOne(fa("Malik Washington", fx(idOf("Malik Washington")).value), state, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("skip");
+  });
+  test("on waivers the same upgrade needs two points a week before it is a claim", () => {
+    expect(planOne(fa("Malik Washington", 170, true), state, DEFAULT_WAIVERS).kind).toBe("wait");
+    const big = planOne(fa("Malik Washington", 180, true), state, DEFAULT_WAIVERS);
+    expect(big.kind).toBe("waiver-claim");
+    expect(big.drop).toBe("Josh Downs");
+  });
+});
+
+describe("what the upgrade path must not loosen", () => {
+  test("a better running back takes the cheapest back, not a protected one", () => {
+    const m = planOne(fa("RJ Harvey", 150), state, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(m.drop).toBe("Rico Dowdle");
+  });
+  test("a stash is never the drop, even for a better player at his position", () => {
+    const noDowdle = { ...state, roster: roster.filter((p) => p.name !== "Rico Dowdle") };
+    expect(roster.find((p) => p.name === "Travis Etienne")!.returnsBeforePlayoffs).toBe(true);
+    const m = planOne(fa("RJ Harvey", 160), noDowdle, DEFAULT_WAIVERS);
+    expect(m.drop).not.toBe("Travis Etienne");
+    expect(m.drop).toBe("Jacory Croskey-Merritt");
+  });
+  test("a pending claim's drop is never the drop", () => {
+    const held = { ...DEFAULT_WAIVERS, rails: { ...DEFAULT_WAIVERS.rails, neverDrop: ["Josh Downs"] } };
+    expect(planOne(fa("Malik Washington", 170), state, held).drop).not.toBe("Josh Downs");
+  });
+  test("this week's starter is never the drop", () => {
+    const m = planOne(fa("Malik Washington", 170), { ...state, currentStarters: [...starters, "Josh Downs"] }, DEFAULT_WAIVERS);
+    expect(m.drop).not.toBe("Josh Downs");
+  });
+  test("a receiver good enough to START costs the cheapest body on the roster, not the bench receiver", () => {
+    // He starts whoever leaves, so every bench drop gains the lineup the
+    // same. The value rule picks: Andrews (120) before Dowdle (121) before
+    // Downs (148). Ranking by bench gain would have cut Downs.
+    const m = planOne(fa("Malik Washington", 215), state, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(m.startsForUs).toBe(true);
+    expect(m.drop).toBe("Mark Andrews");
+  });
+  test("a player at another position does not get past the top twelve", () => {
+    // A tight end worth more than Downs on paper: the receiver stays.
+    const m = planOne(fa("Hunter Henry", 170), state, DEFAULT_WAIVERS);
+    expect(m.drop).not.toBe("Josh Downs");
+  });
+});
