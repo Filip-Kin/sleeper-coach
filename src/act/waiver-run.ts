@@ -340,17 +340,8 @@ async function main(): Promise<void> {
   // refuses. The old alert also fired on every dry run, which is how a
   // read-only check spammed Filip's phone on 2026-09-20.
 
-  if (stream) {
-    if (live) await sendAlert("Streaming pickup",
-      `Week ${stream.forWeek} would leave ${stream.position} empty (${stream.coveringFor.join(", ")} on bye/out). ${stream.onWaivers ? "Claim" : "Add"} ${stream.add}${stream.drop ? `, drop ${stream.drop}` : ""} before the deadline.`).catch(() => {});
-  }
-  // A claim is never auto-submitted (unverified write path). Surface it.
-  if (claim) {
-    if (live) await sendAlert(
-      "Waiver claim recommended",
-      `Week ${week}: claim ${claim.add} (+${claim.gainPts} ROS)${claim.drop ? `, drop ${claim.drop}` : ""}. ${claim.reason}. Submit it in Sleeper before Wednesday 07:00 GMT.`,
-    ).catch(() => {});
-  }
+  // No "recommended" pushes: the bot files its own claims and streams. What it
+  // did is in the activity log; what it could not do raises a failure event.
 
   if (!live) {
     console.log("\n(shadow — pass --live to perform the free-agent adds and submit the single best claim)");

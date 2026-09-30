@@ -159,6 +159,12 @@ export function composeDigest(rows: AlertRow[], maxLines = 8): DigestText | null
 // #endregion
 
 // #region transport
+/** Filip, 2026-09-30: "I do not want to talk to you again until the end of
+ *  the season." Alerts are recorded (alerts table, activity log) and the
+ *  host-side watcher wakes an engineer agent on incident events. Nothing
+ *  reaches his phone unless COACH_PUSH_TO_PHONE=1 is set. */
+export const PUSH_TO_PHONE = process.env.COACH_PUSH_TO_PHONE === "1";
+
 async function pushHa(title: string, message: string): Promise<boolean> {
   const url = process.env.HA_NOTIFY_URL;
   const token = process.env.HA_TOKEN;
@@ -167,8 +173,8 @@ async function pushHa(title: string, message: string): Promise<boolean> {
     console.log(`${line} (staging, not sent)`);
     return true;
   }
-  if (!url || !token) {
-    console.log(line);
+  if (!url || !token || !PUSH_TO_PHONE) {
+    console.log(`${line}${PUSH_TO_PHONE ? "" : " (recorded, not pushed)"}`);
     return true;
   }
   try {
