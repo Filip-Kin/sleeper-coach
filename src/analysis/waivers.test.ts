@@ -34,7 +34,7 @@ const roster: RailPlayer[] = [
   { name: "Bhayshul Tuten", position: "RB", points: 150 },
   { name: "David Montgomery", position: "RB", points: 160 },
   { name: "Rhamondre Stevenson", position: "RB", points: 140 },
-  { name: "Josh Downs", position: "WR", points: 130 },
+  { name: "Josh Downs", position: "WR", points: 120 }, // the one bench WR outside the protected twelve
   { name: "Kenny Gainwell", position: "RB", points: 90 },
   { name: "Bo Nix", position: "QB", points: 85 },
   { name: "Tyler Bass", position: "K", points: 130 },
@@ -73,12 +73,12 @@ t("marginal on-waivers streamer = wait, not claim", m3.kind === "wait", `${m3.ki
 //    BENCH SWAP (Filip, 2026-09-30: "their average is eight, his is ten, swap
 //    them"). The drop is the lowest-value swappable bench player, never the
 //    stash and never a QB/K/DEF for a WR.
-const modest = avail("Modest WR", "WR", 145, false); // never cracks our lineup; beats Gainwell (90) by 55 over 14 weeks
+const modest = avail("Modest WR", "WR", 145, false); // never cracks our lineup; beats Downs (120) by 25 over 14 weeks
 const m4 = planOne(modest, full, DEFAULT_WAIVERS);
-t("full-roster bench upgrade is a free-add dropping the cheapest swappable body", m4.kind === "free-add" && m4.drop === "Kenny Gainwell", `${m4.kind}/${m4.drop}`);
+t("full-roster bench upgrade is a free-add dropping the cheapest same-position bench body", m4.kind === "free-add" && m4.drop === "Josh Downs", `${m4.kind}/${m4.drop}`);
 t("full-roster add never proposes dropping the stash", m4.drop !== "Breece Hall", `${m4.kind}/${m4.drop}`);
 // 4a. A bench body that does NOT clear the per-week bar is left alone.
-const marginal = avail("Marginal WR", "WR", 100, false); // +10 over Gainwell across 14 weeks: noise
+const marginal = avail("Marginal WR", "WR", 128, false); // +8 over Downs across 14 weeks: noise
 const m4a = planOne(marginal, full, DEFAULT_WAIVERS);
 t("a bench swap under the per-week bar is skipped", m4a.kind === "skip", `${m4a.kind}/${m4a.drop} (${m4a.reason})`);
 

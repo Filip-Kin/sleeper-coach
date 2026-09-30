@@ -127,6 +127,7 @@ export interface WaiverMove {
    *  add into a full roster and Sleeper rejected it. */
   irStash: string | null;
   gainPts: number; // ROS points the add clears the player it replaces (or the worst starter, for a slot add)
+  benchGainPts: number; // incoming minus the same-position bench body he replaces; the tie-break among equal lineup gains
   startsForUs: boolean; // would the add crack our optimal ROS starting lineup
   priorityWorthy: boolean; // clears the bar to burn a queue position
   // Bye tie-break: + if this add plays through an upcoming crowded starter bye,
@@ -192,12 +193,13 @@ function cheapestSwappable(position: string, state: RosterState, rails: RailConf
   return best;
 }
 
-/** Positions a bench swap may cross: the same one, or within the FLEX group.
- *  Never QB, K or DEF against anything else: a third quarterback beating a
- *  fifth receiver on points is the draft-night trap. */
-const FLEX_GROUP = new Set(["RB", "WR", "TE"]);
+/** A bench swap is same-position only. A better body at another position is
+ *  the lineup delta's business: if he would start, the lineup gain shows it;
+ *  if he would not, a third tight end for a fifth running back is a worse
+ *  bench whatever the raw points say (2026-09-30 replay: Hunter Henry, TE,
+ *  131 points, "beat" Kenny Gainwell, RB, 106, and would never have played). */
 export function swappable(a: string, b: string): boolean {
-  return a === b || (FLEX_GROUP.has(a) && FLEX_GROUP.has(b));
+  return a === b;
 }
 
 interface PathEval {
@@ -327,7 +329,7 @@ export function planOne(
 ): WaiverMove {
   const base = { add: incoming.name, position: incoming.position, onWaivers: incoming.onWaivers };
   const skip = (reason: string): WaiverMove =>
-    ({ ...base, kind: "skip", drop: null, dropPath: "none", irStash: null, gainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, score: 0, reason });
+    ({ ...base, kind: "skip", drop: null, dropPath: "none", irStash: null, gainPts: 0, benchGainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, score: 0, reason });
 
   const best = evalPaths(incoming, state, cfg)[0];
   if (!best) return skip("no legal path: nothing on the roster may be dropped and no slot is open");
@@ -343,7 +345,7 @@ export function planOne(
   const byeNote =
     byeCredit > 0 ? " [plays through a crowded upcoming bye]" : byeCredit < 0 ? " [on a crowded upcoming bye]" : "";
   const move = (kind: MoveKind, priorityWorthy: boolean, reason: string): WaiverMove =>
-    ({ ...base, kind, drop, dropPath: path, irStash, gainPts: gain, startsForUs: starts, priorityWorthy, byeCredit, score: Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
+    ({ ...base, kind, drop, dropPath: path, irStash, gainPts: gain, benchGainPts: benchGain, startsForUs: starts, priorityWorthy, byeCredit, score: Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
 
   // A move that would LOWER our starting lineup is never made, whatever the raw
   // point gap suggests. This is the guard against dropping a needed player (our
@@ -403,7 +405,9 @@ export function planWaivers(
   // Rank on `score` (gain plus the bye tie-break), not raw gain, so a crowded-bye
   // relief edges ahead of an equal-gain move that ignores the bye. The gates that
   // decided each move were pure lineup delta, so this only reorders survivors.
-  return moves.sort((a, b) => rank[a.kind] - rank[b.kind] || b.score - a.score);
+  // Lineup gain ranks first; two bench swaps with no lineup gain rank by how
+  // much better the incoming player is than the one he replaces.
+  return moves.sort((a, b) => rank[a.kind] - rank[b.kind] || b.score - a.score || b.benchGainPts - a.benchGainPts);
 }
 
 // The single most decisive move for this cycle. Because a successful claim sends

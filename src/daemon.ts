@@ -7,7 +7,7 @@ import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
-import { tokenGql as leagueGql, dropPlayers, completedTrades, myRosterView, pendingTrades } from "./league/api.ts";
+import { tokenGql as leagueGql, dropPlayers, completedTrades, myRosterView, pendingTrades, currentStarters } from "./league/api.ts";
 import { assessToken } from "./league/token.ts";
 import { probeToken } from "./league/api.ts";
 import { runLineupGuard } from "./act/lineup-guard.ts";
@@ -19,6 +19,8 @@ import { runInvariants, collectInvariantInput } from "./invariants.ts";
 import { pruneDeadJobs } from "./soak/migrations.ts";
 import { activeRailRoster, chooseLegalForcedDrops } from "./analysis/reconcile-plan.ts";
 import { reconcileReserve } from "./act/reserve-reconcile.ts";
+import { DropIntentStore, decideIntent } from "./act/drop-intent.ts";
+import { pendingClaimPlayers, railsWithPendingDrops } from "./act/pending-claims.ts";
 import { RunLedger } from "./act/run-ledger.ts";
 import { runJobProcess, JOB_TIMEOUT_MS } from "./act/spawn-job.ts";
 import { reactToDropsCore } from "./act/drop-react.ts";
@@ -444,9 +446,18 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     if (view.reserve.length) console.log(`[reconcile] on IR, never a drop candidate: ${view.reserve.map((e) => e.name).join(", ")}`);
     const sched = await scheduleContext(null);
     const cfg = { ...DEFAULT_FAIRNESS, ...sched };
-    const drops = chooseLegalForcedDrops(view, full, over, cfg, DEFAULT_FAIRNESS.rails);
+    // Never cut this week's starters (the matchup leg) or the drop side of a
+    // pending claim; hold the slots a pending no-drop claim needs.
+    const week = Math.max(1, (await sleeper.nflState()).week || 1);
+    const starterIds = await currentStarters(gql, week, []).catch(() => [] as string[]);
+    const nameOf = new Map(view.owned.map((e) => [e.playerId, e.name]));
+    const keep = starterIds.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
+    const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
+    const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, full, pending.drops);
+    const need = over + pending.slotsNeeded;
+    const drops = chooseLegalForcedDrops(view, full, need, cfg, rails, keep);
 
-    if (drops.length < over) {
+    if (drops.length < need) {
       // Rails would not let us drop enough without cutting a stash or a
       // never-drop. That is a human decision, not an automatic one.
       logEvent("coach", "roster-overcap-stuck", `Over the roster cap by ${over} but only ${drops.length} legal drop(s); needs a human`, {
@@ -460,6 +471,21 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
       return;
     }
 
+    // Two looks before the cut (src/act/drop-intent.ts): the same decision
+    // from fresh data at least 30 minutes apart. An over-cap roster is
+    // illegal for an hour just as it is for a minute; a wrong cut is forever.
+    const intents = new DropIntentStore();
+    const prefix = "reconcile:";
+    const key = `${prefix}${drops.map((d) => d.playerId).sort().join("+")}`;
+    intents.settle(prefix, key, Date.now());
+    const gate = decideIntent(intents.get(key), Date.now());
+    if (gate.action === "record") {
+      intents.put({ key, firstSeen: Date.now(), note: drops.map((d) => d.name).join(", ") });
+      logEvent("coach", "roster-reconcile-intent", `Over cap by ${over}; would drop ${drops.map((d) => d.name).join(", ")}; confirming on a later look`, { over, drops: drops.map((d) => d.name) });
+      return;
+    }
+    if (gate.action === "wait") return;
+    intents.delete(key);
     logEvent("coach", "roster-reconcile", `Over cap by ${over}; dropping ${drops.map((d) => d.name).join(", ")}`, {
       over, drops: drops.map((d) => ({ name: d.name, playerId: d.playerId, cost: d.cost })),
     });
@@ -495,6 +521,27 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     reconcileBusy = false;
   }
 }
+
+// #region waiver intent confirmation
+let lastWaiverConfirm = 0;
+/** One confirming run per recorded waiver intent that has aged past the
+ *  minimum, at most once every 20 minutes. The run re-plans from fresh data
+ *  and writes only if it reaches the same move. */
+async function confirmWaiverIntents(): Promise<void> {
+  const now = Date.now();
+  if (now - lastWaiverConfirm < 20 * 60_000) return;
+  if (freezeState().frozen || draftActive()) return;
+  const due = new DropIntentStore().all().filter((i) => i.key.startsWith("waiver:") && decideIntent(i, now).action === "go");
+  if (!due.length) return;
+  lastWaiverConfirm = now;
+  const kinds = new Set(due.map((i) => i.key.split(":")[1]));
+  const args = ["bun", "run", "src/act/waiver-run.ts", "--live"];
+  if (!kinds.has("claim") && !kinds.has("stream")) args.push("--adds-only");
+  else if (!kinds.has("add") && !kinds.has("stream")) args.push("--claims-only");
+  logEvent("coach", "waiver-confirm", `Confirming ${due.length} recorded waiver move(s): ${due.map((i) => i.note).join("; ")}`, { keys: due.map((i) => i.key) });
+  await runOneOff("waiver-confirm", args);
+}
+// #endregion
 
 /** Re-solve and set the week's lineup immediately. Lineups are pure upside and
  *  reversible until kickoff, so this needs no shadow phase. */
@@ -592,6 +639,11 @@ async function pollOnce(): Promise<void> {
   await reactToCompletedTrades(gql, round).catch((e) => console.error(`[reconcile] ${e instanceof Error ? e.message : String(e)}`));
   // And a standing safety net: if we are ever over cap for any reason, fix it.
   await reconcileRoster(gql).catch((e) => console.error(`[reconcile] ${e instanceof Error ? e.message : String(e)}`));
+
+  // A waiver move that costs a player was recorded by a scheduled run and is
+  // written only by a second run from fresh data (src/act/drop-intent.ts).
+  // This is that second run, once the intent is old enough.
+  await confirmWaiverIntents().catch((e) => console.error(`[waiver-confirm] ${e instanceof Error ? e.message : String(e)}`));
 
   // The weekly review publishes itself once the week's games are over and the
   // stat feed has stopped moving. Checked here rather than on a Tuesday timer

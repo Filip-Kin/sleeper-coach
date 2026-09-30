@@ -1,0 +1,204 @@
+{
+ "capturedAt": "2026-09-30T11:56:39.579Z",
+ "week": 4,
+ "players": [
+  {
+   "playerId": "6904",
+   "name": "Jalen Hurts",
+   "position": "QB",
+   "team": "PHI",
+   "value": 250.4,
+   "seasonPoints": 310.5,
+   "seasonRank": 4
+  },
+  {
+   "playerId": "3294",
+   "name": "Dak Prescott",
+   "position": "QB",
+   "team": "DAL",
+   "value": 248.6,
+   "seasonPoints": 303.9,
+   "seasonRank": 7
+  },
+  {
+   "playerId": "4034",
+   "name": "Christian McCaffrey",
+   "position": "RB",
+   "team": "SF",
+   "value": 256.2,
+   "seasonPoints": 291,
+   "seasonRank": 3
+  },
+  {
+   "playerId": "9224",
+   "name": "Chase Brown",
+   "position": "RB",
+   "team": "CIN",
+   "value": 232.2,
+   "seasonPoints": 255.2,
+   "seasonRank": 7
+  },
+  {
+   "playerId": "8151",
+   "name": "Kenneth Walker",
+   "position": "RB",
+   "team": "KC",
+   "value": 238.8,
+   "seasonPoints": 244,
+   "seasonRank": 11
+  },
+  {
+   "playerId": "7525",
+   "name": "DeVonta Smith",
+   "position": "WR",
+   "team": "PHI",
+   "value": 189.7,
+   "seasonPoints": 229.2,
+   "seasonRank": 13
+  },
+  {
+   "playerId": "2216",
+   "name": "Mike Evans",
+   "position": "WR",
+   "team": "SF",
+   "value": 184.3,
+   "seasonPoints": 222.2,
+   "seasonRank": 20
+  },
+  {
+   "playerId": "10859",
+   "name": "Sam LaPorta",
+   "position": "TE",
+   "team": "DET",
+   "value": 149.6,
+   "seasonPoints": 196.5,
+   "seasonRank": 5
+  },
+  {
+   "playerId": "9500",
+   "name": "Josh Downs",
+   "position": "WR",
+   "team": "IND",
+   "value": 148.1,
+   "seasonPoints": 172.3,
+   "seasonRank": 38
+  },
+  {
+   "playerId": "7569",
+   "name": "Nico Collins",
+   "position": "WR",
+   "team": "HOU",
+   "value": 226.1,
+   "seasonPoints": 262,
+   "seasonRank": 6
+  },
+  {
+   "playerId": "7021",
+   "name": "Rico Dowdle",
+   "position": "RB",
+   "team": "PIT",
+   "value": 120.9,
+   "seasonPoints": 161.1,
+   "seasonRank": 28
+  },
+  {
+   "playerId": "9508",
+   "name": "Tyjae Spears",
+   "position": "RB",
+   "team": "TEN",
+   "value": 111,
+   "seasonPoints": 114.6,
+   "seasonRank": 44
+  },
+  {
+   "playerId": "7567",
+   "name": "Kenny Gainwell",
+   "position": "RB",
+   "team": "TB",
+   "value": 106,
+   "seasonPoints": 152.3,
+   "seasonRank": 34
+  },
+  {
+   "playerId": "12533",
+   "name": "Jacory Croskey-Merritt",
+   "position": "RB",
+   "team": "WAS",
+   "value": 143,
+   "seasonPoints": 127.9,
+   "seasonRank": 43
+  },
+  {
+   "playerId": "7543",
+   "name": "Travis Etienne",
+   "position": "RB",
+   "team": "NO",
+   "value": 130.4,
+   "seasonPoints": 207.7,
+   "seasonRank": 18
+  },
+  {
+   "playerId": "5012",
+   "name": "Mark Andrews",
+   "position": "TE",
+   "team": "BAL",
+   "value": 119.8,
+   "seasonPoints": 162.5,
+   "seasonRank": 12
+  },
+  {
+   "playerId": "11539",
+   "name": "Jake Bates",
+   "position": "K",
+   "team": "DET",
+   "value": 105.9,
+   "seasonPoints": 44.5,
+   "seasonRank": 2
+  },
+  {
+   "playerId": "10222",
+   "name": "Jayden Reed",
+   "position": "WR",
+   "team": "GB",
+   "value": 98,
+   "seasonPoints": 197.6,
+   "seasonRank": 28
+  },
+  {
+   "playerId": "5846",
+   "name": "DK Metcalf",
+   "position": "WR",
+   "team": "PIT",
+   "value": 132.1,
+   "seasonPoints": 183.3,
+   "seasonRank": 32
+  },
+  {
+   "playerId": "12489",
+   "name": "RJ Harvey",
+   "position": "RB",
+   "team": "DEN",
+   "value": 129.4,
+   "seasonPoints": 144.1,
+   "seasonRank": 37
+  },
+  {
+   "playerId": "3214",
+   "name": "Hunter Henry",
+   "position": "TE",
+   "team": "NE",
+   "value": 131,
+   "seasonPoints": 153.5,
+   "seasonRank": 17
+  },
+  {
+   "playerId": "SEA",
+   "name": "SEA",
+   "position": "DEF",
+   "team": "SEA",
+   "value": 106.7,
+   "seasonPoints": 103,
+   "seasonRank": 3
+  }
+ ]
+}
