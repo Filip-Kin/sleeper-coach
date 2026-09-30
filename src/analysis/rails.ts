@@ -86,7 +86,10 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
   // give) when the other one processes. 2026-09-30: the proposer chose a deal
   // giving Kenny Gainwell while a claim for Croskey-Merritt was dropping him.
   if (player.claimDrop) {
-    return { allowed: false, reason: `"${player.name}" is the drop of our own pending waiver claim; he is committed until it processes` };
+    // The reason reaches the rival in a DM, so it does not say what the move
+    // is: "the drop of our pending waiver claim" tells a manager with better
+    // waiver priority that a claim is in and who is about to hit the wire.
+    return { allowed: false, reason: `"${player.name}" is committed to a pending roster move and cannot be moved until it processes` };
   }
   // A player on injured reserve is never cut or traded away by the robot. He
   // costs no roster slot, so there is nothing to gain by moving him, and the

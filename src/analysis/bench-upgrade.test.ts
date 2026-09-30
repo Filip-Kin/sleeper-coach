@@ -84,9 +84,66 @@ describe("what the upgrade path must not loosen", () => {
     expect(m.startsForUs).toBe(true);
     expect(m.drop).toBe("Mark Andrews");
   });
+  test("a running back good enough to start costs the cheapest BACK; the tight end covering LaPorta's bye stays", () => {
+    // Andrews (119.8) is a point cheaper than Dowdle (120.9) and is the only
+    // cover for LaPorta's week-6 bye. Cutting him for a back opens a tight
+    // end hole that costs a second bench player the next run (review finding).
+    const m = planOne(fa("RJ Harvey", 200), state, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(m.startsForUs).toBe(true);
+    expect(m.drop).toBe("Rico Dowdle");
+  });
+  test("the bench quarterback is not in the widening", () => {
+    // A quarterback's bench value is not his raw points: he plays only when
+    // he beats the starter. Prescott starts this week, so Hurts (250) is the
+    // "bench" quarterback of the day. A free quarterback at 272 would start
+    // for the season, which is a lineup add and costs the cheapest ordinary
+    // body; it never costs us Hurts or Prescott.
+    const m = planOne(fa("Matthew Stafford", 272), state, DEFAULT_WAIVERS);
+    expect(["Jalen Hurts", "Dak Prescott"]).not.toContain(m.drop);
+    // And with Hurts' number dipped below a free quarterback who would not
+    // start (Prescott 249 still does), nothing happens at all.
+    const dipped = { ...state, roster: roster.map((p) => (p.name === "Jalen Hurts" ? { ...p, points: 228 } : p)) };
+    expect(planOne(fa("Matthew Stafford", 243), dipped, DEFAULT_WAIVERS).kind).toBe("skip");
+  });
   test("a player at another position does not get past the top twelve", () => {
     // A tight end worth more than Downs on paper: the receiver stays.
     const m = planOne(fa("Hunter Henry", 170), state, DEFAULT_WAIVERS);
     expect(m.drop).not.toBe("Josh Downs");
+  });
+});
+
+// Rest-of-season sums count games, so late in the year a bench player whose
+// bye is still to come trails an equal player whose bye has passed by one
+// game, and one game clears a bar that shrinks with the weeks left. The
+// reviewer replayed the captured weekly tables forward: in weeks 12 and 13
+// the swap took Brenton Strange for Mark Andrews on nothing but Andrews'
+// week-13 bye. "He averages ten and ours averages eight: swap them" is about
+// the average, so the swap must hold per game as well as in total.
+describe("a bye still to come is not an upgrade", () => {
+  const from = (id: string, week: number): number => {
+    let sum = 0;
+    for (let w = week; w <= 17; w++) sum += fx(id).weekly[String(w)] ?? 0;
+    return Math.round(sum * 10) / 10;
+  };
+  const asOf = (week: number): RosterState => ({
+    ...state, weeksLeft: 17 - week + 1,
+    roster: roster.map((p) => ({ ...p, points: from(p.playerId!, week) })),
+  });
+  const faAsOf = (name: string, week: number): AvailablePlayer => ({ ...tradePlayer(idOf(name)), points: from(idOf(name), week), onWaivers: false });
+  test("week 12: Strange has six games left, Andrews five; per game they are half a point apart", () => {
+    const s = asOf(12);
+    const strange = faAsOf("Brenton Strange", 12);
+    const andrews = s.roster.find((p) => p.name === "Mark Andrews")!;
+    expect(andrews.bye).toBe(13);
+    expect(strange.points - andrews.points).toBeGreaterThan(6); // clears the 1.0 x 6 weeks total bar
+    expect(strange.points / 6 - andrews.points / 5).toBeLessThan(1);
+    expect(planOne(strange, s, DEFAULT_WAIVERS).kind).toBe("skip");
+  });
+  test("the same check does not stop a real gap: Croskey-Merritt over Gainwell today", () => {
+    const today: RosterState = { ...state, roster: mine.players.map((id) => tradePlayer(id, { onIr: false })) };
+    const m = planOne({ ...tradePlayer(idOf("Jacory Croskey-Merritt")), onWaivers: true }, today, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("waiver-claim");
+    expect(m.drop).toBe("Kenny Gainwell");
   });
 });

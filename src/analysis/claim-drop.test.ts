@@ -47,12 +47,12 @@ describe("a claim's drop is committed in every trade path", () => {
   test("canDrop refuses him, and says why", () => {
     const v = canDrop("Kenny Gainwell", ours, { ...DEFAULT_FAIRNESS.rails, protectTopN: 0 });
     expect(v.allowed).toBe(false);
-    expect(v.reason).toMatch(/pending waiver claim/);
+    expect(v.reason).toMatch(/committed to a pending roster move/);
   });
   test("the proposer's give gate refuses him", () => {
     const g = giveEligibleForProposal(ours.find((p) => p.playerId === GAINWELL)!, ours, cfg);
     expect(g.ok).toBe(false);
-    expect(g.reason).toMatch(/pending waiver claim/);
+    expect(g.reason).toMatch(/committed to a pending roster move/);
   });
   test("without the flag the same player passes the give gate (the 09:19 state)", () => {
     const plain = leagueSnapshot().rosterOf.get(OURS)!;
@@ -69,12 +69,18 @@ describe("a claim's drop is committed in every trade path", () => {
       }
     }
   });
+  test("the reason is sent to the rival in a DM, so it does not say what the move is", () => {
+    // "the drop of our pending waiver claim" told a rival with better waiver
+    // priority that we have a claim in and who is about to hit the wire.
+    const v = canDrop("Kenny Gainwell", ours, DEFAULT_FAIRNESS.rails);
+    expect(v.reason).not.toMatch(/waiver|claim|drop/i);
+  });
   test("an incoming offer that asks for him is refused by the rail", () => {
     const theirs = snap.rosterOf.get(1)!;
     const offer = { give: [ours.find((p) => p.playerId === GAINWELL)!], receive: [tradePlayer(idOf("Deebo Samuel"))] };
     const ev = evaluateTradeTwoSided(offer, ours, theirs, cfg);
     expect(ev.verdict).toBe("reject");
-    expect(ev.railBlocks.join(" ")).toMatch(/pending waiver claim/);
+    expect(ev.railBlocks.join(" ")).toMatch(/committed to a pending roster move/);
   });
 });
 

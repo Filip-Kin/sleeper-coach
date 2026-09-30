@@ -1,6 +1,7 @@
 import { canDrop, DEFAULT_RAILS, type RailPlayer, type RailConfig } from "./rails.ts";
 import { solveLineup, type LineupPlayer } from "./lineup.ts";
 import { irEligible as ruleIrEligible, type Settings } from "../sleeper/rules.ts";
+import { LAST_WEEK } from "./value.ts";
 
 // The waiver engine, priced in WAIVER PRIORITY, not dollars.
 //
@@ -162,7 +163,7 @@ function lineupDelta(
   state: RosterState,
   rails: RailConfig = DEFAULT_RAILS,
   stashName: string | null = null,
-): { gain: number; starts: boolean; benchGain: number } {
+): { gain: number; starts: boolean; benchGain: number; benchPerGame: number } {
   // For an IR-stash path the question is how much the add helps the lineup
   // we can field WITHOUT the stashed man (he cannot start from IR), so he is
   // out of both sides. He is still ours and still valued everywhere else.
@@ -179,8 +180,30 @@ function lineupDelta(
   const benchGain = dropped && swappable(incoming.position, dropped.position)
     ? Math.round((incoming.points - dropped.points) * 10) / 10
     : 0;
-  return { gain: Math.round((after.total - baseline) * 10) / 10, starts, benchGain };
+  // The same comparison per game played. A rest-of-season sum counts games,
+  // so a player whose bye is still to come trails an equal one whose bye has
+  // passed by a whole game; late in the season that alone cleared the bar.
+  const benchPerGame = dropped && swappable(incoming.position, dropped.position)
+    ? Math.round((incoming.points / gamesLeft(incoming, state) - dropped.points / gamesLeft(dropped, state)) * 10) / 10
+    : 0;
+  return { gain: Math.round((after.total - baseline) * 10) / 10, starts, benchGain, benchPerGame };
 }
+
+/** Games a player still has: the weeks left, less his bye if it is still to
+ *  come. No bye known means no bye assumed. */
+export function gamesLeft(p: { bye?: number }, state: Pick<RosterState, "weeksLeft">): number {
+  const weeks = Math.max(1, state.weeksLeft ?? 14);
+  const thisWeek = LAST_WEEK - weeks + 1;
+  const byeAhead = p.bye != null && p.bye >= thisWeek && p.bye <= LAST_WEEK;
+  return Math.max(1, weeks - (byeAhead ? 1 : 0));
+}
+
+/** Positions where a better player may replace a top-N-protected bench
+ *  player (evalPaths). The flex positions only: there a bench body is depth
+ *  and rest-of-season points are what he is. A bench quarterback plays only
+ *  when he beats the starter, so his raw points are not his value, and a
+ *  kicker or defense is never bench depth at all. */
+export const UPGRADE_POSITIONS: ReadonlySet<string> = new Set(["RB", "WR", "TE"]);
 
 function cheapestSwappable(position: string, state: RosterState, rails: RailConfig): RailPlayer | null {
   const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
@@ -210,6 +233,10 @@ interface PathEval {
   drop: string | null;
   gain: number; // starting-lineup ROS delta of taking this path
   benchGain: number; // incoming minus dropped at a swappable position, else 0
+  benchPerGame: number; // the same gap per game played, so a bye still to come is not an upgrade
+  /** A drop only the same-position upgrade rule allows (the top-N rail
+   *  protects him). It may serve a bench upgrade, never a lineup-gain add. */
+  upgradeOnly?: boolean;
   starts: boolean; // does the add start after it
   reason: string;
   irStash?: string; // set only on the "ir-stash" path
@@ -226,7 +253,7 @@ const PATH_RANK: Record<DropPath, number> = { "bench-slot": 0, "ir-stash": 1, dr
 // protection rails (top-N, never-drop, the injured-returns stash) are never
 // bypassed. Returns paths best-delta first, no-drop winning ties.
 function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverConfig): PathEval[] {
-  const paths: { path: DropPath; drop: string | null; reason: string; irStash?: string }[] = [];
+  const paths: { path: DropPath; drop: string | null; reason: string; irStash?: string; upgradeOnly?: boolean }[] = [];
 
   if (state.openBenchSlots > 0) {
     paths.push({ path: "bench-slot", drop: null, reason: "into an open bench slot (no drop)" });
@@ -245,58 +272,61 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   // what may leave the roster; we pick among the allowed ones by lineup delta.
   // A current-week starter is never on the table (R7).
   //
-  // One widening (2026-09-30 review): a better player at the SAME position may
-  // replace a bench player the top-N rail protects. That rail stops a good
-  // player being dropped for a streamer; a same-position upgrade leaves the
-  // bench stronger where it stood. Without it the swap could only ever reach
-  // the two cheapest bench bodies (two quarterbacks fill the top of the list,
-  // kicker and defense the bottom), and no free-agent receiver could replace
-  // our one bench receiver. Never-drop, the stash, IR and a pending claim's
-  // drop are checked with the top-N rail off and still refuse.
+  // One widening (2026-09-30 review): at a flex position (UPGRADE_POSITIONS)
+  // a better player at the SAME position may replace a bench player the
+  // top-N rail protects. That rail stops a good player being dropped for a
+  // streamer; a same-position upgrade leaves the bench stronger where it
+  // stood. Without it the swap could only ever reach the two cheapest bench
+  // bodies (two quarterbacks fill the top of the list, kicker and defense
+  // the bottom), and no free-agent receiver could replace our one bench
+  // receiver. Never-drop, the stash, IR and a pending claim's drop are
+  // checked with the top-N rail off and still refuse. Such a path is marked
+  // upgradeOnly: it serves a bench upgrade and nothing else (see the sort).
   const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
   const upgradeRails: RailConfig = { ...cfg.rails, protectTopN: 0 };
   for (const p of state.roster) {
     if (starters.has(p.name.toLowerCase())) continue;
-    const upgrade = swappable(incoming.position, p.position) && incoming.points > p.points;
-    if (canDrop(p.name, state.roster, cfg.rails).allowed || (upgrade && canDrop(p.name, state.roster, upgradeRails).allowed)) {
+    if (canDrop(p.name, state.roster, cfg.rails).allowed) {
       paths.push({ path: "drop", drop: p.name, reason: `drop ${p.name}` });
+      continue;
+    }
+    const upgrade = UPGRADE_POSITIONS.has(p.position) && swappable(incoming.position, p.position) && incoming.points > p.points;
+    if (upgrade && canDrop(p.name, state.roster, upgradeRails).allowed) {
+      paths.push({ path: "drop", drop: p.name, reason: `drop ${p.name}`, upgradeOnly: true });
     }
   }
 
   const evals = paths.map((p) => {
-    const { gain, starts, benchGain } = lineupDelta(incoming, p.drop, state, cfg.rails, p.irStash ?? null);
-    return { ...p, gain, starts, benchGain };
+    const { gain, starts, benchGain, benchPerGame } = lineupDelta(incoming, p.drop, state, cfg.rails, p.irStash ?? null);
+    return { ...p, gain, starts, benchGain, benchPerGame };
   });
-  // Best lineup gain first; among equals drop nobody. Then who leaves:
-  //
-  //  - When the lineup gain alone justifies the add (he starts, by enough),
-  //    every bench drop is equal on gain and the one who leaves is the value
-  //    rule's answer: the cheapest body by the cut order, whatever his
-  //    position. Ranking by bench gain here would cut a 148-point receiver
-  //    ahead of a 120-point tight end because the newcomer is a receiver.
-  //  - When it does not, the add can only count as a bench upgrade, which is
-  //    same-position: the bigger bench gain first (the cheapest body at his
-  //    position), then the cut order.
-  //
-  // Never list order: that is how an 80-point back went before a 5-point
-  // second defense.
+  // Best lineup gain first; among equals drop nobody; then the bigger bench
+  // gain (the cheapest body at the newcomer's own position, so a back
+  // arriving costs a back and the one tight end behind the starter stays);
+  // and finally, among drops that still tie, the cheapest body by the cut
+  // order. Never list order: that is how an 80-point back went before a
+  // 5-point second defense.
   const cutKey = (e: { drop: string | null }): [number, number, string] => {
     const p = e.drop ? state.roster.find((r) => r.name === e.drop) : undefined;
     return p ? [p.points, p.seasonPoints ?? 0, p.name] : [Number.POSITIVE_INFINITY, 0, ""];
   };
+  const order = (a: PathEval, b: PathEval): number => {
+    const d = b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path] || b.benchGain - a.benchGain;
+    if (d) return d;
+    const [ap, as, an] = cutKey(a); const [bp, bs, bn] = cutKey(b);
+    return ap - bp || as - bs || an.localeCompare(bn);
+  };
+  // When the lineup gain alone justifies the add (he starts, by enough), the
+  // ordinary rails decide who leaves, exactly as before the widening: a
+  // top-N-protected player is never cut to make room for a starter while an
+  // unprotected body exists. Only an add that can count as nothing but a
+  // bench upgrade may reach past the top-N rail.
   const lineupEnough = (e: { gain: number; starts: boolean }): boolean => incoming.onWaivers
     ? e.gain >= cfg.claimMarginPts && (e.starts || !cfg.claimMustStart)
     : e.gain >= cfg.freeAddMarginPts;
-  evals.sort((a, b) => {
-    const d = b.gain - a.gain || PATH_RANK[a.path] - PATH_RANK[b.path];
-    if (d) return d;
-    if (!(lineupEnough(a) && lineupEnough(b))) {
-      const g = b.benchGain - a.benchGain;
-      if (g) return g;
-    }
-    const [ap, as, an] = cutKey(a); const [bp, bs, bn] = cutKey(b);
-    return ap - bp || as - bs || an.localeCompare(bn);
-  });
+  const ordinary = evals.filter((e) => !e.upgradeOnly).sort(order);
+  if (ordinary[0] && lineupEnough(ordinary[0])) return ordinary;
+  evals.sort(order);
   return evals;
 }
 
@@ -376,12 +406,14 @@ export function planOne(
   const best = evalPaths(incoming, state, cfg)[0];
   if (!best) return skip("no legal path: nothing on the roster may be dropped and no slot is open");
 
-  const { gain, starts, path, drop, benchGain } = best;
+  const { gain, starts, path, drop, benchGain, benchPerGame } = best;
   const irStash = best.irStash ?? null;
   const weeks = Math.max(1, state.weeksLeft ?? 14);
   const swapBar = cfg.benchSwapMarginPerWeek * weeks;
   const claimSwapBar = cfg.benchClaimMarginPerWeek * weeks;
-  const benchUpgrade = (drop !== null || path === "ir-stash") && benchGain >= swapBar;
+  // Both in total and per game played (lineupDelta): a bye still to come is
+  // not an upgrade.
+  const benchUpgrade = (drop !== null || path === "ir-stash") && benchGain >= swapBar && benchPerGame >= cfg.benchSwapMarginPerWeek;
   const droppedPlayer = drop ? state.roster.find((p) => p.name === drop) ?? null : null;
   const byeCredit = byeCreditFor(incoming, droppedPlayer, crowdedByes, cfg);
   const byeNote =
@@ -404,7 +436,7 @@ export function planOne(
     // (drops nobody). If it entails a drop, require a real lineup improvement,
     // OR a real bench upgrade at a swappable position (the 2026-09-30 rule).
     if (costsSomething && gain < cfg.freeAddMarginPts && !benchUpgrade) {
-      return skip(`free agent, but ${describe(best)} lifts the lineup just +${gain} ROS and the bench ${benchGain >= 0 ? "+" : ""}${benchGain} (needs ${cfg.freeAddMarginPts} lineup or ${cfg.benchSwapMarginPerWeek}/week bench)`);
+      return skip(`free agent, but ${describe(best)} lifts the lineup just +${gain} ROS and the bench ${benchGain >= 0 ? "+" : ""}${benchGain} (${benchPerGame >= 0 ? "+" : ""}${benchPerGame} a game; needs ${cfg.freeAddMarginPts} lineup or ${cfg.benchSwapMarginPerWeek}/week bench, in total and per game)`);
     }
     const how = drop ? `drop ${drop}` : path === "ir-stash" ? best.reason : "open bench slot, no drop";
     const why = starts ? `; starts for us (+${gain} ROS)` : benchUpgrade ? `; bench upgrade +${benchGain} ROS (${(benchGain / weeks).toFixed(1)}/week)` : `; +${gain} ROS depth`;
@@ -415,7 +447,7 @@ export function planOne(
   // from a player who starts, or a bench upgrade of claim size.
   const bigEnough = gain >= cfg.claimMarginPts;
   const startsOk = starts || !cfg.claimMustStart;
-  const benchClaim = drop !== null && benchGain >= claimSwapBar;
+  const benchClaim = drop !== null && benchGain >= claimSwapBar && benchPerGame >= cfg.benchClaimMarginPerWeek;
   if ((bigEnough && startsOk) || benchClaim) {
     const how = drop ? `drop ${drop}` : "no drop";
     const why = bigEnough && startsOk ? `+${gain} ROS to the lineup${starts ? " (he starts)" : ""}` : `bench upgrade +${benchGain} ROS (${(benchGain / weeks).toFixed(1)}/week)`;

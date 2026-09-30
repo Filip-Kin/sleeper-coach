@@ -348,6 +348,12 @@ async function main(): Promise<void> {
     for (const n of streamNotes.filter((x) => x.how === "stuck")) {
       logEvent("coach", "waiver-stream-stuck", n.reason, { week, forWeek: n.need.week, position: n.need.position, coveringFor: n.need.coveringFor });
     }
+    // A swap due THIS week that is still waiting (every candidate on
+    // waivers) is an empty slot on Sunday if it never clears. Logged each
+    // live run so the review can see how long it has waited.
+    for (const n of streamNotes.filter((x) => x.how === "wait" && x.need.week === week)) {
+      logEvent("coach", "waiver-stream-waiting", n.reason, { week, forWeek: n.need.week, position: n.need.position, coveringFor: n.need.coveringFor });
+    }
   }
 
   // Surface a live IR opportunity: it is a costless roster expansion and the one

@@ -171,7 +171,7 @@ export function renderRosters(snap: LeagueSnapshot, nameOf: Map<string, string>,
     // refuse to trade him, so the model must not dangle him in conversation.
     const committed = mine ? roster.filter((p) => p.claimDrop) : [];
     if (committed.length) {
-      lines.push(`  committed to a pending waiver claim (NOT tradeable, do not offer them): ${committed.map((p) => p.name).join(", ")}`);
+      lines.push(`  committed to a pending roster move (NOT tradeable, do not offer them, do not say what the move is): ${committed.map((p) => p.name).join(", ")}`);
     }
 
     // Per-week starter holes from byes, weeks 1-14 (regular season pre-playoff).

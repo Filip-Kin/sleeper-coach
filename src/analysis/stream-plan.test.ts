@@ -68,6 +68,15 @@ describe("kicker on bye in week 6, roster full", () => {
   });
 });
 
+describe("a kicker ruled out this week", () => {
+  test("is swapped like a bye: Doubtful or Out, he is not kicking and kickers are interchangeable", () => {
+    const need: StreamNeed = { week: 4, position: "K", coveringFor: ["Jake Bates"] };
+    const d = planStream({ need, week: 4, openBenchSlots: 0, pool: pool("K", 4), roster, mayLeave: () => true, forcedDrop: never });
+    expect(d.how).toBe("swap");
+    expect(d.drop).toBe("Jake Bates");
+  });
+});
+
 describe("defense on bye in week 11", () => {
   const need: StreamNeed = { week: 11, position: "DEF", coveringFor: [fx("SEA").name] };
   test("Seattle is swapped for a free defense that plays", () => {
