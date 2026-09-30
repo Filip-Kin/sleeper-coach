@@ -90,3 +90,91 @@ export function pickStreamer(need: StreamNeed, available: StreamCandidate[]): St
   if (!best) return null;
   return { need, add: best.name, points: best.weekPoints };
 }
+
+// #region the stream decision
+/** Positions where a rostered player is interchangeable with a free agent.
+ *  Every startable kicker projects within about a point a week of every
+ *  other, and so does every startable defense. A bye there is covered by
+ *  SWAPPING the player for one who plays, not by cutting a bench body to
+ *  carry two: the value rule says the kicker is the least valuable player on
+ *  the roster, and a second kicker is a dead slot the week after. */
+export const SWAP_POSITIONS: ReadonlySet<string> = new Set(["K", "DEF"]);
+
+/** A free agent as the stream decision needs him: the need week's projection,
+ *  his rest-of-season value (a swapped-in player stays), and whether adding
+ *  him today would have to be a claim. */
+export interface StreamPoolPlayer extends StreamCandidate {
+  playerId: string;
+  onWaivers: boolean;
+  value: number;
+}
+
+/** open-slot: added into a free bench slot, nobody leaves.
+ *  swap:      kicker or defense; the covered player leaves for the streamer.
+ *  cut:       a scarce position; the cheapest legal bench body leaves.
+ *  wait:      a swap that is not due yet (not his bye week, or every
+ *             candidate is still on waivers). Nothing to do this run.
+ *  stuck:     the slot will be empty and there is no legal way to fill it. */
+export type StreamHow = "open-slot" | "swap" | "cut" | "wait" | "stuck";
+
+export interface StreamDecision {
+  need: StreamNeed;
+  how: StreamHow;
+  add: string | null;
+  drop: string | null;
+  onWaivers: boolean;
+  /** The add's projection for the need week. */
+  points: number;
+  reason: string;
+}
+
+/** What to do about one empty-slot need. Pure.
+ *
+ *  `week` is the current NFL week. `mayLeave` answers whether a rostered
+ *  player may be dropped at all (never-drop list, the drop of a pending
+ *  claim). `forcedDrop` is the cheapest legal cut for a scarce position, or
+ *  null when the rails allow none; it is only asked when a cut is the path. */
+export function planStream(args: {
+  need: StreamNeed;
+  week: number;
+  openBenchSlots: number;
+  pool: StreamPoolPlayer[];
+  roster: TradePlayer[];
+  mayLeave: (name: string) => boolean;
+  forcedDrop: () => string | null;
+}): StreamDecision {
+  const { need, week, openBenchSlots, pool, roster, mayLeave, forcedDrop } = args;
+  const out = (how: StreamHow, add: StreamPoolPlayer | null, drop: string | null, reason: string): StreamDecision =>
+    ({ need, how, add: add?.name ?? null, drop, onWaivers: add?.onWaivers ?? false, points: add?.weekPoints ?? 0, reason });
+  const plays = pool.filter((p) => p.position === need.position && p.bye !== need.week && p.weekPoints > 0);
+  // Best for the need week: the one-week fill (pickStreamer's order).
+  const byWeek = plays.slice().sort((a, b) => b.weekPoints - a.weekPoints);
+  const best = byWeek[0];
+  if (!best) return out("stuck", null, null, `week ${need.week} would start nobody at ${need.position} and no free ${need.position} plays that week`);
+
+  if (openBenchSlots > 0) return out("open-slot", best, null, `into an open bench slot, covering ${need.coveringFor.join(", ")} in week ${need.week}`);
+
+  if (SWAP_POSITIONS.has(need.position)) {
+    const covered = roster
+      .filter((p) => p.position === need.position && need.coveringFor.includes(p.name) && mayLeave(p.name))
+      .sort((a, b) => a.points - b.points)[0];
+    if (covered) {
+      // In his bye week he is not playing, so the swap costs this week
+      // nothing. A week early it would take a kicker who plays out of the
+      // lineup, and the streamer's own game may already be over.
+      if (need.week !== week) {
+        return out("wait", null, null, `${covered.name} is swapped for a ${need.position} who plays in week ${need.week} itself, not before`);
+      }
+      // He stays, so rank on rest-of-season value; and a swap is never worth
+      // waiver priority, so only a player who can be added for free now.
+      const free = plays.filter((p) => !p.onWaivers).sort((a, b) => b.value - a.value || b.weekPoints - a.weekPoints)[0];
+      if (!free) return out("wait", null, null, `every ${need.position} who plays week ${need.week} is on waivers until the run clears`);
+      return out("swap", free, covered.name, `${covered.name} is off in week ${need.week}; ${free.name} plays it and replaces him`);
+    }
+  }
+
+  const drop = forcedDrop();
+  if (!drop) return out("stuck", null, null, `week ${need.week} would start nobody at ${need.position} (${need.coveringFor.join(", ") || "nobody rostered"} out) and the rails allow no cut to make room`);
+  return out("cut", best, drop, `covering ${need.coveringFor.join(", ")} in week ${need.week}; ${drop} is the cheapest legal cut`);
+}
+// #endregion

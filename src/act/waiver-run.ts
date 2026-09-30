@@ -25,7 +25,8 @@ import { buildRosterView, takenAcrossLeague } from "../analysis/roster-view.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
 import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve, currentStarters as legStarters } from "../league/api.ts";
-import { streamNeeds, pickStreamer, type StreamCandidate } from "../analysis/streaming.ts";
+import { streamNeeds, planStream, type StreamPoolPlayer, type StreamDecision } from "../analysis/streaming.ts";
+import { canDrop } from "../analysis/rails.ts";
 import { chooseLegalForcedDrops } from "../analysis/reconcile-plan.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
 import { loadValues, liveStatusFromRosters, toRail, weeksLeft } from "../analysis/value.ts";
@@ -257,24 +258,34 @@ async function main(): Promise<void> {
   // kickers or defenses (they score far less), the very positions we stream.
   // Each candidate carries the NEED WEEK's projection and his bye (R4): a
   // rest-of-season number put a kicker on his own bye at the top of the list.
-  const streamBase = unrostered.map((p) => ({ playerId: p.playerId, name: p.name, position: p.position, team: p.team, bye: byeWeek(p.team) }));
+  const streamBase = unrostered.map((p) => ({ playerId: p.playerId, name: p.name, position: p.position, team: p.team, bye: byeWeek(p.team), value: p.value }));
   const needs = streamNeeds(roster, week, DEFAULT_WAIVERS.byeLookaheadWeeks ?? 3);
-  let stream: { add: string; drop: string | null; position: string; forWeek: number; onWaivers: boolean; points: number; coveringFor: string[] } | null = null;
+  let stream: { add: string; drop: string | null; position: string; forWeek: number; onWaivers: boolean; points: number; coveringFor: string[]; how: StreamDecision["how"] } | null = null;
+  // Needs the run is not acting on: a swap that is not due yet, or a slot
+  // with no legal way to fill it. Reported, never passed over in silence:
+  // before 2026-09-30 a need with no legal cut printed "no upcoming empty
+  // starting slot".
+  const streamNotes: StreamDecision[] = [];
+  // May a rostered player leave at all: the never-drop list and the drop of
+  // a pending claim say no; the protected top-N does not apply to a swap,
+  // which replaces him at his own position.
+  const leaveRails = { ...rails, protectTopN: 0 };
   for (const need of needs) {
     const table = byPlayerId(await loadWeekProjections(season, need.week, league.scoring_settings).catch(() => []));
-    const pool: (StreamCandidate & { playerId: string; team: string })[] = streamBase.map((p) => ({ ...p, weekPoints: table.get(p.playerId)?.points ?? 0 }));
-    const pick = pickStreamer(need, pool);
-    if (!pick) continue;
-    // A drop is only needed if we are full; never drop the player we are
-    // covering for (he returns from his bye) nor a current starter, and
-    // chooseForcedDrops already refuses to empty a mandatory slot or cut a stash.
-    const drop = rosterState.openBenchSlots > 0
-      ? null
-      : chooseLegalForcedDrops(view, roster, 1, streamCfg, rails, [...need.coveringFor, ...currentStarters])[0]?.name ?? null;
-    if (rosterState.openBenchSlots <= 0 && !drop) continue; // no legal way to make room
-    const picked = pool.find((a) => a.name === pick.add);
-    const onWaivers = picked ? isOnWaivers(picked.playerId, picked.team) : true;
-    stream = { add: pick.add, drop, position: need.position, forWeek: need.week, onWaivers, points: pick.points, coveringFor: need.coveringFor };
+    const pool: StreamPoolPlayer[] = streamBase
+      .filter((p) => p.position === need.position)
+      .map((p) => ({ ...p, weekPoints: table.get(p.playerId)?.points ?? 0, onWaivers: isOnWaivers(p.playerId, p.team) }));
+    // Kicker and defense: the covered player is swapped in his bye week
+    // (streaming.ts planStream). A scarce position: the cheapest legal cut,
+    // never the player being covered for (he returns) nor a current starter;
+    // chooseForcedDrops refuses to empty a mandatory slot or cut a stash.
+    const d = planStream({
+      need, week, openBenchSlots: rosterState.openBenchSlots, pool, roster,
+      mayLeave: (n) => canDrop(n, roster, leaveRails).allowed,
+      forcedDrop: () => chooseLegalForcedDrops(view, roster, 1, streamCfg, rails, [...need.coveringFor, ...currentStarters])[0]?.name ?? null,
+    });
+    if (!d.add || d.how === "wait" || d.how === "stuck") { streamNotes.push(d); continue; }
+    stream = { add: d.add, drop: d.drop, position: need.position, forWeek: need.week, onWaivers: d.onWaivers, points: d.points, coveringFor: need.coveringFor, how: d.how };
     break; // earliest actionable need only
   }
 
@@ -286,9 +297,9 @@ async function main(): Promise<void> {
   for (const m of moves.slice(0, 12)) {
     const drop = m.drop ? ` / drop ${m.drop}` : "";
     const bye = m.byeCredit ? ` {bye ${m.byeCredit > 0 ? "+" : ""}${m.byeCredit}}` : "";
-    console.log(`  [${m.kind}] ${m.add} (${m.position}, +${m.gainPts} ROS)${drop}${bye} — ${m.reason}`);
+    console.log(`  [${m.kind}] ${m.add} (${m.position}, lineup +${m.gainPts}, bench ${m.benchGainPts >= 0 ? "+" : ""}${m.benchGainPts} ROS)${drop}${bye} — ${m.reason}`);
   }
-  console.log(`  single best claim: ${claim ? `${claim.add} (+${claim.gainPts} ROS)` : "none worth a priority burn"}`);
+  console.log(`  single best claim: ${claim ? `${claim.add} (lineup +${claim.gainPts}, bench +${claim.benchGainPts} ROS)` : "none worth a priority burn"}`);
 
   // Say what it is WATCHING, not only what it did. Filip had to ask repeatedly on
   // draft night what the engine was about to do; a run that declines to act must
@@ -317,19 +328,27 @@ async function main(): Promise<void> {
   const topCandidate = available[0];
   console.log(`    best available overall: ${topCandidate ? `${topCandidate.name} (${topCandidate.position}, ${topCandidate.points} ROS, VOR ${Math.round(vorOf.get(idByName.get(topCandidate.name) ?? "") ?? 0)})` : "none"}`);
   if (stream) {
-    console.log(`    STREAM: week ${stream.forWeek} would leave ${stream.position} empty (${stream.coveringFor.join(", ")} out); grab ${stream.add} now${stream.drop ? `, drop ${stream.drop}` : ""} [${stream.onWaivers ? "claim" : "free add"}]`);
-  } else {
-    console.log("    no upcoming empty starting slot to stream for.");
+    console.log(`    STREAM: week ${stream.forWeek} would leave ${stream.position} empty (${stream.coveringFor.join(", ")} out); grab ${stream.add} now${stream.drop ? `, drop ${stream.drop}` : ""} [${stream.how}, ${stream.onWaivers ? "claim" : "free add"}]`);
   }
+  for (const n of streamNotes) console.log(`    stream ${n.how === "stuck" ? "STUCK" : "waiting"} (week ${n.need.week} ${n.need.position}): ${n.reason}`);
+  if (!stream && !streamNotes.length) console.log("    no upcoming empty starting slot to stream for.");
 
   logEvent("coach", live ? "waiver-run" : "waiver-shadow", `Week ${week} waivers: ${freeAdds.length} free adds, ${claim ? "1 claim" : "no claim"}${live ? "" : " (shadow)"}${byeCrunch.length ? `; watching week ${byeCrunch.map((b) => b.week).join("/")} bye` : ""}${irOpps.length ? `; ${irOpps.length} IR opportunity` : ""}`, {
     week, leagueId, shadow: !live,
-    freeAdds: freeAdds.map((m) => ({ add: m.add, drop: m.drop, gain: m.gainPts })),
-    claim: claim ? { add: claim.add, drop: claim.drop, gain: claim.gainPts } : null,
+    freeAdds: freeAdds.map((m) => ({ add: m.add, drop: m.drop, gain: m.gainPts, benchGain: m.benchGainPts })),
+    claim: claim ? { add: claim.add, drop: claim.drop, gain: claim.gainPts, benchGain: claim.benchGainPts } : null,
     byeCrunch: byeCrunch.map((b) => ({ week: b.week, starters: b.count, names: b.names })),
     irOpportunities: irOpps.map((o) => ({ name: o.name, status: o.injuryStatus, isStash: o.isStash })),
-    stream: stream ? { add: stream.add, drop: stream.drop, position: stream.position, forWeek: stream.forWeek, via: stream.onWaivers ? "claim" : "free-add" } : null,
+    stream: stream ? { add: stream.add, drop: stream.drop, position: stream.position, forWeek: stream.forWeek, how: stream.how, via: stream.onWaivers ? "claim" : "free-add" } : null,
+    streamNotes: streamNotes.map((n) => ({ week: n.need.week, position: n.need.position, how: n.how, reason: n.reason })),
   });
+  // A starting slot that will be empty with no legal way to fill it is for
+  // the review to see, from the live runs only (a shadow run is a look).
+  if (live) {
+    for (const n of streamNotes.filter((x) => x.how === "stuck")) {
+      logEvent("coach", "waiver-stream-stuck", n.reason, { week, forWeek: n.need.week, position: n.need.position, coveringFor: n.need.coveringFor });
+    }
+  }
 
   // Surface a live IR opportunity: it is a costless roster expansion and the one
   // move that can genuinely help a crowded bye, but the IR-move DOM flow is not
@@ -392,6 +411,14 @@ async function main(): Promise<void> {
   // worth more than any marginal ROS upgrade. A stream claim takes the single
   // per-cycle claim; a stream free-add costs no priority.
   let claimUsed = false;
+  // Only a run that can perform the stream may confirm it. confirmed()
+  // consumes the recorded intent when it says go, so a claims-only run
+  // confirming a free add (or the reverse) used the intent up and wrote
+  // nothing.
+  if (stream && !(stream.onWaivers ? doClaims : doAdds)) {
+    console.log(`  stream ${stream.add}: left for the ${stream.onWaivers ? "claim" : "free-agent"} run`);
+    stream = null;
+  }
   if (stream && !confirmed("stream", stream.add, stream.drop)) stream = null;
   if (stream) {
     try {
@@ -529,8 +556,8 @@ async function main(): Promise<void> {
     try {
       const res = await submitWaiverClaim(gql, resolve(claim.add), claim.drop ? resolve(claim.drop) : null);
       console.log(`  claimed ${claim.add}${claim.drop ? ` (dropping ${claim.drop})` : ""} [${res.status}]`);
-      logEvent("coach", "waiver-claim", `Submitted waiver claim for ${claim.add}${claim.drop ? `, dropping ${claim.drop}` : ""} (+${claim.gainPts} ROS).`, {
-        week, leagueId, add: claim.add, drop: claim.drop, gainPts: claim.gainPts,
+      logEvent("coach", "waiver-claim", `Submitted waiver claim for ${claim.add}${claim.drop ? `, dropping ${claim.drop}` : ""} (lineup +${claim.gainPts}, bench +${claim.benchGainPts} ROS).`, {
+        week, leagueId, add: claim.add, drop: claim.drop, gainPts: claim.gainPts, benchGainPts: claim.benchGainPts,
         transaction_id: res.transactionId, status: res.status,
       });
       intents.settle("waiver:", "", nowMs2);
