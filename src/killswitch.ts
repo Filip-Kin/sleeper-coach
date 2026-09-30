@@ -55,17 +55,29 @@ export function freezeState(): FreezeState {
   return { frozen: false, reason: "" };
 }
 
-/** May the coach DROP a player? No when the human switch is set, and no when
- *  the breaker has tripped. Lineup and reserve writes do not ask this. */
-export function dropFreezeState(): FreezeState {
-  const human = freezeState();
-  if (human.frozen) return human;
+/** The BREAKER's marker alone: is DROP_FREEZE set? This is the question the
+ *  `drop-freeze` invariant asks ("did the coach stop itself?"), and it must
+ *  not include the human switch. On 2026-09-30 12:23Z the daemon booted while
+ *  Filip's FREEZE was up for a fix, the invariant read dropFreezeState() (both
+ *  files), logged `invariant-failed: drop-freeze` for a deliberate human stop,
+ *  and the watcher woke an incident engineer for it. A human freeze is a
+ *  state someone chose; only the breaker's own marker is a fault. */
+export function breakerState(): FreezeState {
   if (existsSync(DROP_FREEZE_FILE)) {
     let why = "";
     try { why = readFileSync(DROP_FREEZE_FILE, "utf8").trim().split("\n")[0] ?? ""; } catch { /* the file is the fact; its text is a courtesy */ }
     return { frozen: true, reason: `drops frozen by the circuit breaker (${DROP_FREEZE_FILE})${why ? `: ${why}` : ""}` };
   }
   return { frozen: false, reason: "" };
+}
+
+/** May the coach DROP a player? No when the human switch is set, and no when
+ *  the breaker has tripped. Lineup and reserve writes do not ask this. This is
+ *  the WRITE gate; for "has the breaker tripped" use breakerState(). */
+export function dropFreezeState(): FreezeState {
+  const human = freezeState();
+  if (human.frozen) return human;
+  return breakerState();
 }
 
 // Throw if writes are currently disabled. Call this at the top of every write

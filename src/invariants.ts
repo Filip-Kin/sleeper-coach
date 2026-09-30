@@ -17,7 +17,11 @@
 //   drops               more automatic drops in 24 h than the daily limit
 //                       (trade gives, filed claims and manual runs excluded)
 //   drop-freeze         the breaker's DROP_FREEZE marker is set: drops are
-//                       stopped until a human removes it (visible, not fatal)
+//                       stopped until a human removes it (visible, not fatal).
+//                       The human FREEZE is NOT this: someone chose it, and
+//                       reporting it as a failure woke an engineer for nothing
+//                       (2026-09-30 12:23Z boot). breakerState(), never
+//                       dropFreezeState(), feeds it.
 //   alert-storm         more than ten alerts in an hour
 //
 // Pure core (evaluateInvariants) over plain inputs, so every branch has a
@@ -42,7 +46,7 @@ import { SLOT_ELIGIBILITY, startingSlots } from "./analysis/lineup.ts";
 import { assessToken, type TokenProbe } from "./league/token.ts";
 import { JOBS, jitterFor, lastOccurrence, type Job } from "./schedule.ts";
 import { DAILY_LIMIT, automaticDrops, type DropRecord } from "./analysis/drop-guard.ts";
-import { dropFreezeState, dropFreezeNow } from "./killswitch.ts";
+import { breakerState, dropFreezeNow } from "./killswitch.ts";
 import { byeWeek } from "./data/byes.ts";
 import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
@@ -90,7 +94,8 @@ export interface InvariantInput {
   /** job name -> last_run occurrence, from scheduled_runs. */
   scheduledRuns: Record<string, number>;
   dropHistory: DropRecord[];
-  /** The breaker's own marker, from dropFreezeState(). Absent means not set. */
+  /** The breaker's own marker, from breakerState() (DROP_FREEZE only, never
+   *  the human FREEZE). Absent means not set. */
   dropFreeze?: { frozen: boolean; reason: string };
   alertsLastHour: number;
   now?: number;
@@ -280,7 +285,10 @@ export async function runInvariants(input: InvariantInput, deps: RunInvariantsDe
   const now = input.now ?? Date.now();
   const alert = deps.alert ?? sendAlert;
   const freeze = deps.freeze ?? dropFreezeNow;
-  const isFrozen = deps.frozen ?? (() => dropFreezeState().frozen);
+  // "Already frozen" means the BREAKER is already set. A human FREEZE must not
+  // suppress the marker: when the human lifts FREEZE, a coach that tripped the
+  // drops invariant meanwhile has to stay stopped on drops, not resume them.
+  const isFrozen = deps.frozen ?? (() => breakerState().frozen);
   const log = deps.log ?? logEvent;
   const checks = evaluateInvariants({ ...input, now });
   const alerted: string[] = [];
@@ -338,7 +346,7 @@ export async function collectInvariantInput(db: Database, gql: Gql, leg: number)
     outstandingOffers: offers.map((o) => ({ transactionId: o.transactionId })),
     proposalsDb, scheduledRuns,
     dropHistory: dropHistory(),
-    dropFreeze: dropFreezeState(),
+    dropFreeze: breakerState(),
     alertsLastHour: alertsLastHour(db, now),
     now,
   };

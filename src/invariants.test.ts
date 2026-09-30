@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { evaluateInvariants, runInvariants, alertDue, lastInvariantAlert, markInvariantAlert, type InvariantInput, type InvariantCheck } from "./invariants.ts";
+import { breakerState } from "./killswitch.ts";
 import { buildRosterView } from "./analysis/roster-view.ts";
 import type { League, Roster } from "./sleeper/types.ts";
 import type { Job } from "./schedule.ts";
@@ -233,6 +234,39 @@ describe("runInvariants: dedupe and freeze", () => {
     expect(existsSync(FREEZE_FILE)).toBe(false);
     expect(events).toContain("drop-freeze");
     rmSync(DROP_FREEZE_FILE, { force: true });
+  });
+  // Replay of 2026-09-30 12:23:34Z: daemon boot at 3ae7421 with the human
+  // FREEZE still up (left from the morning's fix), breaker clear, one automatic
+  // drop in 24 h. The live run logged `invariant-failed: drop-freeze:
+  // kill-switch file present (/data/sleeper-coach/FREEZE)` and the watcher
+  // woke an incident engineer for a state a human had chosen.
+  test("a human FREEZE alone is not a drop-freeze failure and wakes nobody", async () => {
+    const { rmSync, writeFileSync } = await import("node:fs");
+    const { FREEZE_FILE, DROP_FREEZE_FILE } = await import("./paths.ts");
+    for (const f of [FREEZE_FILE, DROP_FREEZE_FILE]) rmSync(f, { force: true });
+    writeFileSync(FREEZE_FILE, "2026-09-30T07:03:47.649Z auto-frozen: dropped 7543 2 min ago; a second automatic drop inside 60 min is a cascade, not a decision\n");
+    const events: string[] = [];
+    const alerts: string[] = [];
+    const r = await runInvariants(
+      input({ db: new Database(":memory:"), dropFreeze: breakerState(), dropHistory: [{ name: "Travis Etienne", at: NOW - 5 * 3_600_000, via: "ir-activate" }] }),
+      { alert: async (title) => { alerts.push(title); }, log: (_a, type) => { events.push(type); } },
+    );
+    expect(byName(r.checks)["drop-freeze"]!.ok).toBe(true);
+    expect(r.alerted).not.toContain("drop-freeze");
+    expect(events).not.toContain("invariant-failed");
+    expect(alerts).toEqual([]);
+    rmSync(FREEZE_FILE, { force: true });
+  });
+  test("a human FREEZE does not stop the breaker marker when drops trip", async () => {
+    const { existsSync, rmSync, writeFileSync } = await import("node:fs");
+    const { FREEZE_FILE, DROP_FREEZE_FILE } = await import("./paths.ts");
+    for (const f of [FREEZE_FILE, DROP_FREEZE_FILE]) rmSync(f, { force: true });
+    writeFileSync(FREEZE_FILE, "frozen by Filip\n");
+    const hist = Array.from({ length: DAILY_LIMIT + 1 }, (_, i) => ({ name: `d${i}`, at: NOW - i * 60_000, via: "reconcile" }));
+    const r = await runInvariants(input({ db: new Database(":memory:"), dropFreeze: breakerState(), dropHistory: hist }), { alert: async () => {}, log: () => {} });
+    expect(r.frozen).toEqual(["drops"]);
+    expect(existsSync(DROP_FREEZE_FILE)).toBe(true);
+    for (const f of [FREEZE_FILE, DROP_FREEZE_FILE]) rmSync(f, { force: true });
   });
   test("alertDue is a 24 h gate", () => {
     expect(alertDue(0, NOW)).toBe(true);
