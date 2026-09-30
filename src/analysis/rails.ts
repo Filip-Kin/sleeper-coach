@@ -22,6 +22,11 @@ export interface RailPlayer {
   /** Parked on injured reserve. Still an asset we own and value for the season;
    *  cannot start this week and provides no injury cover. Both at once. */
   onIr?: boolean;
+  /** Named as the drop of one of our own pending waiver claims. He is still
+   *  ours until the claim processes, so he stays in the lineup and depth
+   *  maths, but he is committed: no other move may cut him or trade him away.
+   *  Set on the trade snapshot (trade-wire.ts markClaimDrops). */
+  claimDrop?: boolean;
   injuryStatus?: string; // Sleeper injury_status, if any
   returnsBeforePlayoffs?: boolean; // hurt but expected back before week 16
   /** Full-season projection: the talent signal, the tie-break behind `points`. */
@@ -75,6 +80,13 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
   }
   if (cfg.neverDrop.some((n) => norm(n) === t)) {
     return { allowed: false, reason: `"${player.name}" is on the never-drop list` };
+  }
+  // The drop side of a pending waiver claim is spoken for. Cutting or trading
+  // him now kills the claim (nobody left to drop) or the trade (nobody left to
+  // give) when the other one processes. 2026-09-30: the proposer chose a deal
+  // giving Kenny Gainwell while a claim for Croskey-Merritt was dropping him.
+  if (player.claimDrop) {
+    return { allowed: false, reason: `"${player.name}" is the drop of our own pending waiver claim; he is committed until it processes` };
   }
   // A player on injured reserve is never cut or traded away by the robot. He
   // costs no roster slot, so there is nothing to gain by moving him, and the

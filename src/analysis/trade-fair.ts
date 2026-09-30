@@ -659,6 +659,12 @@ export function giveEligibleForProposal(
   if (cfg.rails.neverDrop.some((n) => norm(n) === norm(present.name))) {
     return { ok: false, reason: `"${present.name}" is on the never-drop list` };
   }
+  // Spoken for by our own pending waiver claim (rails.ts canDrop has the
+  // same rule for the accept path). Offering him puts the claim and the
+  // trade on a collision course: whichever processes second fails.
+  if (present.claimDrop) {
+    return { ok: false, reason: `"${present.name}" is the drop of our own pending waiver claim; he is committed until it processes` };
+  }
   if (present.returnsBeforePlayoffs) {
     return { ok: false, reason: `"${present.name}" is an injured stash due back before the playoffs; his depressed projection would undervalue him in a trade` };
   }

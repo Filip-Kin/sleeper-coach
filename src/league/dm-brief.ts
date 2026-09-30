@@ -167,6 +167,13 @@ export function renderRosters(snap: LeagueSnapshot, nameOf: Map<string, string>,
       lines.push(`  on injured reserve (not startable, ${mine ? "NOT tradeable, do not offer them" : "the owner cannot start them"}): ${stashed.map((p) => p.name).join(", ")}`);
     }
 
+    // Same for the drop side of our own pending waiver claims: the rails
+    // refuse to trade him, so the model must not dangle him in conversation.
+    const committed = mine ? roster.filter((p) => p.claimDrop) : [];
+    if (committed.length) {
+      lines.push(`  committed to a pending waiver claim (NOT tradeable, do not offer them): ${committed.map((p) => p.name).join(", ")}`);
+    }
+
     // Per-week starter holes from byes, weeks 1-14 (regular season pre-playoff).
     // IR players cannot fill a slot, so they do not count as available.
     const holes: string[] = [];

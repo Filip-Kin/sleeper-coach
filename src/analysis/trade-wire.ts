@@ -15,6 +15,7 @@ import { config } from "../config.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import type { Roster } from "../sleeper/types.ts";
 import { tokenGql, pendingRosterDelta, applyRosterDelta, pendingTrades, type Gql, type PendingTrade } from "../league/api.ts";
+import { pendingClaimPlayers } from "../act/pending-claims.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadValues, liveStatusFromRosters, scalePts } from "./value.ts";
 import { loadPlayers } from "../data/players.ts";
@@ -85,6 +86,22 @@ export function applyPending(
     byId.get(id) ?? { ...(snap.playerById.get(id) ?? { name: id, position: "", points: 0 }), playerId: id, onIr: false }));
   return { ...snap, rosterOf };
 }
+
+/** Flag the drop side of our own pending waiver claims on OUR roster. Pure.
+ *  The player stays on the roster (he is ours until the claim processes, so
+ *  lineup and depth maths still count him) but carries `claimDrop`, which
+ *  canDrop and giveEligibleForProposal refuse. Every trade path reads its
+ *  rosters from the snapshot, so this one flag covers the proposer, the
+ *  counter-offer paths, the evaluation of incoming offers and the DM brief. */
+export function markClaimDrops(snap: LeagueSnapshot, dropIds: readonly string[]): LeagueSnapshot {
+  if (!dropIds.length) return snap;
+  const ids = new Set(dropIds);
+  const current = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  if (!current.some((p) => p.playerId && ids.has(p.playerId))) return snap;
+  const rosterOf = new Map(snap.rosterOf);
+  rosterOf.set(snap.ourRosterId, current.map((p) => (p.playerId && ids.has(p.playerId) ? { ...p, claimDrop: true } : p)));
+  return { ...snap, rosterOf };
+}
 // #endregion
 
 // One fetch, reused for every offer in a poll cycle.
@@ -138,7 +155,8 @@ export async function snapshot(): Promise<LeagueSnapshot> {
 }
 
 /** snapshot() reflects the CURRENT roster. This applies trades we have agreed
- *  to but that have not processed yet, so every "what do we have" decision
+ *  to but that have not processed yet, and flags the players our pending
+ *  waiver claims will drop, so every "what do we have" decision
  *  (proposing, evaluating an incoming offer, the trade brief) reasons about the
  *  roster we are about to hold, not a stale one. Only OUR roster is adjusted;
  *  the counterparties' current rosters are what we evaluate against. */
@@ -146,7 +164,11 @@ export async function snapshotWithPending(gql: Gql = tokenGql(), leg?: number, b
   const snap = base ?? (await snapshot());
   const week = leg ?? snap.week;
   const delta = await pendingRosterDelta(gql, week).catch(() => ({ incoming: [], outgoing: [] }));
-  return applyPending(snap, delta);
+  // Our own pending waiver claims: the adds are not ours yet and a claim can
+  // lose on priority, so nothing arrives; the drops are committed and are
+  // flagged so no trade path offers or gives one away (markClaimDrops).
+  const claims = await pendingClaimPlayers(gql, week, snap.ourRosterId).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
+  return markClaimDrops(applyPending(snap, delta), claims.drops);
 }
 
 /** The snapshot a counter-offer is picked from. One per poll; the DM watcher
