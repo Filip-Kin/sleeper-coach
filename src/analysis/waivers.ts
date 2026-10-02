@@ -1,7 +1,8 @@
 import { canDrop, DEFAULT_RAILS, type RailPlayer, type RailConfig } from "./rails.ts";
 import { solveLineup, type LineupPlayer } from "./lineup.ts";
 import { irEligible as ruleIrEligible, type Settings } from "../sleeper/rules.ts";
-import { LAST_WEEK } from "./value.ts";
+import { LAST_WEEK, notPlaying } from "./value.ts";
+import { byeAwareLineupTotal, depthInsurance, DEFAULT_FAIRNESS } from "./trade-fair.ts";
 
 // The waiver engine, priced in WAIVER PRIORITY, not dollars.
 //
@@ -66,6 +67,10 @@ export interface WaiverConfig {
   benchSwapMarginPerWeek: number;
   // The same for a claim, which costs our waiver position: higher.
   benchClaimMarginPerWeek: number;
+  // A free agent into an OPEN bench slot costs nobody, but a body who would
+  // start in no week and cover nobody is a wasted slot. He must add this
+  // much to the team over the season (depthGain) to be taken.
+  openSlotMinPts: number;
 }
 
 export const DEFAULT_WAIVERS: WaiverConfig = {
@@ -78,6 +83,7 @@ export const DEFAULT_WAIVERS: WaiverConfig = {
   byeLookaheadWeeks: 2,
   benchSwapMarginPerWeek: 1.0,
   benchClaimMarginPerWeek: 2.0,
+  openSlotMinPts: 1.0,
 };
 
 // A player available to add. `onWaivers` is the pricing switch: true means a
@@ -135,7 +141,11 @@ export interface WaiverMove {
   // - if it is itself on that bye. NEVER enters an accept gate; it only ranks
   // moves that already passed the lineup-delta gates (mirrors trade-fair.ts).
   byeCredit: number;
-  score: number; // gainPts + byeCredit; the ranking key, not a gate
+  /** For a free agent into an open bench slot: what the extra body is worth
+   *  to the team for the rest of the season (depthGain). 0 for every other
+   *  move; those are judged on gainPts and benchGainPts. */
+  depthPts: number;
+  score: number; // gainPts + byeCredit, or depthPts for a free agent into an open slot; the ranking key
   reason: string;
 }
 
@@ -197,6 +207,33 @@ export function gamesLeft(p: { bye?: number }, state: Pick<RosterState, "weeksLe
   const byeAhead = p.bye != null && p.bye >= thisWeek && p.bye <= LAST_WEEK;
   return Math.max(1, weeks - (byeAhead ? 1 : 0));
 }
+
+/** What one more body is worth to the team for the rest of the season, in
+ *  the trade engine's currency: the best lineup week by week with the bye
+ *  players out, plus the bench as injury cover (trade-fair.ts).
+ *
+ *  This is the number for a free agent into an OPEN bench slot. Such adds
+ *  all tie at a rest-of-season lineup gain of zero, and until 2026-10-01 the
+ *  tie broke on points over the cheapest bench body at the newcomer's own
+ *  position: a third quarterback, measured against the second, won it. He
+ *  covers no bye the second does not and is the third man behind one slot,
+ *  so here he is worth nothing; a back or a receiver who fills a flex slot
+ *  in a bye week and is next in line behind three starters is worth points.
+ *  A newcomer who is not playing now covers nobody, so he gets the lineup
+ *  term only. */
+export function depthGain(incoming: RailPlayer, state: Pick<RosterState, "roster" | "startingSlots" | "weeksLeft">): number {
+  const weeks = Math.max(1, state.weeksLeft ?? 14);
+  const first = LAST_WEEK - weeks + 1;
+  const upcoming = Array.from({ length: weeks }, (_, i) => first + i);
+  const after = [...state.roster, incoming];
+  const lineup = byeAwareLineupTotal(after, upcoming, state.startingSlots) - byeAwareLineupTotal(state.roster, upcoming, state.startingSlots);
+  const cover = notPlaying(incoming.injuryStatus) ? 0
+    : depthInsurance(after, DEFAULT_FAIRNESS, state.startingSlots) - depthInsurance(state.roster, DEFAULT_FAIRNESS, state.startingSlots);
+  return Math.round((lineup + cover) * 10) / 10;
+}
+
+/** Positions where a bench body is depth: the trade engine's cover positions. */
+const DEPTH_POSITIONS: ReadonlySet<string> = new Set(DEFAULT_FAIRNESS.depthPositions);
 
 /** Positions where a better player may replace a top-N-protected bench
  *  player (evalPaths). The flex positions only: there a bench body is depth
@@ -401,7 +438,7 @@ export function planOne(
 ): WaiverMove {
   const base = { add: incoming.name, position: incoming.position, onWaivers: incoming.onWaivers };
   const skip = (reason: string): WaiverMove =>
-    ({ ...base, kind: "skip", drop: null, dropPath: "none", irStash: null, gainPts: 0, benchGainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, score: 0, reason });
+    ({ ...base, kind: "skip", drop: null, dropPath: "none", irStash: null, gainPts: 0, benchGainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, depthPts: 0, score: 0, reason });
 
   const best = evalPaths(incoming, state, cfg)[0];
   if (!best) return skip("no legal path: nothing on the roster may be dropped and no slot is open");
@@ -418,28 +455,63 @@ export function planOne(
   const byeCredit = byeCreditFor(incoming, droppedPlayer, crowdedByes, cfg);
   const byeNote =
     byeCredit > 0 ? " [plays through a crowded upcoming bye]" : byeCredit < 0 ? " [on a crowded upcoming bye]" : "";
+
+  const needsDrop = drop !== null;
+  // An IR stash is a deferred drop (he comes back), so it clears the same bar
+  // as one. That holds for a player on NFL injured reserve too (2026-10-01
+  // review): when he returns, the cut is the lowest rest-of-season value on
+  // the bench, which need not be the body that took his slot. On the roster
+  // of that day, parking Travis Etienne to add Malik Washington ended, weeks
+  // later, with Mark Andrews cut: a swap this planner refuses when asked
+  // directly (open-slot.test.ts).
+  const costsSomething = needsDrop || path === "ir-stash";
+  // A free agent into an open bench slot is judged, and ranked, on what the
+  // extra body is worth to the team. Claims and waits keep the lineup gain:
+  // they are priced in waiver priority, not in a slot.
+  const costless = !costsSomething && !incoming.onWaivers;
+  // A kicker or a defense is never bench depth: his bye is covered by a swap
+  // in the bye week itself (streaming.ts). One is taken into an open slot
+  // when we hold nobody at the position (any gain: the slot scores zero),
+  // or when he starts and lifts the lineup by the margin an add with a drop
+  // must clear. Without this, the week a spare kicker would cover made him
+  // worth nearly as much as a fifth receiver (2026-09-30 replay: 4.7
+  // against 5.1).
+  const noneAtPosition = !state.roster.some((p) => p.position === incoming.position);
+  const depthPts = !costless ? 0
+    : DEPTH_POSITIONS.has(incoming.position) ? depthGain(incoming, state)
+    : starts && gain > 0 && (noneAtPosition || gain >= cfg.freeAddMarginPts) ? gain : 0;
+  // Below this an extra body is noise: 27 of the 70 best free agents of
+  // 2026-09-30 cleared zero, down to an 83-point back worth 0.1.
+  const depthFloor = DEPTH_POSITIONS.has(incoming.position) ? cfg.openSlotMinPts : 0;
   const move = (kind: MoveKind, priorityWorthy: boolean, reason: string): WaiverMove =>
-    ({ ...base, kind, drop, dropPath: path, irStash, gainPts: gain, benchGainPts: benchGain, startsForUs: starts, priorityWorthy, byeCredit, score: Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
+    ({ ...base, kind, drop, dropPath: path, irStash, gainPts: gain, benchGainPts: benchGain, startsForUs: starts, priorityWorthy, byeCredit, depthPts,
+      score: costless ? depthPts : Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
 
   // A move that would LOWER our starting lineup is never made, whatever the raw
   // point gap suggests. This is the guard against dropping a needed player (our
   // only kicker, say) to roster a higher-scoring but redundant position.
-  const needsDrop = drop !== null;
   if (needsDrop && gain < 0) {
     return skip(`no add improves the lineup without weakening it (best option ${describe(best)} nets ${gain} ROS)`);
   }
-  // An IR stash is a deferred drop (he comes back), so it clears the same bar as one.
-  const costsSomething = needsDrop || path === "ir-stash";
 
   if (!incoming.onWaivers) {
-    // Cleared waivers: costless. Into an open slot, take any positive-ROS depth
-    // (drops nobody). If it entails a drop, require a real lineup improvement,
-    // OR a real bench upgrade at a swappable position (the 2026-09-30 rule).
+    // Cleared waivers: costless. Into an open bench slot, take the body
+    // only if he is worth something to the team (depthGain): a player
+    // who would start in no week and cover nobody is a wasted slot, and a
+    // high-scoring one (a third quarterback) also takes a place in the
+    // protected top N from a real player. If it entails a drop, require a
+    // real lineup improvement, OR a real bench upgrade at a swappable
+    // position (the 2026-09-30 rule).
     if (costsSomething && gain < cfg.freeAddMarginPts && !benchUpgrade) {
       return skip(`free agent, but ${describe(best)} lifts the lineup just +${gain} ROS and the bench ${benchGain >= 0 ? "+" : ""}${benchGain} (${benchPerGame >= 0 ? "+" : ""}${benchPerGame} a game; needs ${cfg.freeAddMarginPts} lineup or ${cfg.benchSwapMarginPerWeek}/week bench, in total and per game)`);
     }
+    if (costless && (depthPts <= 0 || depthPts < depthFloor)) {
+      return skip(DEPTH_POSITIONS.has(incoming.position)
+        ? `free agent and a bench slot is open, but he adds only ${depthPts} to the team over the season (needs ${cfg.openSlotMinPts}): no week he would start, nobody he would cover`
+        : `free agent and a bench slot is open, but a second ${incoming.position} is not depth and he lifts the lineup just +${gain} ROS (needs ${cfg.freeAddMarginPts})`);
+    }
     const how = drop ? `drop ${drop}` : path === "ir-stash" ? best.reason : "open bench slot, no drop";
-    const why = starts ? `; starts for us (+${gain} ROS)` : benchUpgrade ? `; bench upgrade +${benchGain} ROS (${(benchGain / weeks).toFixed(1)}/week)` : `; +${gain} ROS depth`;
+    const why = starts ? `; starts for us (+${gain} ROS)` : benchUpgrade ? `; bench upgrade +${benchGain} ROS (${(benchGain / weeks).toFixed(1)}/week)` : `; +${depthPts} to the team over the season (bye weeks and cover)`;
     return move("free-add", false, `free agent, costless — ${how}${why}`);
   }
 

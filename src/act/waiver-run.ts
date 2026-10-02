@@ -297,7 +297,10 @@ async function main(): Promise<void> {
   for (const m of moves.slice(0, 12)) {
     const drop = m.drop ? ` / drop ${m.drop}` : "";
     const bye = m.byeCredit ? ` {bye ${m.byeCredit > 0 ? "+" : ""}${m.byeCredit}}` : "";
-    console.log(`  [${m.kind}] ${m.add} (${m.position}, lineup +${m.gainPts}, bench ${m.benchGainPts >= 0 ? "+" : ""}${m.benchGainPts} ROS)${drop}${bye} — ${m.reason}`);
+    // A free agent into an open slot is judged on what the body is worth to
+    // the team (depthPts), not against a bench player he is not replacing.
+    const worth = m.kind === "free-add" && !m.drop && m.depthPts > 0 ? `team +${m.depthPts}` : `bench ${m.benchGainPts >= 0 ? "+" : ""}${m.benchGainPts} ROS`;
+    console.log(`  [${m.kind}] ${m.add} (${m.position}, lineup +${m.gainPts}, ${worth})${drop}${bye} — ${m.reason}`);
   }
   console.log(`  single best claim: ${claim ? `${claim.add} (lineup +${claim.gainPts}, bench +${claim.benchGainPts} ROS)` : "none worth a priority burn"}`);
 
@@ -335,7 +338,7 @@ async function main(): Promise<void> {
 
   logEvent("coach", live ? "waiver-run" : "waiver-shadow", `Week ${week} waivers: ${freeAdds.length} free adds, ${claim ? "1 claim" : "no claim"}${live ? "" : " (shadow)"}${byeCrunch.length ? `; watching week ${byeCrunch.map((b) => b.week).join("/")} bye` : ""}${irOpps.length ? `; ${irOpps.length} IR opportunity` : ""}`, {
     week, leagueId, shadow: !live,
-    freeAdds: freeAdds.map((m) => ({ add: m.add, drop: m.drop, gain: m.gainPts, benchGain: m.benchGainPts })),
+    freeAdds: freeAdds.map((m) => ({ add: m.add, drop: m.drop, stash: m.irStash, gain: m.gainPts, benchGain: m.benchGainPts, depth: m.depthPts })),
     claim: claim ? { add: claim.add, drop: claim.drop, gain: claim.gainPts, benchGain: claim.benchGainPts } : null,
     byeCrunch: byeCrunch.map((b) => ({ week: b.week, starters: b.count, names: b.names })),
     irOpportunities: irOpps.map((o) => ({ name: o.name, status: o.injuryStatus, isStash: o.isStash })),
