@@ -35,7 +35,7 @@ import { DropRefused } from "../league/drop-ledger.ts";
 import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
 import {
-  planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities, stashCandidates,
+  planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities, stashCandidates, claimFallbackAllowed,
   DEFAULT_WAIVERS, type AvailablePlayer, type RosterState,
 } from "../analysis/waivers.ts";
 import type { RailPlayer } from "../analysis/rails.ts";
@@ -533,6 +533,16 @@ async function main(): Promise<void> {
           // job owns that. Everyone else in the list is on waivers too.
           console.log(`  ${m.add} is on waivers; free adds are closed until the waiver run clears. Left for the claim job.`);
           logEvent("coach", "waiver-window", `Free adds closed (waiver window); ${m.add} left for the claim job.`, { week, leagueId, add: m.add });
+          break;
+        }
+        // A claim costs our waiver position, so the move must be one the
+        // planner would have claimed had it known he was on waivers. A bench
+        // swap of a point a week, or a depth body into an open slot, waits
+        // for him to clear.
+        const incoming = available.find((p) => p.name === m.add);
+        if (!incoming || !claimFallbackAllowed(m, incoming, rosterState, waiverCfg, crowdedByes)) {
+          console.log(`  ${m.add} is on waivers and not worth a claim; waiting for him to clear.`);
+          logEvent("coach", "waiver-window", `${m.add} is on waivers; the move is not worth our waiver position, waiting for him to clear.`, { week, leagueId, add: m.add, drop: m.drop });
           break;
         }
         res = await submitWaiverClaim(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);

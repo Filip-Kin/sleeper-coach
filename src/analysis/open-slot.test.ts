@@ -19,7 +19,7 @@
 //    the slot. A swap the planner refuses when asked directly would have
 //    happened in two steps. The stash keeps its bar; the last block pins why.
 import { describe, expect, test } from "bun:test";
-import { planOne, planWaivers, depthGain, DEFAULT_WAIVERS, type AvailablePlayer, type RosterState } from "./waivers.ts";
+import { planOne, planWaivers, depthGain, claimFallbackAllowed, DEFAULT_WAIVERS, type AvailablePlayer, type RosterState } from "./waivers.ts";
 import { chooseForcedDrops } from "./roster-fit.ts";
 import type { RailPlayer } from "./rails.ts";
 import { LEAGUE, OURS, fx, idOf, tradePlayer, availableAt } from "./incidents/league.ts";
@@ -95,5 +95,33 @@ describe("parking a player on NFL IR is still a deferred drop", () => {
     expect(chooseForcedDrops(onReturn, 1, undefined, starters)[0]?.name).toBe("Mark Andrews");
     const direct = planOne(fa("Malik Washington"), { ...full, openIrSlots: 0 }, DEFAULT_WAIVERS);
     expect(direct.kind).toBe("skip");
+  });
+});
+
+describe("a free add Sleeper says is on waivers becomes a claim only if it is worth one", () => {
+  const full: RosterState = { roster, openBenchSlots: 0, openIrSlots: 0, startingSlots: SLOTS, irEligible, currentStarters: starters, weeksLeft: 14 };
+  const worth = (name: string, points: number): AvailablePlayer => ({ ...fa(name), points });
+  test("a depth body into an open slot is not claimed", () => {
+    const m = planOne(fa("Malik Washington"), open, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(claimFallbackAllowed(m, fa("Malik Washington"), open, DEFAULT_WAIVERS)).toBe(false);
+  });
+  test("a bench swap of 1.6 a week (a free add) is under the 2.0 a week a claim needs: not claimed", () => {
+    const p = worth("Malik Washington", 170);
+    const m = planOne(p, full, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(m.drop).toBe("Josh Downs");
+    expect(claimFallbackAllowed(m, p, full, DEFAULT_WAIVERS)).toBe(false);
+  });
+  test("a bench swap of 2.3 a week is claimed, with the same drop", () => {
+    const p = worth("Malik Washington", 180);
+    const m = planOne(p, full, DEFAULT_WAIVERS);
+    expect(m.drop).toBe("Josh Downs");
+    expect(claimFallbackAllowed(m, p, full, DEFAULT_WAIVERS)).toBe(true);
+  });
+  test("a claim that would take a different route than the free add is not filed in its place", () => {
+    const p = worth("Malik Washington", 180);
+    const m = { ...planOne(p, full, DEFAULT_WAIVERS), drop: "Mark Andrews" };
+    expect(claimFallbackAllowed(m, p, full, DEFAULT_WAIVERS)).toBe(false);
   });
 });

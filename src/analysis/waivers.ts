@@ -532,6 +532,17 @@ export function planOne(
   return move("wait", false, `do NOT claim (${why}); wait for him to clear and free-add at no priority cost`);
 }
 
+/** Sleeper refused a free add because the player is on waivers. May the same
+ *  move be filed as a claim instead? Only when the planner, told he is on
+ *  waivers, would have claimed him anyway, and by the same route: a claim
+ *  costs our waiver position, and a free add clears a far lower bar (a point
+ *  a week on the bench, or a point of depth into an open slot). Before
+ *  2026-10-01 the fallback filed whatever the free add was. */
+export function claimFallbackAllowed(freeAdd: WaiverMove, incoming: AvailablePlayer, state: RosterState, cfg: WaiverConfig = DEFAULT_WAIVERS, crowdedByes: Set<number> = new Set()): boolean {
+  const asClaim = planOne({ ...incoming, onWaivers: true }, state, cfg, crowdedByes);
+  return asClaim.kind === "waiver-claim" && asClaim.drop === freeAdd.drop && asClaim.dropPath === freeAdd.dropPath;
+}
+
 function describe(p: PathEval): string {
   return p.drop ? `drop ${p.drop}` : p.path;
 }
