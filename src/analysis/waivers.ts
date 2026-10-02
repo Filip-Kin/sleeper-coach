@@ -101,6 +101,13 @@ export interface AvailablePlayer extends RailPlayer {
 export interface RosterState {
   roster: RailPlayer[];
   openBenchSlots: number; // empty BN slots right now
+  /** How many of those open slots are open only because one of ours sits on
+   *  IR. Such a slot is his: he comes back, and whoever took it forces a cut.
+   *  So it is not a free seat for a depth body; it takes an add the lineup
+   *  justifies, like the stash itself. Absent = 0. (2026-10-02 review: after
+   *  a lost stash claim the empty slot went to a depth receiver and Travis
+   *  Etienne's return cut Mark Andrews, team -12.2 on the captured league.) */
+  owedBenchSlots?: number;
   openIrSlots: number; // empty IR (reserve) slots right now
   startingSlots: string[]; // roster_positions with BN/IR removed, for the "would he start" test
   // Whether a Sleeper injury status makes a player IR-eligible in THIS league.
@@ -133,6 +140,9 @@ export interface WaiverMove {
    *  named him but nothing could act on prose, so the executor submitted the
    *  add into a full roster and Sleeper rejected it. */
   irStash: string | null;
+  /** The add goes into an open slot owed to a player of ours on IR
+   *  (RosterState.owedBenchSlots): a cost, so it takes two looks. */
+  owedSlot: boolean;
   gainPts: number; // ROS points the add clears the player it replaces (or the worst starter, for a slot add)
   benchGainPts: number; // incoming minus the same-position bench body he replaces; the tie-break among equal lineup gains
   startsForUs: boolean; // would the add crack our optimal ROS starting lineup
@@ -172,12 +182,14 @@ function lineupDelta(
   dropName: string | null,
   state: RosterState,
   rails: RailConfig = DEFAULT_RAILS,
-  stashName: string | null = null,
 ): { gain: number; starts: boolean; benchGain: number; benchPerGame: number } {
-  // For an IR-stash path the question is how much the add helps the lineup
-  // we can field WITHOUT the stashed man (he cannot start from IR), so he is
-  // out of both sides. He is still ours and still valued everywhere else.
-  const base = stashName ? state.roster.filter((p) => p.name !== stashName) : state.roster;
+  // The stashed man stays in both sides. `points` is rest-of-season value
+  // and already carries nothing for the weeks he misses, so the season
+  // lineup with him in it is the honest baseline. Until 2026-10-02 he was
+  // taken out, and an add who started only while he was hurt counted his
+  // whole season as lineup gain: with Nico Collins Out, a 165-point receiver
+  // read as +16.9 and a claim, and as +0 with the IR slots full.
+  const base = state.roster;
   const baseline = solveLineup(base.map(asLineup), state.startingSlots).total;
   const kept = base.filter((p) => p.name !== dropName).map(asLineup);
   const after = solveLineup([...kept, asLineup(incoming)], state.startingSlots);
@@ -268,6 +280,8 @@ export function swappable(a: string, b: string): boolean {
 interface PathEval {
   path: DropPath;
   drop: string | null;
+  /** An open bench slot that is owed to a player of ours on IR (RosterState.owedBenchSlots). */
+  owed?: boolean;
   gain: number; // starting-lineup ROS delta of taking this path
   benchGain: number; // incoming minus dropped at a swappable position, else 0
   benchPerGame: number; // the same gap per game played, so a bye still to come is not an upgrade
@@ -290,10 +304,12 @@ const PATH_RANK: Record<DropPath, number> = { "bench-slot": 0, "ir-stash": 1, dr
 // protection rails (top-N, never-drop, the injured-returns stash) are never
 // bypassed. Returns paths best-delta first, no-drop winning ties.
 function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverConfig): PathEval[] {
-  const paths: { path: DropPath; drop: string | null; reason: string; irStash?: string; upgradeOnly?: boolean }[] = [];
+  const paths: { path: DropPath; drop: string | null; reason: string; irStash?: string; upgradeOnly?: boolean; owed?: boolean }[] = [];
 
-  if (state.openBenchSlots > 0) {
+  if (state.openBenchSlots > (state.owedBenchSlots ?? 0)) {
     paths.push({ path: "bench-slot", drop: null, reason: "into an open bench slot (no drop)" });
+  } else if (state.openBenchSlots > 0) {
+    paths.push({ path: "bench-slot", drop: null, owed: true, reason: "into the open slot of a player on IR (no drop now; he returns)" });
   }
   // An IR slot with a genuinely injured incumbent to stash frees a bench slot
   // without dropping anyone. Eligibility is the league's flags and nothing
@@ -334,7 +350,7 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   }
 
   const evals = paths.map((p) => {
-    const { gain, starts, benchGain, benchPerGame } = lineupDelta(incoming, p.drop, state, cfg.rails, p.irStash ?? null);
+    const { gain, starts, benchGain, benchPerGame } = lineupDelta(incoming, p.drop, state, cfg.rails);
     return { ...p, gain, starts, benchGain, benchPerGame };
   });
   // Best lineup gain first; among equals drop nobody; then the bigger bench
@@ -363,8 +379,18 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
     : e.gain >= cfg.freeAddMarginPts;
   const ordinary = evals.filter((e) => !e.upgradeOnly).sort(order);
   if (ordinary[0] && lineupEnough(ordinary[0])) return ordinary;
-  evals.sort(order);
-  return evals;
+  // What is left can only be a bench upgrade, and a bench upgrade is a swap:
+  // the body he beats is the one who leaves. The IR stash is not offered for
+  // it (2026-10-02 review). On the stash path nobody leaves now; the bench
+  // gain was still measured against the cheapest same-position body, and
+  // when the stashed man returned the cut was the lowest value on the bench,
+  // somebody else. Replayed on the captured league: a receiver worth 2.3 a
+  // week more than Josh Downs, taken by parking Travis Etienne, ended with
+  // Mark Andrews cut and the team +1.2; the direct swap for Downs is +12.5.
+  // It also made an open IR slot turn that claim into "wait", because the
+  // stash path names no drop (claim-stash.test.ts).
+  // An open slot owed to a player on IR is the same thing one step later.
+  return evals.filter((e) => e.path !== "ir-stash" && !e.owed).sort(order);
 }
 
 /** Parking a player on IR is not free: he comes back, and then somebody has
@@ -438,7 +464,7 @@ export function planOne(
 ): WaiverMove {
   const base = { add: incoming.name, position: incoming.position, onWaivers: incoming.onWaivers };
   const skip = (reason: string): WaiverMove =>
-    ({ ...base, kind: "skip", drop: null, dropPath: "none", irStash: null, gainPts: 0, benchGainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, depthPts: 0, score: 0, reason });
+    ({ ...base, kind: "skip", drop: null, dropPath: "none", irStash: null, owedSlot: false, gainPts: 0, benchGainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, depthPts: 0, score: 0, reason });
 
   const best = evalPaths(incoming, state, cfg)[0];
   if (!best) return skip("no legal path: nothing on the roster may be dropped and no slot is open");
@@ -464,7 +490,7 @@ export function planOne(
   // of that day, parking Travis Etienne to add Malik Washington ended, weeks
   // later, with Mark Andrews cut: a swap this planner refuses when asked
   // directly (open-slot.test.ts).
-  const costsSomething = needsDrop || path === "ir-stash";
+  const costsSomething = needsDrop || path === "ir-stash" || !!best.owed;
   // A free agent into an open bench slot is judged, and ranked, on what the
   // extra body is worth to the team. Claims and waits keep the lineup gain:
   // they are priced in waiver priority, not in a slot.
@@ -484,7 +510,7 @@ export function planOne(
   // 2026-09-30 cleared zero, down to an 83-point back worth 0.1.
   const depthFloor = DEPTH_POSITIONS.has(incoming.position) ? cfg.openSlotMinPts : 0;
   const move = (kind: MoveKind, priorityWorthy: boolean, reason: string): WaiverMove =>
-    ({ ...base, kind, drop, dropPath: path, irStash, gainPts: gain, benchGainPts: benchGain, startsForUs: starts, priorityWorthy, byeCredit, depthPts,
+    ({ ...base, kind, drop, dropPath: path, irStash, owedSlot: !!best.owed, gainPts: gain, benchGainPts: benchGain, startsForUs: starts, priorityWorthy, byeCredit, depthPts,
       score: costless ? depthPts : Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
 
   // A move that would LOWER our starting lineup is never made, whatever the raw
@@ -510,7 +536,7 @@ export function planOne(
         ? `free agent and a bench slot is open, but he adds only ${depthPts} to the team over the season (needs ${cfg.openSlotMinPts}): no week he would start, nobody he would cover`
         : `free agent and a bench slot is open, but a second ${incoming.position} is not depth and he lifts the lineup just +${gain} ROS (needs ${cfg.freeAddMarginPts})`);
     }
-    const how = drop ? `drop ${drop}` : path === "ir-stash" ? best.reason : "open bench slot, no drop";
+    const how = drop ? `drop ${drop}` : path === "ir-stash" || best.owed ? best.reason : "open bench slot, no drop";
     const why = starts ? `; starts for us (+${gain} ROS)` : benchUpgrade ? `; bench upgrade +${benchGain} ROS (${(benchGain / weeks).toFixed(1)}/week)` : `; +${depthPts} to the team over the season (bye weeks and cover)`;
     return move("free-add", false, `free agent, costless — ${how}${why}`);
   }
@@ -521,7 +547,9 @@ export function planOne(
   const startsOk = starts || !cfg.claimMustStart;
   const benchClaim = drop !== null && benchGain >= claimSwapBar && benchPerGame >= cfg.benchClaimMarginPerWeek;
   if ((bigEnough && startsOk) || benchClaim) {
-    const how = drop ? `drop ${drop}` : "no drop";
+    // Name the stash: "no drop" on a full roster reads as a free move, and
+    // the executor has to park him before it files (act/claim-exec.ts).
+    const how = drop ? `drop ${drop}` : path === "ir-stash" || best.owed ? best.reason : "no drop";
     const why = bigEnough && startsOk ? `+${gain} ROS to the lineup${starts ? " (he starts)" : ""}` : `bench upgrade +${benchGain} ROS (${(benchGain / weeks).toFixed(1)}/week)`;
     return move("waiver-claim", true, `worth a priority burn: ${why} — ${how}`);
   }

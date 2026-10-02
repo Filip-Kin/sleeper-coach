@@ -101,8 +101,12 @@ t("a non-upgrade is skipped", m5.kind === "skip", `${m5.kind} (${m5.reason})`);
 //    Adding a cleared player should stash the injured player on IR (no drop)
 //    rather than cut anyone. Breece Hall is IR-eligible.
 const withIr: RosterState = { roster, openBenchSlots: 0, openIrSlots: 1, startingSlots: SLOTS };
-const m6 = planOne(avail("Depth WR", "WR", 175, false), withIr, DEFAULT_WAIVERS);
-t("open IR slot stashes the injured incumbent instead of dropping", m6.dropPath === "ir-stash" && m6.drop === null, `${m6.dropPath}/${m6.drop}`);
+//    Since 2026-10-02 only for an add the LINEUP justifies: a bench upgrade
+//    is a swap with the body he beats, never a stash (claim-stash.test.ts).
+const m6 = planOne(avail("Star WR", "WR", 400, false), withIr, DEFAULT_WAIVERS);
+t("open IR slot stashes the injured incumbent instead of dropping, for an add who starts", m6.dropPath === "ir-stash" && m6.drop === null && m6.startsForUs, `${m6.dropPath}/${m6.drop}`);
+const m6b = planOne(avail("Depth WR", "WR", 175, false), withIr, DEFAULT_WAIVERS);
+t("a bench upgrade never goes through the stash", m6b.dropPath !== "ir-stash" && m6b.irStash === null, `${m6b.kind}/${m6b.dropPath}/${m6b.drop}`);
 
 // 7. Only ONE claim per cycle: planWaivers ranks free-adds first, then the best
 //    claim, and bestClaim returns exactly one (or none). Going to the back of
@@ -230,8 +234,11 @@ const stashState: RosterState = {
   irEligible: (x?: string | null) => ["IR", "OUT", "SUS", "COV", "PUP"].includes((x ?? "").trim().toUpperCase()),
   startingSlots: SMALL,
 };
+// Since 2026-10-02 the stash is for an add who lifts the SEASON lineup with
+// the hurt man counted in it (his points already price the weeks he misses):
+// 240 behind a 250-point starter was a bench upgrade dressed as a starter.
 const stashMove = planOne(
-  { name: "Good Add", position: "WR", points: 240, onWaivers: false },
+  { name: "Good Add", position: "WR", points: 300, onWaivers: false },
   stashState, DEFAULT_WAIVERS, new Set(),
 );
 t("ir-stash path is chosen when the roster is full and IR is open", stashMove.dropPath === "ir-stash", stashMove.dropPath);

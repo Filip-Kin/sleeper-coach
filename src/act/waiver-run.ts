@@ -43,10 +43,12 @@ import { byeWeek } from "../data/byes.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
-import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE } from "../sleeper/rules.ts";
+import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE, reserveWritable } from "../sleeper/rules.ts";
 import { overlayRosterStatus, cachedTeamKickoffs } from "./lineup-guard.ts";
 import { pendingClaimPlayers, withoutPendingAdds, railsWithPendingDrops } from "./pending-claims.ts";
 import { droppedAtFromTransactions, onWaiversNow } from "./waiver-status.ts";
+import { fileClaim, moveCost } from "./claim-exec.ts";
+import { weekGames } from "../blog/auto.ts";
 
 const MAX_CANDIDATES = 40; // consider the top-40 available by ROS; the tail is noise
 
@@ -225,6 +227,8 @@ async function main(): Promise<void> {
   const rosterState: RosterState = {
     roster,
     openBenchSlots: Math.max(0, slots.length + benchCap - activePlayers - pending.slotsNeeded),
+    // A slot open only because one of ours sits on IR is his (waivers.ts).
+    owedBenchSlots: onReserve,
     openIrSlots,
     startingSlots: slots,
     irEligible,
@@ -302,7 +306,7 @@ async function main(): Promise<void> {
     const worth = m.kind === "free-add" && !m.drop && m.depthPts > 0 ? `team +${m.depthPts}` : `bench ${m.benchGainPts >= 0 ? "+" : ""}${m.benchGainPts} ROS`;
     console.log(`  [${m.kind}] ${m.add} (${m.position}, lineup +${m.gainPts}, ${worth})${drop}${bye} — ${m.reason}`);
   }
-  console.log(`  single best claim: ${claim ? `${claim.add} (lineup +${claim.gainPts}, bench +${claim.benchGainPts} ROS)` : "none worth a priority burn"}`);
+  console.log(`  single best claim: ${claim ? `${claim.add} (lineup +${claim.gainPts}, bench +${claim.benchGainPts} ROS${claim.drop ? `, drop ${claim.drop}` : claim.irStash ? `, ${claim.irStash} to IR first` : ""})` : "none worth a priority burn"}`);
 
   // Say what it is WATCHING, not only what it did. Filip had to ask repeatedly on
   // draft night what the engine was about to do; a run that declines to act must
@@ -339,7 +343,7 @@ async function main(): Promise<void> {
   logEvent("coach", live ? "waiver-run" : "waiver-shadow", `Week ${week} waivers: ${freeAdds.length} free adds, ${claim ? "1 claim" : "no claim"}${live ? "" : " (shadow)"}${byeCrunch.length ? `; watching week ${byeCrunch.map((b) => b.week).join("/")} bye` : ""}${irOpps.length ? `; ${irOpps.length} IR opportunity` : ""}`, {
     week, leagueId, shadow: !live,
     freeAdds: freeAdds.map((m) => ({ add: m.add, drop: m.drop, stash: m.irStash, gain: m.gainPts, benchGain: m.benchGainPts, depth: m.depthPts })),
-    claim: claim ? { add: claim.add, drop: claim.drop, gain: claim.gainPts, benchGain: claim.benchGainPts } : null,
+    claim: claim ? { add: claim.add, drop: claim.drop, stash: claim.irStash, gain: claim.gainPts, benchGain: claim.benchGainPts } : null,
     byeCrunch: byeCrunch.map((b) => ({ week: b.week, starters: b.count, names: b.names })),
     irOpportunities: irOpps.map((o) => ({ name: o.name, status: o.injuryStatus, isStash: o.isStash })),
     stream: stream ? { add: stream.add, drop: stream.drop, position: stream.position, forWeek: stream.forWeek, how: stream.how, via: stream.onWaivers ? "claim" : "free-add" } : null,
@@ -420,6 +424,9 @@ async function main(): Promise<void> {
   // worth more than any marginal ROS upgrade. A stream claim takes the single
   // per-cycle claim; a stream free-add costs no priority.
   let claimUsed = false;
+  // A no-drop add landed this run: the slot the plan saw is gone, so a claim
+  // planned into it (or through the same stash) is stale. The next run plans again.
+  let slotTaken = false;
   // Only a run that can perform the stream may confirm it. confirmed()
   // consumes the recorded intent when it says go, so a claims-only run
   // confirming a free add (or the reverse) used the intent up and wrote
@@ -474,11 +481,60 @@ async function main(): Promise<void> {
     if (current.includes(id)) return true; // already there
     const back = await updateReserve(gql, [...current, id], rosterId, leagueId);
     if (!back.includes(id)) throw new Error(`read-back has ${JSON.stringify(back)}`);
+    stashedThisRun = id;
     console.log(`  moved ${name} to IR, freeing an active slot`);
     logEvent("coach", "ir-stash", `Moved ${name} to injured reserve, freeing an active slot.`, { week, leagueId, player: name, reserve: back });
     return true;
   };
-  const stashToIr = async (name: string): Promise<boolean> => {
+  // Sleeper refuses reserve writes while a game is in progress. Asked once,
+  // before the first write, so a routine Sunday is one "deferred" line and
+  // not a refused write logged as a failure. A failed read is not a lock:
+  // the write decides.
+  let lockChecked = false;
+  const reserveOpen = async (): Promise<boolean> => {
+    if (!lockChecked) {
+      lockChecked = true;
+      const games = await weekGames(week).catch(() => []);
+      if (games.length && !reserveWritable(games)) {
+        stashLocked = true;
+        console.log("  IR is locked while this week's games are in progress; IR moves wait for a later run");
+        logEvent("coach", "ir-stash-deferred", "IR moves wait: Sleeper locks reserve while a game is in progress.", { week, leagueId });
+      }
+    }
+    return !stashLocked;
+  };
+  // The id this run moved to IR, so a refused add or claim can put him back.
+  let stashedThisRun: string | null = null;
+  const undoStash = async (why: string): Promise<void> => {
+    const id = stashedThisRun;
+    if (!id) return;
+    try {
+      const mine = (await leagueRosters(leagueId)).find((r) => r.roster_id === rosterId);
+      if (!mine) throw new Error("our roster is not in the live read");
+      // Only into a slot that is really empty. If the add landed after all
+      // (an error after the write), putting him back makes seventeen active
+      // and the over-cap path cuts somebody.
+      const fresh = buildRosterView(mine);
+      const held = (await pendingClaimPlayers(gql, week, rosterId, leagueId).catch(() => ({ adds: [], drops: [], slotsNeeded: 1 }))).slotsNeeded;
+      if (!fresh.reserveIds.has(id)) { stashedThisRun = null; return; }
+      if (fresh.active.length + held >= slots.length + benchCap) throw new Error(`no empty active slot (${fresh.active.length} active, ${held} held)`);
+      const back = await updateReserve(gql, (mine.reserve ?? []).filter((x) => x !== id), rosterId, leagueId);
+      if (back.includes(id)) throw new Error(`read-back has ${JSON.stringify(back)}`);
+      stashedThisRun = null;
+      console.log(`  moved ${nameOf.get(id) ?? id} back off IR (${why})`);
+      logEvent("coach", "ir-unstash", `Moved ${nameOf.get(id) ?? id} back to the active roster: ${why}.`, { week, leagueId, player: id, reserve: back });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // He stays on IR with his slot empty. The planner does not fill it
+      // (owedBenchSlots), so nothing follows from this but a thin bench.
+      console.error(`  could not move ${nameOf.get(id) ?? id} back off IR: ${msg}`);
+      logEvent("coach", "ir-unstash-failed", `Could not move ${nameOf.get(id) ?? id} back off IR (${why}): ${msg}`, { week, leagueId, player: id });
+    }
+  };
+  // `allowNext` false = exactly this player or nobody (a claim's two looks
+  // confirmed him by name).
+  const stashToIr = async (name: string, allowNext = true): Promise<boolean> => {
+    if (!(await reserveOpen())) return false;
     if (stashLocked || stashRefusedNames.has(name)) return false;
     try {
       return await stashOnce(name);
@@ -494,7 +550,7 @@ async function main(): Promise<void> {
       stashRefusedNames.add(name);
       if (live) await sendAlert("IR move failed", `Week ${week}: ${name} could not be moved to IR. ${msg}`);
       const next = stashRanked.find((n) => n !== name && !stashRefusedNames.has(n));
-      if (next && !retried) {
+      if (allowNext && next && !retried) {
         retried = true;
         console.log(`  trying the next IR candidate: ${next}`);
         return stashToIr(next);
@@ -508,17 +564,18 @@ async function main(): Promise<void> {
   // just because its own record aged: the second look must agree with the
   // first about what the best move is.
   for (const m of (doAdds ? freeAdds : []).slice(0, 1)) {
-    if (!confirmed("add", m.add, m.drop ?? (m.irStash ? `stash ${m.irStash}` : null))) break;
+    if (!confirmed("add", m.add, moveCost(m))) break;
     try {
       if (m.dropPath === "ir-stash" && m.irStash && !(await stashToIr(m.irStash))) {
-        // No slot was freed, so the add cannot land. Try the next candidate
-        // rather than throwing: a failed IR move is not a failed waiver run.
+        // No slot was freed, so the add cannot land. Not an error: a failed
+        // IR move is not a failed waiver run.
         continue;
       }
       let res: { transactionId: string; status: string };
       let via: "free-add" | "claim" = "free-add";
       try {
         res = await addFreeAgent(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);
+        stashedThisRun = null; // the add landed in his slot: nothing to undo from here on
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // From Sunday kickoff until the waiver run clears, every unrostered
@@ -533,6 +590,7 @@ async function main(): Promise<void> {
           // job owns that. Everyone else in the list is on waivers too.
           console.log(`  ${m.add} is on waivers; free adds are closed until the waiver run clears. Left for the claim job.`);
           logEvent("coach", "waiver-window", `Free adds closed (waiver window); ${m.add} left for the claim job.`, { week, leagueId, add: m.add });
+          await undoStash(`${m.add} is on waivers and was not added`);
           break;
         }
         // A claim costs our waiver position, so the move must be one the
@@ -543,12 +601,15 @@ async function main(): Promise<void> {
         if (!incoming || !claimFallbackAllowed(m, incoming, rosterState, waiverCfg, crowdedByes)) {
           console.log(`  ${m.add} is on waivers and not worth a claim; waiting for him to clear.`);
           logEvent("coach", "waiver-window", `${m.add} is on waivers; the move is not worth our waiver position, waiting for him to clear.`, { week, leagueId, add: m.add, drop: m.drop });
+          await undoStash(`${m.add} is on waivers and was not added`);
           break;
         }
         res = await submitWaiverClaim(gql, resolve(m.add), m.drop ? resolve(m.drop) : null);
+        stashedThisRun = null; // the claim holds his slot
         via = "claim";
         claimUsed = true;
       }
+      if (!m.drop) slotTaken = true;
       console.log(`  ${via === "claim" ? "claimed (was on waivers)" : "added"} ${m.add}${m.drop ? ` (dropping ${m.drop})` : ""} [${res.status}]`);
       logEvent("coach", via === "claim" ? "waiver-claim" : "waiver-add", `${via === "claim" ? "Claimed" : "Added free agent"} ${m.add}${m.drop ? `, dropping ${m.drop}` : ""}.`, {
         week, leagueId, add: m.add, drop: m.drop, transaction_id: res.transactionId, status: res.status, via,
@@ -566,20 +627,39 @@ async function main(): Promise<void> {
         break;
       }
       logEvent("coach", "waiver-add-failed", `Free-agent add ${m.add} failed: ${msg}`, { week, leagueId, add: m.add });
+      await undoStash(`the add of ${m.add} failed`);
       if (live) await sendAlert("Free-agent add failed", `Week ${week}: ${m.add} — ${msg}`);
       throw err;
     }
   }
 
-  if (claim && doClaims && !claimUsed && confirmed("claim", claim.add, claim.drop)) {
+  if (claim && doClaims && !claimUsed && !(slotTaken && !claim.drop)) {
     try {
-      const res = await submitWaiverClaim(gql, resolve(claim.add), claim.drop ? resolve(claim.drop) : null);
-      console.log(`  claimed ${claim.add}${claim.drop ? ` (dropping ${claim.drop})` : ""} [${res.status}]`);
-      logEvent("coach", "waiver-claim", `Submitted waiver claim for ${claim.add}${claim.drop ? `, dropping ${claim.drop}` : ""} (lineup +${claim.gainPts}, bench +${claim.benchGainPts} ROS).`, {
-        week, leagueId, add: claim.add, drop: claim.drop, gainPts: claim.gainPts, benchGainPts: claim.benchGainPts,
-        transaction_id: res.transactionId, status: res.status,
+      // A claim through an IR slot parks the injured player first, and that
+      // costs a look like any drop (claim-exec.ts). Before 2026-10-02 such a
+      // claim was filed with no drop into a full roster.
+      const out = await fileClaim(claim, {
+        // One stash claim at a time: a second would park a second player (the
+        // day-to-day one) while the first claim still holds the freed slot.
+        stashReady: async () => pending.adds.length === 0 && (await reserveOpen()),
+        confirmed,
+        stash: (name) => stashToIr(name, false),
+        submit: (add, drop) => submitWaiverClaim(gql, resolve(add), drop ? resolve(drop) : null),
+        undoStash: () => undoStash(`the claim for ${claim.add} was refused`),
       });
-      intents.settle("waiver:", "", nowMs2);
+      if (out.status === "held") {
+        const why = pending.adds.length ? "another claim of ours is pending" : stashLocked ? "IR is locked while a game is in progress" : `${claim.irStash ?? "nobody"} could not be moved to IR`;
+        console.log(`  claim ${claim.add}: not filed (${why})`);
+        logEvent("coach", "waiver-claim-held", `Claim for ${claim.add} not filed: ${why}. The next waiver run plans it again.`, { week, leagueId, add: claim.add, stash: claim.irStash });
+      } else if (out.status === "filed") {
+        const cost = claim.drop ? ` (dropping ${claim.drop})` : claim.irStash ? ` (${claim.irStash} moved to IR, no drop)` : "";
+        console.log(`  claimed ${claim.add}${cost} [${out.submitStatus}]`);
+        logEvent("coach", "waiver-claim", `Submitted waiver claim for ${claim.add}${claim.drop ? `, dropping ${claim.drop}` : claim.irStash ? `, ${claim.irStash} moved to IR` : ""} (lineup +${claim.gainPts}, bench +${claim.benchGainPts} ROS).`, {
+          week, leagueId, add: claim.add, drop: claim.drop, stash: claim.irStash, gainPts: claim.gainPts, benchGainPts: claim.benchGainPts,
+          transaction_id: out.transactionId, status: out.submitStatus,
+        });
+        intents.settle("waiver:", "", nowMs2);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof DropRefused) {
