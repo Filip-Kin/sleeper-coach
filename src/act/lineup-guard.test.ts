@@ -240,3 +240,126 @@ describe("a player who already played is never benched by a later solve", () => 
     expect(plan.changed).toBe(false);
   });
 });
+
+// 2026-10-04, week 4. Washington played in London at 09:30 ET. Mike Evans
+// (Questionable, ribs) played at 16:25 ET, and the 49ers' inactives were due
+// at about 14:55. Every bench player who could take his slot kicked off before
+// that, so a late scratch would have scored zero with nobody left to bring in.
+// The guard had Evans (14.0) over Croskey-Merritt (13.3) and the review moved
+// it by hand eleven minutes before the London kickoff.
+describe("a Questionable starter whose replacements lock before his inactives are known", () => {
+  const SLOTS = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "K", "DEF"];
+  const T = (iso: string) => Date.parse(iso);
+  const LONDON = T("2026-10-04T13:30:00Z"), EARLY = T("2026-10-04T17:00:00Z"), LATE = T("2026-10-04T20:25:00Z");
+  const kickoffs = new Map<string, number>([
+    ["WAS", LONDON], ["IND", LONDON], ["DAL", EARLY], ["KC", LATE], ["SF", LATE], ["HOU", EARLY], ["PHI", EARLY],
+    ["DET", T("2026-10-05T00:20:00Z")], ["CIN", EARLY], ["BAL", EARLY], ["SEA", LATE],
+  ]);
+  const week4 = (evans = 14.04, evansStatus: string | null = "Questionable") => [
+    P("dak", "QB", 18.3, null, { team: "DAL" }), P("hurts", "QB", 16.56, null, { team: "PHI" }),
+    P("walker", "RB", 19.9, null, { team: "KC" }), P("cmc", "RB", 18.8, null, { team: "SF" }),
+    P("brown", "RB", 17.4, null, { team: "CIN" }), P("jcm", "RB", 13.32, null, { team: "WAS" }),
+    P("collins", "WR", 18.6, null, { team: "HOU" }), P("evans", "WR", evans, evansStatus, { team: "SF" }),
+    P("downs", "WR", 13.84, null, { team: "IND" }), P("smith", "WR", 12, "Out", { team: "PHI" }),
+    P("laporta", "TE", 11.3, null, { team: "DET" }), P("andrews", "TE", 9.77, null, { team: "BAL" }),
+    P("bates", "K", 7.7, null, { team: "DET" }), P("SEA", "DEF", 8.8, null, { team: "SEA" }),
+  ];
+  const CURRENT = ["dak", "walker", "cmc", "collins", "evans", "laporta", "brown", "downs", "bates", "SEA"];
+  const at = (iso: string) => ({ kickoffs, now: T(iso) });
+
+  test("without kickoff knowledge the plan is the old one: Evans starts", () => {
+    expect(planLineup(CURRENT, week4(), SLOTS, new Set()).changed).toBe(false);
+  });
+  test("twenty minutes before the London kickoff, Croskey-Merritt takes the slot", () => {
+    const plan = planLineup(CURRENT, week4(), SLOTS, new Set(), 1, at("2026-10-04T13:10:00Z"));
+    expect(plan.changed).toBe(true);
+    expect(plan.ids).toContain("jcm");
+    expect(plan.ids).not.toContain("evans");
+    expect(plan.ids.filter((id) => id !== "0").length).toBe(10);
+    expect(plan.swaps.some((s) => /Questionable/.test(s.why))).toBe(true);
+  });
+  test("the next poll leaves that lineup alone", () => {
+    const first = planLineup(CURRENT, week4(), SLOTS, new Set(), 1, at("2026-10-04T13:10:00Z"));
+    expect(planLineup(first.ids, week4(), SLOTS, new Set(), 1, at("2026-10-04T13:12:00Z")).changed).toBe(false);
+  });
+  test("after the lock it stays, and Evans cleared does not undo it", () => {
+    const first = planLineup(CURRENT, week4(), SLOTS, new Set(), 1, at("2026-10-04T13:10:00Z"));
+    const locked = new Set(["jcm", "downs"]);
+    expect(planLineup(first.ids, week4(14.04, null), SLOTS, locked, 1, at("2026-10-04T13:40:00Z")).changed).toBe(false);
+  });
+  test("hours before anything locks, nothing is decided yet", () => {
+    expect(planLineup(CURRENT, week4(), SLOTS, new Set(), 1, at("2026-10-04T11:00:00Z")).changed).toBe(false);
+  });
+  test("a healthy Evans is not touched", () => {
+    expect(planLineup(CURRENT, week4(14.04, null), SLOTS, new Set(), 1, at("2026-10-04T13:10:00Z")).changed).toBe(false);
+  });
+  test("a Questionable star still starts over a much weaker early body", () => {
+    expect(planLineup(CURRENT, week4(20), SLOTS, new Set(), 1, at("2026-10-04T13:10:00Z")).changed).toBe(false);
+  });
+  test("a replacement who is still unlocked when the inactives land is the hedge, so Evans starts", () => {
+    const late = new Map(kickoffs); late.set("WAS", LATE); late.set("IND", LATE);
+    // Nothing locks in the next half hour, and Croskey-Merritt is there at 14:55.
+    expect(planLineup(CURRENT, week4(), SLOTS, new Set(), 1, { kickoffs: late, now: T("2026-10-04T16:40:00Z") }).changed).toBe(false);
+  });
+  test("a later fallback counts toward his expected score", () => {
+    // Andrews (9.77) in the late window: 0.75 x 14.04 + 0.25 x 9.77 + 1 = 13.97, over 13.32.
+    const k = new Map(kickoffs); k.set("BAL", LATE);
+    const plan = planLineup(CURRENT, week4(), SLOTS, new Set(), 1, { kickoffs: k, now: T("2026-10-04T13:10:00Z") });
+    // Same ten starters, and no write that only trades the WR and FLEX seats.
+    expect(plan.changed).toBe(false);
+    expect(plan.ids).toEqual(CURRENT);
+  });
+  // Reviewer's replay: LaPorta Questionable on Sunday night, Andrews at 13:00.
+  // Croskey-Merritt's London lock decides nothing about the TE seat, and the
+  // first version benched LaPorta at 09:00, put him back at 09:30 and benched
+  // him again at 12:30.
+  test("a lock that cannot take his seat decides nothing; only the locking player may come in", () => {
+    const rs = () => week4(14.04, null).map((p) => (p.playerId === "laporta" ? { ...p, injuryStatus: "Questionable" } : p));
+    let cur = CURRENT, writes = 0;
+    for (let t = T("2026-10-04T12:00:00Z"); t <= T("2026-10-04T16:45:00Z"); t += 90_000) {
+      const locked = lockedPlayerIds(rs() as never, kickoffs, t);
+      const plan = planLineup(cur, rs(), SLOTS, locked, 1, { kickoffs, now: t });
+      if (plan.changed) { writes++; cur = plan.ids; }
+      if (t < T("2026-10-04T16:30:00Z")) expect(cur).toContain("laporta");
+    }
+    // One decision, in Andrews's own window, and it holds.
+    expect(writes).toBe(1);
+    expect(cur).toContain("andrews");
+  });
+  test("polled across the whole day, the Evans decision is one write", () => {
+    let cur = CURRENT, writes = 0;
+    for (let t = T("2026-10-04T12:00:00Z"); t <= T("2026-10-04T20:20:00Z"); t += 90_000) {
+      const plan = planLineup(cur, week4(), SLOTS, lockedPlayerIds(week4() as never, kickoffs, t), 1, { kickoffs, now: t });
+      if (plan.changed) { writes++; cur = plan.ids; }
+    }
+    expect(writes).toBe(1);
+    expect(cur).toContain("jcm");
+  });
+  test("a Questionable replacement is not a hedge for a Questionable starter", () => {
+    const slots = ["WR"];
+    const k = new Map([["AAA", LATE], ["BBB", EARLY], ["CCC", LONDON]]);
+    const rs = [P("x", "WR", 14, "Questionable", { team: "AAA" }), P("y", "WR", 12, "Questionable", { team: "BBB" }), P("e", "WR", 9, null, { team: "CCC" })];
+    const plan = planLineup(["x"], rs, slots, new Set(), 1, { kickoffs: k, now: T("2026-10-04T13:10:00Z") });
+    expect(plan.ids).not.toContain("y");
+  });
+  test("a stale Questionable on the projection row does not hedge a player the live roster calls healthy", () => {
+    const plan = planLineup(CURRENT, week4(), SLOTS, new Set(), 1, { ...at("2026-10-04T13:10:00Z"), questionable: new Set<string>() });
+    expect(plan.changed).toBe(false);
+  });
+  test("with no later fallback the same numbers bench him", () => {
+    const plan = planLineup(CURRENT, week4(), SLOTS, new Set(), 1, at("2026-10-04T13:10:00Z"));
+    expect(plan.swaps.map((s) => s.why).join(" ")).toContain("expected 10.5");
+  });
+  test("same kickoff window: the guard can still react to the inactives, so no hedge", () => {
+    const k = new Map(kickoffs); k.set("SF", LONDON);
+    expect(planLineup(CURRENT, week4(), SLOTS, new Set(), 1, { kickoffs: k, now: T("2026-10-04T13:10:00Z") }).changed).toBe(false);
+  });
+  test("a Thursday body is not started over a player Questionable for Sunday", () => {
+    const k = new Map(kickoffs); k.set("WAS", T("2026-10-02T00:15:00Z")); k.set("IND", T("2026-10-02T00:15:00Z"));
+    expect(planLineup(CURRENT, week4(), SLOTS, new Set(), 1, { kickoffs: k, now: T("2026-10-02T00:00:00Z") }).changed).toBe(false);
+  });
+  test("a Questionable player on the bench is not brought in at full value over a sure starter", () => {
+    const cur = ["dak", "walker", "cmc", "collins", "downs", "laporta", "brown", "jcm", "bates", "SEA"];
+    expect(planLineup(cur, week4(15.5), SLOTS, new Set(), 1, at("2026-10-04T13:10:00Z")).changed).toBe(false);
+  });
+});

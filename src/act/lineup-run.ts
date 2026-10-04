@@ -29,7 +29,7 @@ import { startingSlots, availabilityOf } from "../analysis/lineup.ts";
 import { assertWritesAllowed, freezeState } from "../killswitch.ts";
 import { tokenGql, updateStarters, currentStarters } from "../league/api.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
-import { overlayRosterStatus, lockedPlayerIds, cachedTeamKickoffs, planLineup } from "./lineup-guard.ts";
+import { overlayRosterStatus, lockedPlayerIds, cachedTeamKickoffs, planLineup, liveQuestionable } from "./lineup-guard.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert, sendAlertOnce } from "../alert.ts";
 
@@ -129,10 +129,13 @@ async function main(): Promise<void> {
   // leave the rest of the lineup unset. The 90-second guard has always pinned
   // them; the locks did not, which was the last asymmetry between the two
   // writers. planLineup also refuses to empty a slot the site has filled.
-  const locked = lockedPlayerIds(candidates, await cachedTeamKickoffs(week), Date.now());
+  const kickoffs = await cachedTeamKickoffs(week);
+  const locked = lockedPlayerIds(candidates, kickoffs, Date.now());
   // Plan from the week's matchup leg, which is what the app shows and scores.
   const onSite = await currentStarters(tokenGql(), week, mine.starters ?? [], rosterId, leagueId);
-  const plan = planLineup(onSite, candidates, slots, locked);
+  // Same plan the 90 s guard makes, late-game hedge included, or the two
+  // writers would undo each other inside the hedge window.
+  const plan = planLineup(onSite, candidates, slots, locked, undefined, { kickoffs, now: Date.now(), questionable: liveQuestionable(mine) });
   const byId = new Map(candidates.map((p) => [p.playerId, p]));
   const chosen = plan.ids.map((id) => byId.get(id) ?? null);
   const total = chosen.reduce((sum, p) => sum + (p?.points ?? 0), 0);

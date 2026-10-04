@@ -19,7 +19,7 @@
 // kickoff is treated as unlocked: the worst case is a write Sleeper refuses,
 // which the read-back catches and logs, never a wrong lineup.
 
-import { solveLineup, startingSlots, type LineupPlayer } from "../analysis/lineup.ts";
+import { solveLineup, startingSlots, availabilityOf, SLOT_ELIGIBILITY, type LineupPlayer } from "../analysis/lineup.ts";
 import { buildRosterWeek } from "../analysis/roster-week.ts";
 import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
 import { loadPlayers } from "../data/players.ts";
@@ -69,7 +69,82 @@ function canonical(ids: string[], slots: string[]): string {
  *  dropped, traded away, or parked on IR while still listed) is a phantom, and
  *  a phantom is an empty slot. He is replaced when a body exists and written
  *  empty when none does, because Sleeper is already scoring the slot as empty. */
-export function planLineup(current: string[], candidates: LineupPlayer[], slots: string[], locked: Set<string>, margin = SWAP_MARGIN): LineupPlan {
+/** The late-game hedge.
+ *
+ *  A Questionable starter is normally started: he usually plays, and when he
+ *  is ruled out the guard swaps him on the next poll. That stops being true
+ *  when every player who could take his slot kicks off BEFORE his inactives
+ *  are known. Then a scratch scores zero and nobody is left to bring in.
+ *  2026-10-04: Evans (Questionable, 16:25 ET) over Croskey-Merritt (London,
+ *  09:30 ET) on 14.0 against 13.3, with the whole bench locked by 13:00.
+ *
+ *  So, in the last half hour before a bench alternative locks, a Questionable
+ *  player whose own inactives come after that lock is valued at what he is
+ *  expected to score: Q_PLAY_PROB of his projection, plus the rest of the time
+ *  the best replacement that will still be unlocked when his inactives land
+ *  (zero when there is none). Nothing else changes: with a later replacement
+ *  available the expected score is at least the replacement's, so the player
+ *  with the higher projection still starts, and outside the window, or with
+ *  no kickoff table, the plan is the plain one. */
+export interface LateHedge {
+  kickoffs: Map<string, number>; now: number; pPlay?: number;
+  /** Ids the LIVE roster read flags Questionable. When given, only these are
+   *  hedged: a candidate's status can come from the projection row, which is
+   *  older than the roster's player_map. */
+  questionable?: Set<string>;
+}
+/** Share of Questionable players who play. Roughly three in four across the
+ *  league in recent seasons; the tag that reaches game day is the one that
+ *  survived the final injury report. */
+export const Q_PLAY_PROB = ((v) => (Number.isFinite(v) && v > 0 && v < 1 ? v : 0.75))(Number(process.env.LINEUP_Q_PLAY_PROB ?? "0.75"));
+/** Inactives are published 90 minutes before kickoff. */
+const INACTIVES_LEAD_MS = 90 * 60_000;
+/** Sleeper's status and our 90 s poll need time to turn an inactive list into
+ *  a swap; a replacement kicking off sooner than this after the list is not one. */
+const REACT_MS = 30 * 60_000;
+/** How long before an alternative locks the hedge is decided. Long enough for
+ *  twenty polls, short enough that the status is the game-day one. */
+const HEDGE_WINDOW_MS = 30 * 60_000;
+/** A Questionable tag this far from the player's own kickoff is a practice
+ *  report, not a game-time decision (Thursday's tag for a Sunday game). */
+const HEDGE_HORIZON_MS = 36 * 60 * 60_000;
+
+const isQuestionable = (p: LineupPlayer): boolean => (p.injuryStatus ?? "").trim().toUpperCase() === "QUESTIONABLE";
+function shareSlot(a: LineupPlayer, b: LineupPlayer, slotLabels: string[]): boolean {
+  return slotLabels.some((s) => SLOT_ELIGIBILITY[s]?.has(a.position) && SLOT_ELIGIBILITY[s]?.has(b.position));
+}
+
+/** Expected points for each Questionable player the hedge applies to, among
+ *  the players the first solve would start. `free` carries solver points;
+ *  `real` gives the projection. Pure. */
+function hedgedPoints(
+  starters: LineupPlayer[], bench: LineupPlayer[], real: Map<string, number>, slotLabels: string[], hedge: LateHedge,
+): Map<string, { points: number; before: string; forcing: string[] }> {
+  const out = new Map<string, { points: number; before: string; forcing: string[] }>();
+  const p = hedge.pPlay ?? Q_PLAY_PROB;
+  if (!(p >= 0 && p < 1)) return out;
+  const kick = (x: LineupPlayer): number | undefined => hedge.kickoffs.get((x as LineupPlayer & { team?: string }).team ?? "");
+  const playable = bench.filter((b) => availabilityOf(b).available && (real.get(b.playerId) ?? 0) > 0);
+  for (const q of starters) {
+    if (!isQuestionable(q) || (hedge.questionable && !hedge.questionable.has(q.playerId))) continue;
+    const kq = kick(q);
+    if (kq === undefined || kq <= hedge.now || kq - hedge.now > HEDGE_HORIZON_MS) continue;
+    const decided = kq - INACTIVES_LEAD_MS + REACT_MS; // when a scratch can first be acted on
+    const alts = playable.filter((b) => shareSlot(q, b, slotLabels));
+    // An alternative about to lock, before his status can be acted on.
+    const forcing = alts.filter((b) => { const kb = kick(b); return kb !== undefined && kb > hedge.now && kb - hedge.now <= HEDGE_WINDOW_MS && kb < decided; });
+    if (!forcing.length) continue;
+    // The best body still movable when the inactives land. No kickoff known = unlocked.
+    // Not another Questionable player: he is no cover.
+    const later = alts.filter((b) => !isQuestionable(b) && (kick(b) ?? Number.POSITIVE_INFINITY) >= decided).sort((a, b) => (real.get(b.playerId) ?? 0) - (real.get(a.playerId) ?? 0))[0];
+    const own = real.get(q.playerId) ?? 0;
+    const first = forcing.sort((a, b) => kick(a)! - kick(b)!)[0]!;
+    out.set(q.playerId, { points: p * own + (1 - p) * (later ? real.get(later.playerId) ?? 0 : 0), before: first.name, forcing: forcing.map((b) => b.playerId) });
+  }
+  return out;
+}
+
+export function planLineup(current: string[], candidates: LineupPlayer[], slots: string[], locked: Set<string>, margin = SWAP_MARGIN, hedge?: LateHedge): LineupPlan {
   const active = new Set(candidates.map((p) => p.playerId));
   const site = slots.map((_, i) => current[i] || "0");
   const cur = site.map((pid) => (pid !== "0" && !active.has(pid) ? "0" : pid));
@@ -89,7 +164,34 @@ export function planLineup(current: string[], candidates: LineupPlayer[], slots:
   const freeIdx = slots.map((_, i) => i).filter((i) => pinned[i] === null);
 
   // 2. Solve the slots that are still open with the players that can move.
-  const solved = solveLineup(free, freeIdx.map((i) => slots[i]!));
+  const freeSlots = freeIdx.map((i) => slots[i]!);
+  let solved = solveLineup(free, freeSlots);
+  // 2b. The late-game hedge (see LateHedge): re-solve with a Questionable
+  //     starter at his expected score when his replacements are about to lock.
+  //     The re-solve is kept only when it starts someone new and everyone it
+  //     brings in is a player about to lock. The hedge exists to decide about
+  //     HIM before he is gone; a replacement who kicks off later can wait for
+  //     his own window, and taking him now is undone the moment the locking
+  //     player locks (reviewer's replay: bench, restore, bench again). A
+  //     re-solve that only trades seats among the same starters is no decision.
+  const hedged = new Map<string, { points: number; before: string }>();
+  if (hedge) {
+    const real = new Map(candidates.map((p) => [p.playerId, p.points]));
+    const found = hedgedPoints(solved.starters, solved.bench, real, freeSlots, hedge);
+    if (found.size) {
+      const again = solveLineup(free.map((p) => {
+        const h = found.get(p.playerId);
+        return h ? { ...p, points: h.points + (margin > 0 && starting.has(p.playerId) ? margin : 0) } : p;
+      }), freeSlots);
+      const before = new Set(solved.starters.map((p) => p.playerId));
+      const incoming = again.starters.filter((p) => !before.has(p.playerId)).map((p) => p.playerId);
+      const mayComeIn = new Set([...found.values()].flatMap((h) => h.forcing));
+      if (incoming.length && incoming.every((id) => mayComeIn.has(id))) {
+        solved = again;
+        for (const [id, h] of found) hedged.set(id, h);
+      }
+    }
+  }
   const ids = cur.slice();
   const unfilled: string[] = [];
   freeIdx.forEach((slotI, k) => {
@@ -127,7 +229,10 @@ export function planLineup(current: string[], candidates: LineupPlayer[], slots:
     const out = outs[k] ?? "";
     const inn = ins[k] ?? "";
     const slot = slots[ids.indexOf(inn)] ?? slots[site.indexOf(out)] ?? "";
-    const reason = out ? why.get(out) ?? (active.has(out) ? "outscored" : "not on the active roster") : "open slot";
+    const h = out ? hedged.get(out) : undefined;
+    const reason = out
+      ? why.get(out) ?? (h ? `Questionable, expected ${h.points.toFixed(1)}; no replacement is left once ${h.before} locks` : active.has(out) ? "outscored" : "not on the active roster")
+      : "open slot";
     swaps.push({ slot, out: out ? label(out) : "(empty)", in: inn ? label(inn) : "(empty)", why: reason });
   }
   return { ids, changed: true, unfilled, swaps };
@@ -156,6 +261,11 @@ export function lockedPlayerIds(
   return new Set(
     candidates.filter((p) => (kickoffs.get(p.team) ?? Number.POSITIVE_INFINITY) <= now).map((p) => p.playerId),
   );
+}
+
+/** Ids the roster's live player_map flags Questionable. Pure. */
+export function liveQuestionable(roster: Pick<Roster, "player_map">): Set<string> {
+  return new Set(Object.entries(roster.player_map ?? {}).filter(([, m]) => (m?.injury_status ?? "").trim().toUpperCase() === "QUESTIONABLE").map(([id]) => id));
 }
 
 /** Lay the roster's live player_map (position, team, injury_status) over the
@@ -308,7 +418,7 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   // what the app shows too. The roster array can disagree with it (see
   // matchupLegStarters) and did on 2026-09-23.
   const onSite = await currentStarters(tokenGql(), week, mine.starters ?? []);
-  const plan = planLineup(onSite, candidates, slots, locked);
+  const plan = planLineup(onSite, candidates, slots, locked, SWAP_MARGIN, { kickoffs, now, questionable: liveQuestionable(mine) });
   if (!plan.changed) return plan;
 
   const key = plan.ids.join(",");
