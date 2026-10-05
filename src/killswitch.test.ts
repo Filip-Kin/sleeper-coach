@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach } from "bun:test";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
-import { freezeState, dropFreezeState, breakerState, assertWritesAllowed, dropFreezeNow, freezeNow, FREEZE_FILE, DROP_FREEZE_FILE } from "./killswitch.ts";
+import { freezeState, dropFreezeState, breakerState, assertWritesAllowed, dropFreezeNow, freezeNow, failureExitCode, resetWriteGateForTests, EXIT_BEFORE_WRITE, FREEZE_FILE, DROP_FREEZE_FILE } from "./killswitch.ts";
 
 // Two files, two scopes. 2026-09-30: the breaker wrote FREEZE and stopped the
 // lineup guard along with the drops, with the roster left illegal.
@@ -55,5 +55,25 @@ describe("kill switch scopes", () => {
     expect(breakerState().frozen).toBe(true);
     expect(dropFreezeState().reason).toBe(b.reason);
     rmSync(DROP_FREEZE_FILE); // later test files share the scratch state dir
+  });
+});
+
+// A job script tells the scheduler whether its failure came before any write
+// was attempted. Only that kind of failure is safe to repeat.
+describe("failure exit code", () => {
+  test("before the write gate: the repeatable code", () => {
+    resetWriteGateForTests();
+    expect(failureExitCode()).toBe(EXIT_BEFORE_WRITE);
+    expect(EXIT_BEFORE_WRITE).not.toBe(1);
+  });
+  test("once the gate was asked, allowed or not: a plain failure", () => {
+    resetWriteGateForTests();
+    assertWritesAllowed("set starters");
+    expect(failureExitCode()).toBe(1);
+    resetWriteGateForTests();
+    writeFileSync(FREEZE_FILE, "frozen by Filip\n");
+    expect(() => assertWritesAllowed("set starters")).toThrow(/FROZEN/);
+    expect(failureExitCode()).toBe(1);
+    rmSync(FREEZE_FILE);
   });
 });

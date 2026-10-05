@@ -26,7 +26,7 @@ import { loadPlayers } from "../data/players.ts";
 import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
 import { buildRosterWeek } from "../analysis/roster-week.ts";
 import { startingSlots, availabilityOf } from "../analysis/lineup.ts";
-import { assertWritesAllowed, freezeState } from "../killswitch.ts";
+import { assertWritesAllowed, freezeState, failureExitCode } from "../killswitch.ts";
 import { tokenGql, updateStarters, currentStarters } from "../league/api.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import { overlayRosterStatus, lockedPlayerIds, cachedTeamKickoffs, planLineup, liveQuestionable } from "./lineup-guard.ts";
@@ -214,6 +214,8 @@ if (import.meta.main) {
     .then(() => process.exit(0))
     .catch((err) => {
       console.error(`lineup-run failed: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
+      // Before the write gate nothing changed on the site, and the scheduler
+      // may run this again. After it, a plain failure.
+      process.exit(failureExitCode());
     });
 }

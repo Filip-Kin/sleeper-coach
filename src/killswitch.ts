@@ -80,10 +80,28 @@ export function dropFreezeState(): FreezeState {
   return breakerState();
 }
 
+// Has this process asked to write yet? Every write path asks the gate below
+// first, so "never asked" means the process is still in its read phase and
+// nothing on Sleeper has changed. A job script that dies there exits with
+// EXIT_BEFORE_WRITE, and the scheduler may run it again; a failure after the
+// gate keeps exit 1 and is never repeated (a half-applied roster write must
+// not be retried blind). 2026-10-04: inactive-sunday died on one 15 s read
+// timeout before SNF and the occurrence was simply lost.
+let writeGateReached = false;
+/** sysexits EX_TEMPFAIL. */
+export const EXIT_BEFORE_WRITE = 75;
+export function failureExitCode(): number {
+  return writeGateReached ? 1 : EXIT_BEFORE_WRITE;
+}
+export function resetWriteGateForTests(): void {
+  writeGateReached = false;
+}
+
 // Throw if writes are currently disabled. Call this at the top of every write
 // path, before any browser navigation, so a frozen coach stops loudly and early
 // rather than part-way through a DOM mutation.
 export function assertWritesAllowed(action: string): void {
+  writeGateReached = true;
   const s = freezeState();
   if (s.frozen) {
     throw new Error(`writes are FROZEN (${s.reason}); refusing to ${action}. Remove the freeze to re-enable.`);

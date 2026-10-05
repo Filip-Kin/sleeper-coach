@@ -40,7 +40,7 @@ import {
 } from "../analysis/waivers.ts";
 import type { RailPlayer } from "../analysis/rails.ts";
 import { byeWeek } from "../data/byes.ts";
-import { assertWritesAllowed, freezeState } from "../killswitch.ts";
+import { assertWritesAllowed, freezeState, failureExitCode } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE, reserveWritable } from "../sleeper/rules.ts";
@@ -677,5 +677,7 @@ main()
   .then(() => process.exit(0))
   .catch((err) => {
     console.error(`waiver-run failed: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
+    // Before the write gate nothing changed on the site, and the scheduler
+    // may run this again. After it, a plain failure.
+    process.exit(failureExitCode());
   });

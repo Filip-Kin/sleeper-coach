@@ -22,7 +22,7 @@ import { reconcileReserve } from "./act/reserve-reconcile.ts";
 import { DropIntentStore, decideIntent } from "./act/drop-intent.ts";
 import { pendingClaimPlayers, railsWithPendingDrops } from "./act/pending-claims.ts";
 import { RunLedger } from "./act/run-ledger.ts";
-import { runJobProcess, JOB_TIMEOUT_MS } from "./act/spawn-job.ts";
+import { runJobProcess, runJobWithRetry, JOB_TIMEOUT_MS } from "./act/spawn-job.ts";
 import { reactToDropsCore } from "./act/drop-react.ts";
 import { maybePublishWeekly } from "./blog/auto.ts";
 import { allPosts } from "./blog/store.ts";
@@ -193,6 +193,10 @@ const JOB_COMMAND: Record<string, string[]> = {
   "alert-digest": ["bun", "run", "scripts/alert-digest.ts"],
 };
 
+const JOB_RETRIES = 2;
+const JOB_RETRY_WAIT_MS = 20_000;
+const JOB_RETRY_MAX_FAIL_SECS = 60;
+
 async function runJob(job: Job, occurrence: number): Promise<void> {
   const cmd = JOB_COMMAND[job.name];
   if (!cmd) {
@@ -213,7 +217,15 @@ async function runJob(job: Job, occurrence: number): Promise<void> {
   // Recorded as handled BEFORE the spawn. A redeploy that kills the container
   // mid-run must not re-run a half-applied roster write on the next boot.
   runs.markStarted(job.name, occurrence);
-  const r = await runJobProcess(cmd, { cwd: process.cwd(), timeoutMs: JOB_TIMEOUT_MS });
+  // One read timeout used to cost the whole occurrence. A run that failed
+  // before it attempted any write (see runJobWithRetry) gets two more tries.
+  const r = await runJobWithRetry(cmd, { cwd: process.cwd(), timeoutMs: JOB_TIMEOUT_MS }, {
+    retries: JOB_RETRIES, waitMs: JOB_RETRY_WAIT_MS, maxFailSecs: JOB_RETRY_MAX_FAIL_SECS,
+    onRetry: (failed, attempt) => {
+      console.error(`[schedule] ${job.name} failed before any write (attempt ${attempt}): ${failed.err.trim().slice(0, 300)}; running it again`);
+      logEvent("coach", "schedule-retry", `${job.name} failed before any write; running it again.`, { job: job.name, attempt, stderr: failed.err.trim().slice(0, 600) });
+    },
+  });
   const secs = r.secs.toFixed(1);
   console.log(r.out.trim().split("\n").slice(-25).join("\n"));
   if (r.timedOut) {
