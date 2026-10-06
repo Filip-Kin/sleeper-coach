@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { toRoster, toNflState, toLeague, withRestFallback } from "./graphql.ts";
+import { toRoster, toNflState, toLeague, withRestFallback, toScheduleGame } from "./graphql.ts";
 
 describe("mappers", () => {
   test("toRoster keeps the REST shape and adds player_map", () => {
@@ -26,6 +26,24 @@ describe("mappers", () => {
     expect(l.roster_positions).toEqual(["QB", "BN"]);
     expect(l.scoring_settings.rec).toBe(1);
     expect(l.settings.playoff_week_start).toBe(15);
+  });
+});
+
+describe("schedule rows", () => {
+  test("a scores row becomes a game with both teams and the kickoff", () => {
+    // Shape read from the live feed on 2026-10-06 (week 4, DEN at SF).
+    const g = toScheduleGame({ game_id: "202610431", status: "complete", start_time: 1791145500000, metadata: { away_team: "DEN", home_team: "SF", away_score: 20 } });
+    expect(g).toEqual({ gameId: "202610431", away: "DEN", home: "SF", startTime: 1791145500000, status: "complete" });
+  });
+  test("a canceled row is dropped: SEA@DAL, week 6, must not kick Dallas off on Thursday", () => {
+    expect(toScheduleGame({ game_id: "202610609", status: "canceled", start_time: 1792109700000, metadata: { away_team: "SEA", home_team: "DAL", canceled: false } })).toBeNull();
+    expect(toScheduleGame({ game_id: "202610612", status: "pre_game", start_time: 1792369200000, metadata: { away_team: "DAL", home_team: "GB" } })?.away).toBe("DAL");
+  });
+  test("a row with no teams or no kickoff is dropped, not half read", () => {
+    expect(toScheduleGame({ game_id: "x", start_time: 5, metadata: {} })).toBeNull();
+    expect(toScheduleGame({ game_id: "x", start_time: 0, metadata: { away_team: "DEN", home_team: "SF" } })).toBeNull();
+    expect(toScheduleGame({ game_id: "x", start_time: 5, metadata: null })).toBeNull();
+    expect(toScheduleGame({ game_id: "x", start_time: "soon", metadata: { away_team: "DEN", home_team: "SF" } })).toBeNull();
   });
 });
 

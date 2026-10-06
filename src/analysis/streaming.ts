@@ -152,7 +152,16 @@ export function planStream(args: {
   const best = byWeek[0];
   if (!best) return out("stuck", null, null, `week ${need.week} would start nobody at ${need.position} and no free ${need.position} plays that week`);
 
-  if (openBenchSlots > 0) return out("open-slot", best, null, `into an open bench slot, covering ${need.coveringFor.join(", ")} in week ${need.week}`);
+  if (openBenchSlots > 0) {
+    // A kicker or a defense is never worth waiver priority, open slot or
+    // not: every one of them clears on Wednesday and the next free one is
+    // within a point a week. Before 2026-10-06 this branch took the best
+    // by projection whatever his status, and the claim job would have
+    // filed for him with no second look, using up the run's one claim.
+    const pick = SWAP_POSITIONS.has(need.position) ? byWeek.find((p) => !p.onWaivers) : best;
+    if (!pick) return out("wait", null, null, `every ${need.position} who plays week ${need.week} is on waivers until the run clears; a ${need.position} is not worth a claim`);
+    return out("open-slot", pick, null, `into an open bench slot, covering ${need.coveringFor.join(", ")} in week ${need.week}`);
+  }
 
   if (SWAP_POSITIONS.has(need.position)) {
     const covered = roster

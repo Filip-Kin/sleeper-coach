@@ -13,6 +13,7 @@
 // POST with the session token added as an authorization header.
 
 import type { League, LeagueUser, NflState, Roster, RosterPlayerMini } from "./types.ts";
+import { gameOff } from "./rules.ts";
 
 export const SLEEPER_GRAPHQL = "https://sleeper.app/graphql";
 
@@ -153,6 +154,35 @@ export async function sportInfo(sport = "nfl"): Promise<NflState> {
   const info = data.sport_info;
   if (!info || typeof info !== "object") throw new Error("sleeper graphql: sport_info returned nothing");
   return toNflState(info as Row);
+}
+
+/** One NFL game as the waiver rule and any other schedule reader needs it. */
+export interface ScheduleGame { gameId: string; away: string; home: string; startTime: number; status: string }
+
+/** A `scores` row to a game. Null when the row names no teams or no kickoff
+ *  (a placeholder row), or is canceled or postponed (rules.ts gameOff), so a
+ *  caller never reads a half game or a game nobody plays. Pure. */
+export function toScheduleGame(row: Row): ScheduleGame | null {
+  if (gameOff(typeof row.status === "string" ? row.status : null)) return null;
+  const m = (row.metadata && typeof row.metadata === "object" ? row.metadata : {}) as Row;
+  const away = String(m.away_team ?? "");
+  const home = String(m.home_team ?? "");
+  const startTime = typeof row.start_time === "number" && Number.isFinite(row.start_time) ? row.start_time : 0;
+  if (!/^[A-Z]{2,4}$/.test(away) || !/^[A-Z]{2,4}$/.test(home) || startTime <= 0) return null;
+  return { gameId: String(row.game_id ?? ""), away, home, startTime, status: String(row.status ?? "") };
+}
+
+/** Every game of a regular-season week with its teams and kickoff, from the
+ *  public scores feed (no token). Any week, past or future: the pick'em
+ *  kickoff cache holds only the current one. */
+export async function weekSchedule(season: string, week: number): Promise<ScheduleGame[]> {
+  if (!Number.isInteger(week) || week < 1 || week > 22) throw new Error(`bad week: ${week}`);
+  if (!/^[0-9]{4}$/.test(season)) throw new Error(`bad season: ${season}`);
+  const data = await publicGql(
+    `{scores(sport:"nfl",season:"${season}",season_type:"regular",week:${week}){game_id status start_time metadata}}`,
+  );
+  if (!Array.isArray(data.scores)) throw new Error("sleeper graphql: scores missing from response");
+  return (data.scores as Row[]).map(toScheduleGame).filter((g): g is ScheduleGame => g !== null);
 }
 
 export async function leagueUsers(leagueId: string): Promise<LeagueUser[]> {

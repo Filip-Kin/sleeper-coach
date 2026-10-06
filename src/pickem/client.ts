@@ -16,6 +16,7 @@
 
 import { config } from "../config.ts";
 import { tokenGql, browserGql, type Gql } from "../league/api.ts";
+import { gameOff } from "../sleeper/rules.ts";
 
 // One transport for the whole coach: the token-carrying fetch in league/api.ts.
 // This file used to have its own copy of the browser passthrough; the alias is
@@ -96,7 +97,9 @@ export async function fetchWeek(gql: Gql, week: number, season: string = config.
       awayScore: num(m.away_score),
       homeScore: num(m.home_score),
     };
-  }).filter((g) => g.gameId && g.away && g.home);
+  // A canceled row is not a game to pick, and its kickoff must not reach
+  // the kickoff cache the lineup locks read (rules.ts gameOff).
+  }).filter((g) => g.gameId && g.away && g.home && !gameOff(g.status));
 }
 
 export interface LegPick { gameId: string; team: string; outcome: string | null }

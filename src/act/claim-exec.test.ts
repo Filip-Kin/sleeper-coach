@@ -14,6 +14,7 @@ const slotClaim = { add: "Star Receiver", drop: null, dropPath: "bench-slot" as 
 function deps(over: Partial<ClaimDeps> = {}): { d: ClaimDeps; calls: string[] } {
   const calls: string[] = [];
   const d: ClaimDeps = {
+    claimPending: () => false,
     stashReady: async () => { calls.push("ready?"); return true; },
     confirmed: (kind, add, cost) => { calls.push(`confirmed ${kind} ${add} ${cost}`); return true; },
     stash: async (name) => { calls.push(`stash ${name}`); return true; },
@@ -66,6 +67,15 @@ describe("filing a claim", () => {
     const { d, calls } = deps({ submit: async () => { throw new Error("roster invalid"); } });
     await expect(fileClaim(stashClaim, d)).rejects.toThrow("roster invalid");
     expect(calls.at(-1)).toBe("undo Travis Etienne");
+  });
+  test("a claim of ours already pending: a drop claim is held before the looks, nothing recorded, nothing filed", async () => {
+    // 2026-10-06 review. One claim per cycle was a per-run rule; Tuesday has
+    // several claim runs and each names its own drop.
+    const { d, calls } = deps({ claimPending: () => true });
+    expect((await fileClaim(dropClaim, d)).status).toBe("held");
+    expect((await fileClaim(stashClaim, d)).status).toBe("held");
+    expect((await fileClaim(slotClaim, d)).status).toBe("held");
+    expect(calls).toEqual([]);
   });
   test("a claim with a drop asks nothing about IR and moves nobody", async () => {
     const { d, calls } = deps();

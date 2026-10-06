@@ -37,10 +37,20 @@ export function staleReserve(view: Pick<RosterView, "reserve">, s: Settings): Ro
 export function irSlots(league: Pick<League, "settings" | "roster_positions">): number {
   return league.settings.reserve_slots ?? league.roster_positions.filter((p) => p === "IR").length;
 }
+/** A row of the scores feed that is not a game anybody plays. On 2026-10-06
+ *  the week-6 slate carried SEA@DAL, Thursday 20:15, status "canceled", next
+ *  to the real SEA@DEN and DAL@GB. Read as a game it kicks Dallas off three
+ *  days early (waiver status, lineup locks), is "in progress" all week (the
+ *  reserve lock) and never completes (the weekly review). Every reader of
+ *  the feed drops such a row. */
+export function gameOff(status: string | null | undefined): boolean {
+  const s = (status ?? "").trim().toLowerCase();
+  return s === "canceled" || s === "cancelled" || s === "postponed";
+}
 /** Sleeper refuses roster_update_reserve while any of the week's games is in
  *  progress ("must wait until this week's games are complete"). */
 export function reserveWritable(games: { status: string }[]): boolean {
-  return !games.some((g) => g.status !== "pre_game" && g.status !== "complete");
+  return !games.some((g) => !gameOff(g.status) && g.status !== "pre_game" && g.status !== "complete");
 }
 export const RESERVE_LOCKED_RE = /games are complete/i;
 export const RESERVE_INELIGIBLE_RE = /no longer IR eligible/i;

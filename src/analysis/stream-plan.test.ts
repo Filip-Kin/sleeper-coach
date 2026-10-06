@@ -61,6 +61,22 @@ describe("kicker on bye in week 6, roster full", () => {
     expect(d.drop).toBeNull();
     expect(d.add).not.toBeNull();
   });
+  test("open slot, some kickers on waivers: the best FREE one is taken, never a claim for a kicker", () => {
+    // 2026-10-06 review: with the waiver status right on a Tuesday, this
+    // branch handed the claim job a kicker to claim, with no second look.
+    const all = pool("K", 6).filter((p) => p.bye !== 6 && p.weekPoints > 0).sort((a, b) => b.weekPoints - a.weekPoints);
+    const mixed = all.map((p, i) => ({ ...p, onWaivers: i === 0 })); // the best one played on Sunday
+    const d = planStream({ need: K6, week: 6, openBenchSlots: 1, pool: mixed, roster, mayLeave: () => true, forcedDrop: never });
+    expect(d.how).toBe("open-slot");
+    expect(d.add).toBe(all[1]!.name);
+    expect(d.onWaivers).toBe(false);
+  });
+  test("open slot, every kicker on waivers: wait for Wednesday, no claim", () => {
+    const d = planStream({ need: K6, week: 6, openBenchSlots: 1, pool: pool("K", 6, true), roster, mayLeave: () => true, forcedDrop: never });
+    expect(d.how).toBe("wait");
+    expect(d.add).toBeNull();
+    expect(d.reason).toMatch(/not worth a claim/);
+  });
   test("a kicker who may not leave (never-drop, a pending claim's drop) falls back to the cheapest legal cut", () => {
     const d = planStream({ need: K6, week: 6, openBenchSlots: 0, pool: pool("K", 6), roster, mayLeave: (n) => n !== "Jake Bates", forcedDrop: () => "Rico Dowdle" });
     expect(d.how).toBe("cut");
@@ -101,6 +117,11 @@ describe("a skill position is scarce: it is covered by a cut, not a swap", () =>
     const d = planStream({ need, week: 5, openBenchSlots: 0, pool: pool("TE", 6), roster: thin, mayLeave: () => true, forcedDrop: () => null });
     expect(d.how).toBe("stuck");
     expect(d.reason).toMatch(/TE/);
+  });
+  test("a scarce position into an open slot may still be a claim: the best body, whatever his status", () => {
+    const d = planStream({ need, week: 5, openBenchSlots: 1, pool: pool("TE", 6, true), roster: thin, mayLeave: () => true, forcedDrop: () => null });
+    expect(d.how).toBe("open-slot");
+    expect(d.onWaivers).toBe(true);
   });
   test("nobody available who plays that week is stuck too", () => {
     const d = planStream({ need, week: 5, openBenchSlots: 1, pool: [], roster: thin, mayLeave: () => true, forcedDrop: () => "Rico Dowdle" });

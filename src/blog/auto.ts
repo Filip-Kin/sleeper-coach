@@ -17,6 +17,7 @@ import { publicGql } from "../sleeper/graphql.ts";
 import { hasWeekPost, type BlogPost } from "./store.ts";
 import { logEvent } from "../log.ts";
 import { config } from "../config.ts";
+import { gameOff } from "../sleeper/rules.ts";
 
 /** How long after the last kickoff of the week before the score is trusted.
  *  Six hours clears a full game plus the stat corrections that follow it. */
@@ -54,10 +55,12 @@ export async function weekGames(week: number, season = config.season): Promise<W
   );
   const raw = data.scores;
   if (!Array.isArray(raw)) throw new Error("sleeper graphql: scores missing from response");
+  // A canceled row is not a game (rules.ts gameOff): it would never report
+  // complete, so the week would never settle and IR would read locked.
   return (raw as Record<string, unknown>[]).map((s) => ({
     status: String(s.status ?? ""),
     startTime: typeof s.start_time === "number" ? s.start_time : 0,
-  }));
+  })).filter((g) => !gameOff(g.status));
 }
 
 /** Which week a review is owed for: the one before the week now in progress.

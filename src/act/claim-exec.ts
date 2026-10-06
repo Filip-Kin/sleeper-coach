@@ -26,6 +26,14 @@ export function moveCost(m: Pick<WaiverMove, "drop" | "dropPath" | "irStash"> & 
 }
 
 export interface ClaimDeps {
+  /** Is a claim of ours already pending? Then this one is not filed. "At
+   *  most one claim per cycle" was enforced per RUN only, and Tuesday has
+   *  several claim runs (the 20:00 job, one per drop in the league). Each
+   *  plans against the roster as it is today: the pending add is not in the
+   *  lineup it measures against, so two claims can each count the same
+   *  starter's seat as their gain, and each names its own drop. The next run
+   *  after the pending claim processes plans again from the real roster. */
+  claimPending: () => boolean;
   /** May an IR move be made at all right now? False while a game is in
    *  progress (Sleeper locks reserve) or while another claim of ours is
    *  pending. Asked BEFORE the two looks, so a held claim keeps its recorded
@@ -45,10 +53,12 @@ export interface ClaimDeps {
 export type ClaimOutcome =
   | { status: "filed"; transactionId: string; submitStatus: string }
   | { status: "waiting" } // first look recorded, or inside the confirmation window
-  | { status: "held" }; // the IR slot cannot be freed now: nothing written, nothing filed
+  | { status: "held" }; // a claim of ours is pending, or the IR slot cannot be freed now: nothing written, nothing filed
 
 export async function fileClaim(claim: ClaimMove, deps: ClaimDeps): Promise<ClaimOutcome> {
   const viaStash = claim.dropPath === "ir-stash";
+  // Before the looks, so nothing is recorded for a claim that cannot go.
+  if (deps.claimPending()) return { status: "held" };
   // No slot, no claim: it would be refused at processing and the player lost.
   if (viaStash && (!claim.irStash || !(await deps.stashReady()))) return { status: "held" };
   if (!deps.confirmed("claim", claim.add, moveCost(claim))) return { status: "waiting" };

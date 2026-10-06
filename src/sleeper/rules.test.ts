@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { irEligibleSet, irEligible, staleReserve, rosterLegal, tradeInFlight, tradeDead, legsToScan, pastTradeDeadline, claimAllowed, reserveWritable, lockedAtKickoff, playerOnWaivers } from "./rules.ts";
+import { irEligibleSet, irEligible, staleReserve, rosterLegal, tradeInFlight, tradeDead, legsToScan, pastTradeDeadline, claimAllowed, reserveWritable, lockedAtKickoff, playerOnWaivers, gameOff } from "./rules.ts";
 import { buildRosterView } from "../analysis/roster-view.ts";
 import type { Roster, League } from "./types.ts";
 
@@ -74,6 +74,18 @@ describe("game-time rules", () => {
   test("reserve is writable only with no game in progress", () => {
     expect(reserveWritable([{ status: "pre_game" }, { status: "complete" }])).toBe(true);
     expect(reserveWritable([{ status: "in_progress" }])).toBe(false);
+  });
+  test("a canceled row is not a game: it never locks the reserve", () => {
+    // Week 6 of 2026 as the feed had it on 2026-10-06: SEA@DAL canceled, the
+    // rest pre_game. Before gameOff the reserve read locked from Tuesday.
+    expect(gameOff("canceled")).toBe(true);
+    expect(gameOff("Cancelled")).toBe(true);
+    expect(gameOff("postponed")).toBe(true);
+    expect(gameOff("pre_game")).toBe(false);
+    expect(gameOff("in_game")).toBe(false);
+    expect(gameOff(null)).toBe(false);
+    expect(reserveWritable([{ status: "canceled" }, { status: "pre_game" }, { status: "complete" }])).toBe(true);
+    expect(reserveWritable([{ status: "canceled" }, { status: "in_game" }])).toBe(false);
   });
   test("locked at own kickoff, unknown team unlocked", () => {
     const k = new Map([["SF", 100]]);

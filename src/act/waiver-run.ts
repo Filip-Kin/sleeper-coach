@@ -19,7 +19,7 @@
 // One transaction per pass, so a failure cannot leave a half-applied roster.
 
 import { config } from "../config.ts";
-import { leagueRosters } from "../sleeper/graphql.ts";
+import { leagueRosters, weekSchedule } from "../sleeper/graphql.ts";
 import { rankByVor } from "../analysis/vor.ts";
 import { buildRosterView, takenAcrossLeague } from "../analysis/roster-view.ts";
 import { sleeper } from "../sleeper/client.ts";
@@ -44,9 +44,9 @@ import { assertWritesAllowed, freezeState, failureExitCode } from "../killswitch
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE, reserveWritable } from "../sleeper/rules.ts";
-import { overlayRosterStatus, cachedTeamKickoffs } from "./lineup-guard.ts";
+import { overlayRosterStatus } from "./lineup-guard.ts";
 import { pendingClaimPlayers, withoutPendingAdds, railsWithPendingDrops } from "./pending-claims.ts";
-import { droppedAtFromTransactions, onWaiversNow } from "./waiver-status.ts";
+import { droppedAtFromTransactions, onWaiversNow, recentTeamKickoffs } from "./waiver-status.ts";
 import { fileClaim, moveCost } from "./claim-exec.ts";
 import { weekGames } from "../blog/auto.ts";
 
@@ -183,14 +183,24 @@ async function main(): Promise<void> {
   // On waivers, PER PLAYER (R5): dropped inside waiver_clear_days, or his team
   // has kicked off since the last Wednesday run. Drops are read from this leg
   // and the last (a Tuesday drop lives under last week's leg on Wednesday).
-  // This only ever decides whether a move is filed as a claim or a free add;
-  // the write-time fallback below takes Sleeper's word when it disagrees.
+  // This decides whether a move is planned as a claim or a free add, and the
+  // two are run by different jobs (--claims-only, --adds-only), so it has to
+  // be right here: the write-time fallback below only helps a combined run.
+  // Neither half may turn "could not read" into "free agent": a failed read
+  // of the drops or of the schedule fails the run before any write, and the
+  // scheduler runs it again. (Until 2026-10-06 a failed transactions read
+  // made a player dropped an hour ago a free add, and the drop reaction then
+  // marked that drop as handled.)
   const txns: TransactionLike[] = [];
-  for (const l of legsToScan(week)) txns.push(...((await sleeper.transactions(leagueId, l).catch(() => [])) as TransactionLike[]));
+  for (const l of legsToScan(week)) txns.push(...((await sleeper.transactions(leagueId, l)) as TransactionLike[]));
   const droppedAt = droppedAtFromTransactions(txns);
-  const kickoffs = await cachedTeamKickoffs();
   const clearDays = (league.settings as { waiver_clear_days?: number }).waiver_clear_days ?? 2;
   const nowMs = Date.now();
+  // Kickoffs of the NFL week as it is NOW and the one before, from the
+  // schedule (waiver-status.ts): on a Tuesday it is last week's games that
+  // hold a player on waivers. Never the --week planning override, and not
+  // the pick'em cache, which knows one week.
+  const kickoffs = await recentTeamKickoffs(state.week || week, nowMs, (w) => weekSchedule(season, w));
   const isOnWaivers = (id: string, team: string | null | undefined): boolean =>
     onWaiversNow({ playerId: id, team, droppedAt, kickoffs, now: nowMs, clearDays });
 
@@ -585,7 +595,7 @@ async function main(): Promise<void> {
         // Before 2026-09-22 this threw, the whole job exited 1, and two
         // alerts went out for a routine Tuesday.
         if (!/on waivers/i.test(msg)) throw err;
-        if (!doClaims || claimUsed) {
+        if (!doClaims || claimUsed || pending.adds.length > 0) {
           // An adds-only run has no business filing claims; the Tuesday claim
           // job owns that. Everyone else in the list is on waivers too.
           console.log(`  ${m.add} is on waivers; free adds are closed until the waiver run clears. Left for the claim job.`);
@@ -641,6 +651,7 @@ async function main(): Promise<void> {
       const out = await fileClaim(claim, {
         // One stash claim at a time: a second would park a second player (the
         // day-to-day one) while the first claim still holds the freed slot.
+        claimPending: () => pending.adds.length > 0,
         stashReady: async () => pending.adds.length === 0 && (await reserveOpen()),
         confirmed,
         stash: (name) => stashToIr(name, false),
