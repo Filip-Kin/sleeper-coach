@@ -23,6 +23,17 @@ describe("parsePendingClaims", () => {
     const p = parsePendingClaims([{ transaction_id: "t9", type: "waiver", roster_ids: [1], adds: { Z: 1 }, drops: null }], 1);
     expect(p.slotsNeeded).toBe(1);
   });
+  test("each claim is kept whole with the leg it was read under, so it can be cancelled (2026-10-07)", () => {
+    const p = parsePendingClaims([
+      { transaction_id: "t9", type: "waiver", roster_ids: [1], adds: { Z: 1 }, drops: null, leg: 4 },
+      ...rows.map((r) => ({ ...r, leg: 5 })),
+    ], 1);
+    expect(p.claims).toEqual([
+      { transactionId: "t9", leg: 4, adds: ["Z"], drops: [], seats: 1 },
+      { transactionId: "t1", leg: 5, adds: ["A"], drops: ["B"], seats: 0 },
+    ]);
+    expect(p.slotsNeeded).toBe(1);
+  });
 });
 
 describe("the pending players are in neither pool nor drop table", () => {

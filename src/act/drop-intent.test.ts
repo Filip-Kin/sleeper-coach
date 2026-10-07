@@ -31,3 +31,18 @@ describe("a decision that keeps changing is counted", () => {
     expect(s.all().map((i) => i.key)).toEqual([]); // b was removed, c not put yet; bookkeeping rows hidden
   });
 });
+
+describe("a moot decision is forgotten, restart row included (2026-10-07)", () => {
+  test("forget(prefix) removes every intent under the prefix and its bookkeeping, nothing else", () => {
+    const s = new DropIntentStore(`/tmp/sleeper-coach-test/intents-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+    s.settle("ir-activate:7021:", "ir-activate:7021:activate:12533", 1000);
+    s.put({ key: "ir-activate:7021:activate:12533", firstSeen: 1000, note: "" });
+    s.settle("ir-activate:7021:", "ir-activate:7021:activate:5012", 2000); // a restart row now exists
+    s.put({ key: "ir-activate:7021:activate:5012", firstSeen: 2000, note: "" });
+    s.put({ key: "reconcile:x", firstSeen: 2000, note: "" });
+    s.forget("ir-activate:7021:");
+    expect(s.all().map((i) => i.key)).toEqual(["reconcile:x"]);
+    // The restart counter starts over: a later decision under the prefix is its first.
+    expect(s.settle("ir-activate:7021:", "ir-activate:7021:activate:12533", 3000)).toBe(0);
+  });
+});

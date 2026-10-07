@@ -13,6 +13,21 @@
 // list is rewritten without him and read back. Sleeper refuses reserve writes
 // while any game of the week is in progress, and that is deferred silently
 // until after the week's last game rather than retried every poll.
+//
+// A seat held for a pending no-drop claim is NOT a full roster (2026-10-07).
+// Fourteen active, two on IR, two claims pending with no drop: Dowdle flipped
+// Out -> Questionable at 03:07 ET, eight minutes before the waiver run, and
+// this path counted the two held seats as taken and recorded "drop
+// Croskey-Merritt (96 rest-of-season) and activate Dowdle" for its second
+// look. The Bengals claim then lost at 03:15 and the second look found a free
+// seat, so nobody was cut; had the run been slow the cut would have gone out
+// at 03:37 for a claim that failed anyway. A drop is a player gone for the
+// season; a claim is a maybe (we are last in the order). So the returning man
+// takes any physically free seat with no drop, and the claims that no longer
+// have a seat are cancelled, lowest rest-of-season value first (the rental
+// before the season body). The planner refiles a claim as a swap on its next
+// run if the add is worth a drop; that drop is then conditional on the claim
+// landing, which is the only kind of drop a claim may cause.
 
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
@@ -23,8 +38,9 @@ import { DEFAULT_FAIRNESS, type FairnessConfig } from "../analysis/trade-fair.ts
 import { DEFAULT_RAILS, type RailConfig, type RailPlayer } from "../analysis/rails.ts";
 import { activeRailRoster, chooseLegalForcedDrops, type LegalDrop } from "../analysis/reconcile-plan.ts";
 import { snapshot, scheduleContext } from "../analysis/trade-wire.ts";
-import { dropPlayers, updateReserve, myRosterView, currentStarters, type Gql } from "../league/api.ts";
-import { railsWithPendingDrops, pendingClaimPlayers } from "./pending-claims.ts";
+import { dropPlayers, updateReserve, myRosterView, currentStarters, cancelWaiverClaim, type Gql } from "../league/api.ts";
+import { railsWithPendingDrops, pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
+export { claimsToCancel, type HeldClaim } from "./pending-claims.ts";
 import { DropIntentStore, decideIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
 import { weekGames } from "../blog/auto.ts";
@@ -47,6 +63,9 @@ export interface ReserveDecision {
   drop: LegalDrop | null;
   /** The reserve list to write (unused for "release": dropping him clears it). */
   reserveAfter: string[];
+  /** Our pending no-drop claims that have no seat once he is active, lowest
+   *  value first. Cancelled after the move; never a reason to cut anyone. */
+  cancel: HeldClaim[];
   reason: string;
 }
 
@@ -58,25 +77,37 @@ export interface ReserveDecision {
  *  (RB26 rest-of-season) to make room for Rico Dowdle (RB32) because it only
  *  looked at active players and priced every bench player at zero. `keep`
  *  is this week's starters plus the drop side of any pending claim; those
- *  are never cut. `slotsHeld` is the number of active slots a pending claim
- *  with no drop will need. */
+ *  are never cut.
+ *
+ *  `heldClaims` are our pending claims with no drop. A seat one of them
+ *  holds is still a free seat for the returning man (2026-10-07): the claim
+ *  is a maybe, the drop would be for the season. Whatever claims are left
+ *  without a seat are cancelled, cheapest first, never traded for a cut. */
 export function planReserveActivation(args: {
   view: RosterView; settings: Settings; cap: number; railRoster: RailPlayer[]; cfg: FairnessConfig; rails?: RailConfig;
-  keep?: string[]; slotsHeld?: number;
+  keep?: string[]; heldClaims?: HeldClaim[];
 }): ReserveDecision[] {
   const { view, settings, cap, railRoster, cfg } = args;
   const rails = args.rails ?? DEFAULT_RAILS;
   const keep = args.keep ?? [];
-  const slotsHeld = args.slotsHeld ?? 0;
+  const held = args.heldClaims ?? [];
   const stale = staleReserve(view, settings);
   const e = stale[0];
   if (!e) return [];
   const status = e.injuryStatus ?? "healthy";
   const reserveAfter = view.reserve.map((r) => r.playerId).filter((id) => id !== e.playerId);
   const base = { playerId: e.playerId, name: e.name, injuryStatus: e.injuryStatus, reserveAfter };
-  if (view.active.length + slotsHeld < cap) {
-    return [{ ...base, action: "activate", drop: null, reason: `${e.name} is ${status}, not IR-eligible in this league; an active slot is free` }];
+  if (view.active.length < cap) {
+    // He takes the seat. Seats left over after him stay with the claims; the
+    // rest of the claims go, cheapest first.
+    const cancel = claimsToCancel(held, cap - view.active.length - 1);
+    const note = cancel.length ? `; ${cancel.map((c) => `the claim for ${c.names.join(" + ")} no longer has a seat and is cancelled`).join("; ")}` : "";
+    return [{ ...base, action: "activate", drop: null, cancel, reason: `${e.name} is ${status}, not IR-eligible in this league; an active slot is free${note}` }];
   }
+  // Physically full: after the move the roster is at the cap, so every held
+  // seat is gone whichever way the cut falls.
+  const cancel = claimsToCancel(held, 0);
+  const note = cancel.length ? `; ${cancel.map((c) => `the claim for ${c.names.join(" + ")} has no seat and is cancelled`).join("; ")}` : "";
   const full = activeRailRoster(view, railRoster);
   // The IR player as a cut candidate, valued like everyone else.
   const self = railRoster.find((p) => p.playerId === e.playerId);
@@ -86,12 +117,12 @@ export function planReserveActivation(args: {
   const union = [...full.filter((p) => p.playerId !== e.playerId), selfRail];
   const drop = chooseLegalForcedDrops(view, union, 1, cfg, rails, keep, new Set([e.playerId]))[0];
   if (!drop) {
-    return [{ ...base, action: "stuck", drop: null, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and the rails allow no drop` }];
+    return [{ ...base, action: "stuck", drop: null, cancel: [], reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and the rails allow no drop` }];
   }
   if (drop.playerId === e.playerId) {
-    return [{ ...base, action: "release", drop, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and he is the least valuable body for the rest of the season (${Math.round(drop.cost)} points), so he is released rather than activated` }];
+    return [{ ...base, action: "release", drop, cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and he is the least valuable body for the rest of the season (${Math.round(drop.cost)} points), so he is released rather than activated${note}` }];
   }
-  return [{ ...base, action: "activate", drop, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full, so ${drop.name} goes (${drop.reason})` }];
+  return [{ ...base, action: "activate", drop, cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full, so ${drop.name} goes (${drop.reason})${note}` }];
 }
 
 const HOUR = 3_600_000;
@@ -141,6 +172,23 @@ async function cachedKickoffTimes(): Promise<number[]> {
     return (j.games ?? []).map((g) => Number(g.startTime)).filter((n) => Number.isFinite(n) && n > 0);
   } catch {
     return [];
+  }
+}
+
+/** Cancel the claims the plan left without a seat. After the roster move, so
+ *  legality never waits on this write; a cancel that fails costs nothing
+ *  (Sleeper fails a no-drop claim into a full roster on its own) and is
+ *  logged so the review sees it. */
+async function cancelHeldClaims(gql: Gql, plan: ReserveDecision): Promise<void> {
+  for (const c of plan.cancel) {
+    const who = c.names.join(" + ");
+    try {
+      const status = await cancelWaiverClaim(gql, c.transactionId, c.leg);
+      logEvent("coach", "claim-cancelled", `Waiver claim for ${who} cancelled: no seat once ${plan.name} is off injured reserve.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, value: c.value, status, player: plan.playerId });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logEvent("coach", "claim-cancel-failed", `Could not cancel the waiver claim for ${who}: ${msg}. It has no seat; if it is still pending it fails at processing.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, player: plan.playerId });
+    }
   }
 }
 
@@ -197,9 +245,17 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   // "Seattle Seahawks" in the view), since the chooser matches on rail names.
   const nameOf = new Map(railRoster.map((p) => [p.playerId ?? "", p.name]));
   const keep = starters.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
-  const pending = await pendingClaimPlayers(deps.gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
+  const pending = await pendingClaimPlayers(deps.gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0, claims: [] as PendingClaim[] }));
   const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, railRoster, pending.drops);
-  const plan = planReserveActivation({ view, settings: league.settings, cap, railRoster, cfg, rails, keep, slotsHeld: pending.slotsNeeded })[0];
+  // Our no-drop claims, each at the best rest-of-season value among its
+  // adds: the ONE value, so the rental (a defense at 71) yields before the
+  // season body (a back at 137).
+  const heldClaims: HeldClaim[] = pending.claims.filter((c) => c.seats > 0).map((c) => ({
+    ...c,
+    value: Math.max(0, ...c.adds.map((id) => snap.playerById.get(id)?.points ?? 0)),
+    names: c.adds.map((id) => snap.playerById.get(id)?.name ?? id),
+  }));
+  const plan = planReserveActivation({ view, settings: league.settings, cap, railRoster, cfg, rails, keep, heldClaims })[0];
   if (!plan) return null;
 
   if (plan.action === "stuck") {
@@ -211,12 +267,16 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
     return plan;
   }
 
-  if (plan.drop) {
+  const intents = deps.intents ?? new DropIntentStore();
+  const prefix = `ir-activate:${plan.playerId}:`;
+  if (!plan.drop) {
+    // A seat is free, so no cut: any drop recorded for him on an earlier
+    // look (a seat that was held then) is moot.
+    intents.forget(prefix);
+  } else {
     // Two looks before the cut: the same decision from fresh data at least
     // MIN_AGE_MS apart. Nothing about an illegal roster is urgent at this
     // resolution, and every one of this month's bad drops was a single read.
-    const intents = deps.intents ?? new DropIntentStore();
-    const prefix = `ir-activate:${plan.playerId}:`;
     const key = `${prefix}${plan.action}:${plan.drop.playerId}`;
     const restarts = intents.settle(prefix, key, now);
     const gate = decideIntent(intents.get(key), now);
@@ -247,7 +307,7 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
       deferrals.deferFor(plan.playerId, now, HOUR);
       return null;
     }
-    intents.delete(key);
+    intents.forget(prefix);
     if (plan.action === "release") {
       const after = await myRosterView();
       if (after.ownedIds.has(plan.playerId)) {
@@ -257,10 +317,12 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
       }
       logEvent("coach", "ir-released", `${plan.name} released from injured reserve. ${plan.reason}.`, { player: plan.playerId, injuryStatus: plan.injuryStatus, reserve: after.reserve.map((e) => e.playerId), active: after.active.length });
       deferrals.clear(plan.playerId);
+      await cancelHeldClaims(deps.gql, plan);
       return plan;
     }
   }
 
+  let activated = false;
   try {
     const back = await updateReserve(deps.gql, plan.reserveAfter, config.rosterId, config.leagueId);
     if (back.includes(plan.playerId)) throw new Error(`write echoed ${plan.playerId} still on reserve`);
@@ -269,9 +331,10 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
     logEvent("coach", "ir-activated", `${plan.name} taken off injured reserve. ${plan.reason}.`, {
       player: plan.playerId, injuryStatus: plan.injuryStatus, drop: plan.drop ? { playerId: plan.drop.playerId, name: plan.drop.name, cost: plan.drop.cost } : null,
       reserve: after.reserve.map((e) => e.playerId), active: after.active.length,
+      cancel: plan.cancel.map((c) => ({ transactionId: c.transactionId, adds: c.adds, value: c.value })),
     });
     deferrals.clear(plan.playerId);
-    return plan;
+    activated = true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (RESERVE_LOCKED_RE.test(msg)) {
@@ -284,5 +347,9 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
     deferrals.deferFor(plan.playerId, now, HOUR);
     return null;
   }
+  // After the verified write and outside its try: a cancel that throws must
+  // never relabel a done activation as a failure.
+  await cancelHeldClaims(deps.gql, plan);
+  return activated ? plan : null;
 }
 // #endregion

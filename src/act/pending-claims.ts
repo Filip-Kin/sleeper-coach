@@ -12,18 +12,33 @@ import { legsToScan } from "../sleeper/rules.ts";
 import type { Gql } from "../league/api.ts";
 import type { RailConfig, RailPlayer } from "../analysis/rails.ts";
 
+/** One claim of ours as Sleeper holds it, with the leg it was filed under
+ *  (a cancel needs it). `seats` is the net active slots it takes when it
+ *  lands: adds minus drops, never below zero. */
+export interface PendingClaim {
+  transactionId: string;
+  leg: number;
+  adds: string[];
+  drops: string[];
+  seats: number;
+}
+
 export interface PendingClaims {
   adds: string[];
   drops: string[];
   /** Claims with no drop attached, each of which needs a free slot. */
   slotsNeeded: number;
+  claims: PendingClaim[];
 }
 
 // #region pure
+/** `rows` are the GraphQL transaction rows; a row may carry `leg` (the io
+ *  layer tags each row with the leg it was read under). */
 export function parsePendingClaims(rows: Record<string, unknown>[], rosterId: number): PendingClaims {
   const adds = new Set<string>();
   const drops = new Set<string>();
   const seen = new Set<string>();
+  const claims: PendingClaim[] = [];
   let slotsNeeded = 0;
   for (const t of rows) {
     if (t.type !== "waiver") continue;
@@ -35,9 +50,33 @@ export function parsePendingClaims(rows: Record<string, unknown>[], rosterId: nu
     const ourDrops = Object.entries((t.drops as Record<string, number> | null) ?? {}).filter(([, r]) => r === rosterId).map(([p]) => p);
     for (const p of ourAdds) adds.add(p);
     for (const p of ourDrops) drops.add(p);
-    if (ourAdds.length > ourDrops.length) slotsNeeded += ourAdds.length - ourDrops.length;
+    const seats = Math.max(0, ourAdds.length - ourDrops.length);
+    slotsNeeded += seats;
+    claims.push({ transactionId: id, leg: Number(t.leg ?? 0), adds: ourAdds, drops: ourDrops, seats });
   }
-  return { adds: [...adds], drops: [...drops], slotsNeeded };
+  return { adds: [...adds], drops: [...drops], slotsNeeded, claims };
+}
+
+/** A pending claim of ours that takes `seats` active slots when it lands,
+ *  valued at the best rest-of-season value among its adds. */
+export interface HeldClaim extends PendingClaim {
+  value: number;
+  names: string[];
+}
+
+/** The claims to cancel so that no more than `seatsFree` held seats remain:
+ *  the least valuable first, whole claims, until the overflow is covered. */
+export function claimsToCancel(held: HeldClaim[], seatsFree: number): HeldClaim[] {
+  const seated = held.filter((c) => c.seats > 0);
+  let over = seated.reduce((n, c) => n + c.seats, 0) - Math.max(0, seatsFree);
+  if (over <= 0) return [];
+  const out: HeldClaim[] = [];
+  for (const c of [...seated].sort((a, b) => a.value - b.value || a.transactionId.localeCompare(b.transactionId))) {
+    if (over <= 0) break;
+    out.push(c);
+    over -= c.seats;
+  }
+  return out;
 }
 
 export function withoutPendingAdds<T extends { playerId: string }>(pool: T[], adds: string[]): T[] {
@@ -73,7 +112,8 @@ export async function pendingClaimPlayers(
       `{transaction_id status type roster_ids adds drops}}`,
     ).catch(() => ({} as Record<string, unknown>));
     const raw = ((body.data as Record<string, unknown> | undefined)?.league_transactions_by_status ?? []) as Record<string, unknown>[];
-    rows.push(...raw);
+    // The leg the row was read under: a cancel must name it.
+    rows.push(...raw.map((t) => ({ ...t, leg: l })));
   }
   return parsePendingClaims(rows, rosterId);
 }

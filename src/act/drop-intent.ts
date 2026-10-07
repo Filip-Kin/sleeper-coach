@@ -63,6 +63,16 @@ export class DropIntentStore {
     this.write(all);
     return count;
   }
+  /** The decision under `prefix` is moot (the player it was about has been
+   *  moved another way): drop every intent under it and its restart row.
+   *  Without this a recorded intent outlives its cause for MAX_AGE_MS; on
+   *  2026-10-07 "drop Croskey-Merritt for Dowdle" sat in the store after
+   *  Dowdle had come off IR into a free seat. */
+  forget(prefix: string): void {
+    const all = this.read();
+    for (const k of Object.keys(all)) if (k.startsWith(prefix) || k === `${RESTART_KEY}${prefix}`) delete all[k];
+    this.write(all);
+  }
   /** Every real intent (bookkeeping rows excluded). */
   all(): DropIntent[] { return Object.values(this.read()).filter((i) => !i.key.startsWith(RESTART_KEY)); }
 }

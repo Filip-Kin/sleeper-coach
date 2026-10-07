@@ -23,12 +23,12 @@
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
-import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, currentStarters } from "../league/api.ts";
+import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, currentStarters, cancelWaiverClaim } from "../league/api.ts";
 import { loadValues, liveStatusFromRosters, toRail, cutOrder, type PlayerValue } from "../analysis/value.ts";
 import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { logEvent } from "../log.ts";
-import { pendingClaimPlayers } from "./pending-claims.ts";
+import { pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
 
 const args = process.argv.slice(2);
 const cmd = args[0] ?? "";
@@ -57,7 +57,7 @@ const rosters = await leagueRosters(config.leagueId);
 const values = await loadValues(state.season || config.season, week, league.scoring_settings, liveStatusFromRosters(rosters), { forceRefresh: true });
 const view = await myRosterView();
 const starters = new Set(await currentStarters(gql, week, []).catch(() => [] as string[]));
-const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
+const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0, claims: [] as PendingClaim[] }));
 const taken = new Set(rosters.flatMap((r) => r.players ?? []));
 
 const byName = (n: string): PlayerValue | undefined => {
@@ -149,16 +149,35 @@ switch (cmd) {
     if (!view.reserveIds.has(target.playerId)) { console.error("not on our IR"); process.exit(2); }
     const stale = staleReserve(view, league.settings).some((e) => e.playerId === target.playerId);
     console.log(stale ? "he is no longer IR-eligible (must move)" : "he is still IR-eligible");
-    const full = view.active.length + pending.slotsNeeded >= cap;
+    // Same rule as the daemon (reserve-reconcile.ts, 2026-10-07): a seat held
+    // for a pending no-drop claim is still a seat for him; the claims left
+    // without one are cancelled, cheapest first, never traded for a cut.
+    const full = view.active.length >= cap;
+    const held: HeldClaim[] = pending.claims.filter((c) => c.seats > 0).map((c) => ({
+      ...c, value: Math.max(0, ...c.adds.map((id) => values.get(id)?.value ?? 0)), names: c.adds.map((id) => values.get(id)?.name ?? id),
+    }));
+    const cancel = claimsToCancel(held, full ? 0 : cap - view.active.length - 1);
     if (full) {
       if (!drop) { console.error(`roster full; name a --drop. Cheapest legal cut: ${legalCuts[0]?.name}${legalCuts[0] && target.value < legalCuts[0].points ? ` (he is worth less than that himself: release him instead)` : ""}`); process.exit(2); }
       checkCut(drop);
-    }
-    if (!WRITE) { console.log(`\n(dry) would ${full ? `drop ${drop!.name} and ` : ""}activate him. Add --write.`); break; }
+    } else if (drop) { console.error(`a seat is free (${view.active.length} active${pending.slotsNeeded ? `, ${pending.slotsNeeded} held by pending claims` : ""}); no --drop for an activation`); process.exit(2); }
+    for (const c of cancel) console.log(`the pending claim for ${c.names.join(" + ")} (${Math.round(c.value)} ROS) has no seat once he is active: cancelled`);
+    if (!WRITE) { console.log(`\n(dry) would ${full ? `drop ${drop!.name} and ` : ""}activate him${cancel.length ? ` and cancel ${cancel.length} claim(s)` : ""}. Add --write.`); break; }
     if (full) await dropPlayers(gql, [drop!.playerId], config.rosterId, config.leagueId, "manual");
     const back = await updateReserve(gql, view.reserve.map((e) => e.playerId).filter((id) => id !== target.playerId));
-    logEvent("coach", "manual-move", `Manual activation of ${target.name}${drop ? `, dropping ${drop.name}` : ""}.`, { activate: target.playerId, drop: drop?.playerId ?? null, reserve: back, override: OVERRIDE ?? null });
+    logEvent("coach", "manual-move", `Manual activation of ${target.name}${drop ? `, dropping ${drop.name}` : ""}.`, { activate: target.playerId, drop: drop?.playerId ?? null, reserve: back, override: OVERRIDE ?? null, cancel: cancel.map((c) => c.transactionId) });
     console.log(`activated; IR now [${back.join(", ")}]`);
+    for (const c of cancel) {
+      try {
+        const status = await cancelWaiverClaim(gql, c.transactionId, c.leg);
+        logEvent("coach", "claim-cancelled", `Waiver claim for ${c.names.join(" + ")} cancelled: no seat once ${target.name} is off injured reserve.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, value: c.value, status, player: target.playerId });
+        console.log(`cancelled claim ${c.transactionId} [${status}]`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logEvent("coach", "claim-cancel-failed", `Could not cancel the waiver claim for ${c.names.join(" + ")}: ${msg}. It has no seat; if it is still pending it fails at processing.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, player: target.playerId });
+        console.error(`cancel of claim ${c.transactionId} failed: ${msg} (it has no seat and fails at processing on its own)`);
+      }
+    }
     break;
   }
   case "stash": {

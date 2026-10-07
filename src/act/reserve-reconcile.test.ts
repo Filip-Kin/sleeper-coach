@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildRosterView } from "../analysis/roster-view.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
-import { planReserveActivation, ReserveDeferrals } from "./reserve-reconcile.ts";
+import { planReserveActivation, claimsToCancel, ReserveDeferrals, type HeldClaim } from "./reserve-reconcile.ts";
 import type { Roster, League } from "../sleeper/types.ts";
 import type { RailPlayer } from "../analysis/rails.ts";
 
@@ -103,9 +103,58 @@ describe("the IR player is himself a cut candidate (Filip, 2026-09-30)", () => {
     expect(plan.action).toBe("activate");
     expect(plan.drop?.playerId).toBe("wr5");
   });
-  test("a slot held for a pending no-drop claim is not a free slot", () => {
+});
+
+// 2026-10-07, 03:07 ET: fourteen active, two on IR, two no-drop claims pending,
+// Dowdle flips Out -> Questionable eight minutes before the waiver run. The
+// old rule counted the held seats as taken and recorded "drop Croskey-Merritt
+// (96 for the season) and activate Dowdle". A claim is a maybe (we were last
+// in the order and the Bengals claim did lose); a drop is for the season.
+const claim = (transactionId: string, value: number, seats = 1): HeldClaim => ({ transactionId, leg: 5, adds: [`add-${transactionId}`], drops: [], seats, value, names: [`Add ${transactionId}`] });
+describe("a seat held for a pending no-drop claim is still a seat for the returning man (2026-10-07)", () => {
+  test("one free seat, one held claim: he takes it, nobody is dropped, the claim is cancelled", () => {
     const { view, rail } = fixture(15, "Questionable");
-    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: rail, cfg, slotsHeld: 1 })[0]!;
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: rail, cfg, heldClaims: [claim("t1", 137)] })[0]!;
+    expect(plan.action).toBe("activate");
+    expect(plan.drop).toBeNull();
+    expect(plan.cancel.map((c) => c.transactionId)).toEqual(["t1"]);
+    expect(plan.reason).toContain("cancelled");
+  });
+  test("two free seats, two held claims: he takes one, the cheaper claim is cancelled, the dearer keeps its seat", () => {
+    const { view, rail } = fixture(14, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: rail, cfg, heldClaims: [claim("harvey", 137.4), claim("cin", 71.3)] })[0]!;
+    expect(plan.action).toBe("activate");
+    expect(plan.drop).toBeNull();
+    expect(plan.cancel.map((c) => c.transactionId)).toEqual(["cin"]);
+  });
+  test("two free seats, one held claim: nothing is cancelled", () => {
+    const { view, rail } = fixture(14, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: rail, cfg, heldClaims: [claim("harvey", 137.4)] })[0]!;
+    expect(plan.drop).toBeNull();
+    expect(plan.cancel).toEqual([]);
+  });
+  test("physically full: the forced drop as before, and every held claim is cancelled because no seat survives the move", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: rail, cfg, heldClaims: [claim("t1", 50)] })[0]!;
+    expect(plan.action).toBe("activate");
     expect(plan.drop).not.toBeNull();
+    expect(plan.cancel.map((c) => c.transactionId)).toEqual(["t1"]);
+  });
+  test("a release (he is the cheapest body himself) also cancels the seatless claims", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const cheap = rail.map((p) => (p.playerId === "collins" ? { ...p, points: 20 } : p));
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: cheap, cfg, heldClaims: [claim("t1", 50)] })[0]!;
+    expect(plan.action).toBe("release");
+    expect(plan.cancel.map((c) => c.transactionId)).toEqual(["t1"]);
+  });
+  test("claimsToCancel: cheapest first, whole claims, only as many as the overflow needs", () => {
+    const held = [claim("a", 100), claim("b", 30), claim("c", 60, 2)];
+    expect(claimsToCancel(held, 4).map((c) => c.transactionId)).toEqual([]);
+    expect(claimsToCancel(held, 3).map((c) => c.transactionId)).toEqual(["b"]);
+    expect(claimsToCancel(held, 2).map((c) => c.transactionId)).toEqual(["b", "c"]);
+    expect(claimsToCancel(held, 0).map((c) => c.transactionId)).toEqual(["b", "c", "a"]);
+    expect(claimsToCancel([], 0)).toEqual([]);
+    // A self-financing claim (a drop named) holds no seat and is never cancelled.
+    expect(claimsToCancel([claim("swap", 10, 0)], 0)).toEqual([]);
   });
 });
