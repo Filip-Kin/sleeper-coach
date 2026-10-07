@@ -363,3 +363,35 @@ describe("a Questionable starter whose replacements lock before his inactives ar
     expect(planLineup(cur, week4(15.5), SLOTS, new Set(), 1, at("2026-10-04T13:10:00Z")).changed).toBe(false);
   });
 });
+
+describe("a table with no numbers is no basis for a lineup (2026-10-07 05:15 ET)", () => {
+  // The site that morning: Prescott, McCaffrey, Brown, Collins, Evans, LaPorta, Smith, Harvey, Bates, SEA.
+  const SLOTS10 = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "K", "DEF"];
+  const SITE = ["3294", "4034", "9224", "7569", "2216", "10859", "7525", "12489", "11539", "SEA"];
+  const morning = (pts: (id: string) => number) => [
+    P("3294", "QB", pts("3294")), P("4034", "RB", pts("4034")), P("9224", "RB", pts("9224")),
+    P("7569", "WR", pts("7569")), P("2216", "WR", pts("2216")), P("10859", "TE", pts("10859")),
+    P("7525", "WR", pts("7525")), P("12489", "RB", pts("12489")), P("11539", "K", pts("11539")), P("SEA", "DEF", pts("SEA")),
+    P("12533", "RB", pts("12533")), P("7021", "RB", pts("7021")), P("9500", "WR", pts("9500")), P("7568", "QB", pts("7568")),
+  ];
+  const REAL: Record<string, number> = { "3294": 19.5, "4034": 18.1, "9224": 17.6, "7569": 16.6, "2216": 13.6, "10859": 12.9, "7525": 12.5, "12489": 11.7, "11539": 8.3, SEA: 6.4, "12533": 9.1, "7021": 10.2, "9500": 10.5, "7568": 17.2 };
+  test("every player at zero: the lineup is held, nothing is written", () => {
+    const plan = planLineup(SITE, morning(() => 0), SLOTS10, new Set(), 1);
+    expect(plan.changed).toBe(false);
+    expect(plan.ids).toEqual(SITE);
+    expect(plan.hold).toMatch(/no projection/);
+    expect(plan.swaps).toEqual([]);
+  });
+  test("the real table that replaced it makes the usual plan (nothing to change, no hold)", () => {
+    const plan = planLineup(SITE, morning((id) => REAL[id] ?? 0), SLOTS10, new Set(), 1);
+    expect(plan.changed).toBe(false);
+    expect(plan.hold).toBeUndefined();
+  });
+  test("one starter at zero in a real table is the feed's word that he sits: replaced, as Collins (09-25) and Smith (10-01) were", () => {
+    const plan = planLineup(SITE, morning((id) => (id === "9224" ? 0 : REAL[id] ?? 0)), SLOTS10, new Set(), 1);
+    expect(plan.changed).toBe(true);
+    expect(plan.hold).toBeUndefined();
+    expect(plan.ids).not.toContain("9224");
+    expect(plan.ids).toContain("9500");
+  });
+});

@@ -2,6 +2,7 @@ import { DATA_DIR } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { projectPoints } from "./scoring.ts";
 import { byeWeek } from "../data/byes.ts";
+import { logEvent } from "../log.ts";
 import type { ProjectionRecord, ScoringSettings, Position } from "../sleeper/types.ts";
 
 // Per-week projections, scored under this league's exact rules. This is the
@@ -40,30 +41,106 @@ const FANTASY = new Set(["QB", "RB", "WR", "TE", "K", "DEF"]);
 // designations, Friday practice reports). Cache briefly so a lock and its
 // read-back re-use one fetch, but never serve a stale table into a Sunday lock.
 const TTL_MS = 30 * 60 * 1000;
+// A table the feed answered with no numbers is retried sooner. Long enough
+// that the 90 s poll does not pull 5 MB on every pass.
+const DEGENERATE_TTL_MS = 5 * 60 * 1000;
 
-function cachePath(season: string, week: number): string {
-  return `${DATA_DIR}week-proj-${season}-${week}.json`;
-}
-function metaPath(season: string, week: number): string {
-  return `${DATA_DIR}week-proj-${season}-${week}.meta.json`;
+// #region pure
+/** A fetched week is a projection table only when enough of its rows carry
+ *  a number. Measured on 2026-10-07 over the cached weeks 5 to 17: 415 to
+ *  507 of about 3,230 fantasy rows per week score above zero under this
+ *  league's rules; the rest are depth players at an honest 0. On 2026-10-07
+ *  05:15 ET the endpoint answered 200 with every row at zero. Nothing
+ *  checked it, the table was cached for 30 minutes, and the lineup guard
+ *  benched Chase Brown and Nico Collins for Croskey-Merritt and Dowdle,
+ *  "0.0 -> 0.0 (outscored)", until the cache expired at 05:46. A rival saw
+ *  the lineup before the bot did. A hundred is a quarter of the thinnest
+ *  real week and a hundred times an empty one. */
+export const MIN_SCORED_ROWS = 100;
+
+/** Rows projected above zero. */
+export function scoredRows(table: { points: number }[]): number {
+  return table.reduce((n, p) => n + (p.points > 0 ? 1 : 0), 0);
 }
 
-async function fetchAndCache(season: string, week: number): Promise<ProjectionRecord[]> {
-  const records = await sleeper.weeklyProjections(season, week);
-  await Bun.write(cachePath(season, week), JSON.stringify(records));
-  await Bun.write(metaPath(season, week), JSON.stringify({ fetchedAt: Date.now(), count: records.length }, null, 2));
-  return records;
+/** Can a lineup be decided from this table? */
+export function tableIsUsable(table: { points: number }[]): boolean {
+  return scoredRows(table) >= MIN_SCORED_ROWS;
+}
+// #endregion
+
+interface WeekMeta {
+  fetchedAt: number;
+  count: number;
+  /** The last fetch had no numbers. The cache file holds the last usable
+   *  table (fetched at `keptFrom`) when there was one, else the empty answer. */
+  degenerate?: boolean;
+  keptFrom?: number | null;
 }
 
-async function rawWeek(season: string, week: number, forceRefresh: boolean): Promise<ProjectionRecord[]> {
-  const meta = (await Bun.file(metaPath(season, week)).exists())
-    ? ((await Bun.file(metaPath(season, week)).json()) as { fetchedAt: number })
-    : null;
-  const fresh = meta && Date.now() - meta.fetchedAt < TTL_MS;
-  if (!forceRefresh && fresh && (await Bun.file(cachePath(season, week)).exists())) {
-    return (await Bun.file(cachePath(season, week)).json()) as ProjectionRecord[];
+/** Where a week comes from and where it is cached. Tests inject both. */
+export interface WeekSource {
+  fetch: (season: string, week: number) => Promise<ProjectionRecord[]>;
+  dir: string;
+  now?: () => number;
+}
+const DEFAULT_SOURCE: WeekSource = { fetch: (season, week) => sleeper.weeklyProjections(season, week), dir: DATA_DIR };
+
+function cachePath(dir: string, season: string, week: number): string {
+  return `${dir}week-proj-${season}-${week}.json`;
+}
+function metaPath(dir: string, season: string, week: number): string {
+  return `${dir}week-proj-${season}-${week}.meta.json`;
+}
+
+const degenerateLogged = new Map<string, number>();
+const NOTICE_MS = 60 * 60 * 1000;
+function noteDegenerate(season: string, week: number, rows: number, keptFrom: number | null, now: number): void {
+  const key = `${season}:${week}`;
+  if (now - (degenerateLogged.get(key) ?? 0) < NOTICE_MS) return;
+  degenerateLogged.set(key, now);
+  const served = keptFrom != null ? `serving the table fetched ${new Date(keptFrom).toISOString()}` : "no earlier table on disk; lineup decisions hold";
+  console.log(`[week-proj] ${season} week ${week}: the feed answered with no numbers (${rows} rows, under ${MIN_SCORED_ROWS} scored); ${served}`);
+  logEvent("coach", "week-proj-degenerate", `Week ${week} projection feed answered with no numbers; ${served}.`, { season, week, rows, keptFrom });
+}
+
+async function rawWeek(season: string, week: number, scoring: ScoringSettings, forceRefresh: boolean, src: WeekSource): Promise<ProjectionRecord[]> {
+  const cacheF = Bun.file(cachePath(src.dir, season, week));
+  const metaF = Bun.file(metaPath(src.dir, season, week));
+  const now = src.now?.() ?? Date.now();
+  const meta = (await metaF.exists()) ? ((await metaF.json()) as WeekMeta) : null;
+  const ttl = meta?.degenerate ? DEGENERATE_TTL_MS : TTL_MS;
+  const fresh = meta != null && now - meta.fetchedAt < ttl;
+  if (!forceRefresh && fresh && (await cacheF.exists())) {
+    return (await cacheF.json()) as ProjectionRecord[];
   }
-  return fetchAndCache(season, week);
+
+  const records = await src.fetch(season, week);
+  const usable = (r: ProjectionRecord[]) => tableIsUsable(normaliseWeek(r, week, scoring));
+  if (usable(records)) {
+    await Bun.write(cacheF, JSON.stringify(records));
+    await Bun.write(metaF, JSON.stringify({ fetchedAt: now, count: records.length } satisfies WeekMeta, null, 2));
+    return records;
+  }
+
+  // The feed answered with a table nobody can decide from. Keep the last
+  // usable table on disk and serve it, however old: statuses come from the
+  // live roster, not from here, so a stale number is still a number and a
+  // zero is nothing. Retry sooner than the normal TTL.
+  const prev = (await cacheF.exists()) ? ((await cacheF.json()) as ProjectionRecord[]) : null;
+  if (prev && usable(prev)) {
+    const keptFrom = meta?.keptFrom ?? meta?.fetchedAt ?? null;
+    await Bun.write(metaF, JSON.stringify({ fetchedAt: now, count: prev.length, degenerate: true, keptFrom } satisfies WeekMeta, null, 2));
+    noteDegenerate(season, week, records.length, keptFrom, now);
+    return prev;
+  }
+  // Nothing usable on disk either (first fetch of the week, or a fresh
+  // container). Cache the empty answer briefly and hand it over; every
+  // decision path treats a roster of zeros as no basis to act.
+  await Bun.write(cacheF, JSON.stringify(records));
+  await Bun.write(metaF, JSON.stringify({ fetchedAt: now, count: records.length, degenerate: true, keptFrom: null } satisfies WeekMeta, null, 2));
+  noteDegenerate(season, week, records.length, null, now);
+  return records;
 }
 
 // The projections endpoint carries extra top-level fields the shared
@@ -120,9 +197,9 @@ export async function loadWeekProjections(
   season: string,
   week: number,
   scoring: ScoringSettings,
-  opts?: { forceRefresh?: boolean },
+  opts?: { forceRefresh?: boolean; source?: WeekSource },
 ): Promise<WeekProjection[]> {
-  const records = await rawWeek(season, week, opts?.forceRefresh ?? false);
+  const records = await rawWeek(season, week, scoring, opts?.forceRefresh ?? false, opts?.source ?? DEFAULT_SOURCE);
   return normaliseWeek(records, week, scoring);
 }
 

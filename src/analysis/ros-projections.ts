@@ -1,4 +1,4 @@
-import { loadWeekProjections } from "./week-projections.ts";
+import { loadWeekProjections, tableIsUsable, scoredRows, MIN_SCORED_ROWS, type WeekProjection, type WeekSource } from "./week-projections.ts";
 import { loadSeasonProjections } from "./projections.ts";
 import type { ScoringSettings, Position } from "../sleeper/types.ts";
 
@@ -26,6 +26,24 @@ export interface RosProjection {
 
 const RESERVE = new Set(["IR", "PUP", "NA", "SUS", "DNR", "COV", "OUT", "DOUBTFUL"]);
 
+// #region pure
+/** A week with no numbers must not enter the sum. Summing it as zeros takes
+ *  one week off everyone who plays it and nothing off a man who sits it out
+ *  (PUP, IR, bye), and that is a cut: on 2026-10-07, with week 5 read as
+ *  zeros, the waiver planner priced Croskey-Merritt 9 points lower, Charbonnet
+ *  (PUP) the same, and cleared "drop Croskey-Merritt for Charbonnet" that the
+ *  real table refuses. Every completed and future week of 2026 carries 415 to
+ *  507 scored rows (measured 2026-10-07, weeks 1 to 17), so an empty table is
+ *  the feed, never the calendar. No numbers, no value, no decision. */
+export function assertUsableWeek(table: WeekProjection[], week: number): void {
+  if (tableIsUsable(table)) return;
+  throw new Error(
+    `week ${week} projection table has no numbers (${scoredRows(table)} rows scored, ${MIN_SCORED_ROWS} needed); ` +
+      "rest-of-season value cannot be built from it, so no roster decision is made on it",
+  );
+}
+// #endregion
+
 // Build ROS projections for every fantasy player. `fromWeek` is the first week
 // still to be played (the current NFL week). Weekly tables are cached per week,
 // so the repeated fetch is cheap after the first run of the day.
@@ -33,7 +51,7 @@ export async function loadRestOfSeason(
   season: string,
   fromWeek: number,
   scoring: ScoringSettings,
-  opts?: { forceRefresh?: boolean; stashSeasonMin?: number },
+  opts?: { forceRefresh?: boolean; stashSeasonMin?: number; source?: WeekSource },
 ): Promise<Map<string, RosProjection>> {
   const weeks: number[] = [];
   for (let w = Math.max(1, fromWeek); w <= CHAMPIONSHIP_WEEK; w++) weeks.push(w);
@@ -42,7 +60,8 @@ export async function loadRestOfSeason(
   // week's on-disk cache; the volume is small (a dozen weeks at most).
   const sum = new Map<string, RosProjection>();
   for (const w of weeks) {
-    const table = await loadWeekProjections(season, w, scoring, { forceRefresh: opts?.forceRefresh });
+    const table = await loadWeekProjections(season, w, scoring, { forceRefresh: opts?.forceRefresh, source: opts?.source });
+    assertUsableWeek(table, w);
     for (const p of table) {
       const cur = sum.get(p.playerId);
       if (cur) {

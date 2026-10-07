@@ -162,7 +162,8 @@ async function main(): Promise<void> {
   if (plan.unfilled.length) {
     console.log(`  UNFILLED SLOTS: ${plan.unfilled.join(", ")} (not enough healthy bodies)`);
   }
-  if (!plan.changed) console.log("  already set on the site; nothing to write.");
+  if (plan.hold) console.log(`  HELD: ${plan.hold}; nothing to write.`);
+  else if (!plan.changed) console.log("  already set on the site; nothing to write.");
 
   logEvent("coach", "lineup-plan", `Week ${week} lineup, ${total.toFixed(1)} projected${live ? "" : " (dry run)"}`, {
     week, leagueId, total,
@@ -170,6 +171,7 @@ async function main(): Promise<void> {
     excluded: excluded.map((e) => ({ name: e.player.name, reason: e.reason })),
     unfilled: plan.unfilled,
     changed: plan.changed,
+    hold: plan.hold ?? null,
   });
 
   if (!live) {
@@ -185,6 +187,12 @@ async function main(): Promise<void> {
     await sendAlertOnce("Lineup has an unfillable slot", hole.message, { key: hole.key, withinMs: 7 * 24 * 3_600_000 });
   }
 
+  // No numbers means no plan. Say so as a held lineup, not as a correct one.
+  if (plan.hold) {
+    console.log(`\nWeek ${week} lineup held: ${plan.hold}`);
+    logEvent("coach", "lineup-held", `Week ${week} lineup not written: ${plan.hold}`, { week, leagueId, hold: plan.hold });
+    return;
+  }
   // Nothing to do beats a pointless mutation on a live roster.
   if (!plan.changed) {
     console.log(`\nWeek ${week} lineup already correct; no write.`);

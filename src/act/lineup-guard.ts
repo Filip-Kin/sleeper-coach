@@ -52,6 +52,8 @@ export interface LineupPlan {
   changed: boolean;
   unfilled: string[]; // slots the solver could not fill; the current occupant is kept
   swaps: LineupSwap[];
+  /** Set when the plan was not made at all: the numbers give no basis. */
+  hold?: string;
 }
 
 /** Slots with the same label are interchangeable (FLEX, FLEX), so a lineup
@@ -148,6 +150,18 @@ export function planLineup(current: string[], candidates: LineupPlayer[], slots:
   const active = new Set(candidates.map((p) => p.playerId));
   const site = slots.map((_, i) => current[i] || "0");
   const cur = site.map((pid) => (pid !== "0" && !active.has(pid) ? "0" : pid));
+  // 0. No number for anyone is no basis for a decision, not a tie to break.
+  //    On 2026-10-07 05:15 ET the projection feed answered with every row
+  //    at zero; the solver then "outscored" Chase Brown and Nico Collins
+  //    with Croskey-Merritt and Dowdle at 0.0 against 0.0 and wrote it. The
+  //    loader refuses such a table now (week-projections.ts); this is the
+  //    last gate before a write, for both writers, whatever the loader did.
+  //    Table-level only: a single starter at zero with a game is the feed
+  //    saying he is not expected to play (Collins 09-25, Smith 10-01, both
+  //    Questionable at 0.0 and rightly benched), never a reason to hold.
+  if (!candidates.some((p) => p.points > 0)) {
+    return { ids: site, changed: false, unfilled: [], swaps: [], hold: "no projection for anyone on the active roster; the week table is empty or unpublished" };
+  }
   // 1. Locked starters stay where they are; locked bench players cannot come in.
   const pinned = cur.map((pid) => (pid !== "0" && locked.has(pid) ? pid : null));
   const pinnedSet = new Set(pinned.filter((p): p is string => p !== null));
@@ -357,6 +371,7 @@ const NOTICE_MS = 60 * 60_000;
 const PIN_MS = 24 * 60 * 60_000;
 const pinned = new Map<string, number>();
 let emptyProjectionLogged = 0;
+let holdLogged = 0;
 
 export interface GuardDeps {
   /** Can a write go out right now? The daemon answers from its token check. */
@@ -373,6 +388,7 @@ export function resetGuardStateForTests(): void {
   pinned.clear();
   lastHeldNotice = 0;
   emptyProjectionLogged = 0;
+  holdLogged = 0;
 }
 
 /** One pass. Returns the plan (changed or not), or null when out of season. */
@@ -419,6 +435,13 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   // matchupLegStarters) and did on 2026-09-23.
   const onSite = await currentStarters(tokenGql(), week, mine.starters ?? []);
   const plan = planLineup(onSite, candidates, slots, locked, SWAP_MARGIN, { kickoffs, now, questionable: liveQuestionable(mine) });
+  if (plan.hold) {
+    if (now - holdLogged > NOTICE_MS) {
+      holdLogged = now;
+      console.log(`[lineup-guard] week ${week} held: ${plan.hold}`);
+    }
+    return plan;
+  }
   if (!plan.changed) return plan;
 
   const key = plan.ids.join(",");
