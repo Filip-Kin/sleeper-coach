@@ -85,16 +85,39 @@ describe("an open bench slot goes to the body worth most to the team", () => {
   });
 });
 
-describe("parking a player on NFL IR is still a deferred drop", () => {
+describe("parking a player on NFL IR is a deferred drop on the ONE value (2026-10-06)", () => {
+  // Filip, 2026-10-06: "take advantage of IR". The stash is offered for
+  // any add; on the return the activation cuts the lowest rest-of-season
+  // value that is not a starter (roster-fit.ts), and the planner names him.
+  // On this roster that is Mark Andrews at 119.8, the man the roster sheds
+  // first whatever the move. A seat that costs him later is paid for the
+  // same way a drop is: a lineup gain, a bench upgrade at the newcomer's
+  // own position, or a one-week rental. A fifth receiver worth less than
+  // Josh Downs pays nothing, so the 2026-10-01 outcome stands.
   const full: RosterState = { roster, openBenchSlots: 0, openIrSlots: 2, startingSlots: SLOTS, irEligible, currentStarters: starters, weeksLeft: 14 };
-  test("no free agent is added into Etienne's slot on the wire of the day", () => {
-    expect(planWaivers(wire, full, DEFAULT_WAIVERS).filter((m) => m.kind === "free-add")).toEqual([]);
+  test("Malik Washington is not seated by parking Etienne: the seat would cost Andrews on the return, and a fifth receiver worth less than Downs is no upgrade at his position", () => {
+    const m = planOne(fa("Malik Washington"), full, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("skip");
+    expect(m.reason).toContain("ir-stash lifts the lineup just +0");
+    expect(chooseForcedDrops(roster.filter((p) => p.name !== "Travis Etienne"), 1, undefined, starters)[0]?.name).toBe("Mark Andrews");
   });
-  test("why: with Washington in his slot, Etienne's return cuts Mark Andrews, a swap the planner refuses directly", () => {
-    const onReturn = [...roster.map((p) => (p.name === "Travis Etienne" ? { ...p, injuryStatus: undefined, returnsBeforePlayoffs: false } : p)), fa("Malik Washington")];
-    expect(chooseForcedDrops(onReturn, 1, undefined, starters)[0]?.name).toBe("Mark Andrews");
-    const direct = planOne(fa("Malik Washington"), { ...full, openIrSlots: 0 }, DEFAULT_WAIVERS);
-    expect(direct.kind).toBe("skip");
+  test("a receiver who beats Downs by a point a week is seated by parking Etienne: the deferred cut of Andrews is paid by the upgrade", () => {
+    const m = planOne({ ...fa("Malik Washington"), points: 165 }, full, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(m.dropPath).toBe("ir-stash");
+    expect(m.irStash).toBe("Travis Etienne");
+    expect(m.reason).toContain("Mark Andrews goes");
+  });
+  test("every free add made through the stash leaves a return cut the planner names: the newcomer, his direct drop, or the first-shed man", () => {
+    const first = chooseForcedDrops(roster.filter((p) => p.name !== "Travis Etienne"), 1, undefined, starters)[0]?.name ?? null;
+    const adds = planWaivers(wire, full, DEFAULT_WAIVERS).filter((m) => m.kind === "free-add" && m.dropPath === "ir-stash");
+    expect(adds.length).toBeGreaterThan(0);
+    for (const m of adds) {
+      const inc = wire.find((p) => p.name === m.add)!;
+      const onReturn = [...roster.map((p) => (p.name === m.irStash ? { ...p, injuryStatus: undefined, returnsBeforePlayoffs: false } : p)), inc];
+      const cut = chooseForcedDrops(onReturn, 1, undefined, starters)[0]?.name ?? null;
+      expect([m.add, m.irStash, first]).toContain(cut);
+    }
   });
 });
 

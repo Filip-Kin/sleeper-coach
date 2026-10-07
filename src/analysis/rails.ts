@@ -27,6 +27,10 @@ export interface RailPlayer {
    *  maths, but he is committed: no other move may cut him or trade him away.
    *  Set on the trade snapshot (trade-wire.ts markClaimDrops). */
   claimDrop?: boolean;
+  /** The add side of one of our own pending waiver claims. Planned with as
+   *  ours (so a second claim does not count the seat he will take), but not
+   *  ours yet: never a drop, never a stash, never offered in a trade. */
+  claimAdd?: boolean;
   injuryStatus?: string; // Sleeper injury_status, if any
   returnsBeforePlayoffs?: boolean; // hurt but expected back before week 16
   /** Full-season projection: the talent signal, the tie-break behind `points`. */
@@ -85,6 +89,9 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
   // him now kills the claim (nobody left to drop) or the trade (nobody left to
   // give) when the other one processes. 2026-09-30: the proposer chose a deal
   // giving Kenny Gainwell while a claim for Croskey-Merritt was dropping him.
+  if (player.claimAdd) {
+    return { allowed: false, reason: `"${player.name}" is the add of a pending roster move and is not ours to move yet` };
+  }
   if (player.claimDrop) {
     // The reason reaches the rival in a DM, so it does not say what the move
     // is: "the drop of our pending waiver claim" tells a manager with better

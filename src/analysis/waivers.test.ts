@@ -101,12 +101,14 @@ t("a non-upgrade is skipped", m5.kind === "skip", `${m5.kind} (${m5.reason})`);
 //    Adding a cleared player should stash the injured player on IR (no drop)
 //    rather than cut anyone. Breece Hall is IR-eligible.
 const withIr: RosterState = { roster, openBenchSlots: 0, openIrSlots: 1, startingSlots: SLOTS };
-//    Since 2026-10-02 only for an add the LINEUP justifies: a bench upgrade
-//    is a swap with the body he beats, never a stash (claim-stash.test.ts).
+//    Since 2026-10-06 for any add whose return forecast cuts nobody the move
+//    may not cost: here Breece Hall (40 points) is himself the lowest value
+//    on the roster when he comes back, so he is released then and nobody
+//    else ever pays (claim-stash.test.ts, open-slot.test.ts).
 const m6 = planOne(avail("Star WR", "WR", 400, false), withIr, DEFAULT_WAIVERS);
 t("open IR slot stashes the injured incumbent instead of dropping, for an add who starts", m6.dropPath === "ir-stash" && m6.drop === null && m6.startsForUs, `${m6.dropPath}/${m6.drop}`);
 const m6b = planOne(avail("Depth WR", "WR", 175, false), withIr, DEFAULT_WAIVERS);
-t("a bench upgrade never goes through the stash", m6b.dropPath !== "ir-stash" && m6b.irStash === null, `${m6b.kind}/${m6b.dropPath}/${m6b.drop}`);
+t("a bench upgrade goes through the stash when the return cut is the stashed man himself", m6b.dropPath === "ir-stash" && m6b.irStash === "Breece Hall" && m6b.drop === null && /he himself goes/.test(m6b.reason), `${m6b.kind}/${m6b.dropPath}/${m6b.drop} (${m6b.reason})`);
 
 // 7. Only ONE claim per cycle: planWaivers ranks free-adds first, then the best
 //    claim, and bestClaim returns exactly one (or none). Going to the back of
@@ -192,7 +194,10 @@ const noOutIr = (s?: string | null): boolean => ["IR", "PUP", "SUS", "COV"].incl
 
 const irOur = irOpportunities(irRoster, 2, ourLeagueIr);
 t("IR detection stashes the injured-returns player first", irOur[0]?.name === "Hurt Stash" && irOur[0]?.isStash === true, JSON.stringify(irOur.map((o) => o.name)));
-t("IR detection includes an OUT player when the league allows OUT onto IR", irOur.some((o) => o.name === "Ruled Out"), JSON.stringify(irOur.map((o) => o.name)));
+// Longest expected absence first (2026-10-06): the two on NFL IR before the
+// game-day Out, so with three slots he is third.
+t("IR detection includes an OUT player when the league allows OUT onto IR", irOpportunities(irRoster, 3, ourLeagueIr).some((o) => o.name === "Ruled Out"), JSON.stringify(irOur.map((o) => o.name)));
+t("IR detection ranks a game-day Out behind a player the NFL has parked", irOur.every((o) => o.name !== "Ruled Out"), JSON.stringify(irOur.map((o) => o.name)));
 t("IR detection caps at the number of free IR slots", irOur.length === 2, String(irOur.length));
 
 const irNoOut = irOpportunities(irRoster, 2, noOutIr);

@@ -13,31 +13,31 @@
 
 import type { WaiverMove } from "../analysis/waivers.ts";
 
-type ClaimMove = Pick<WaiverMove, "add" | "drop" | "dropPath" | "irStash"> & { owedSlot?: boolean };
+type ClaimMove = Pick<WaiverMove, "add" | "drop" | "dropPath" | "irStash">;
 
 /** What a move costs the roster, as the two-looks key spells it: the player
  *  dropped, or the player parked on IR (he comes back, and then somebody
- *  makes room: a deferred drop). Null when an open slot absorbs the add. */
-export function moveCost(m: Pick<WaiverMove, "drop" | "dropPath" | "irStash"> & { owedSlot?: boolean }): string | null {
+ *  makes room: a deferred drop). Null when an open slot absorbs the add,
+ *  however the slot arose (Filip, 2026-10-06: an IR slot is a roster
+ *  expansion; the return is priced on the way in, waivers.ts). */
+export function moveCost(m: Pick<WaiverMove, "drop" | "dropPath" | "irStash">): string | null {
   if (m.drop) return m.drop;
   if (m.dropPath === "ir-stash") return `stash ${m.irStash ?? "?"}`;
-  // The open slot of a player of ours on IR: he comes back, so it is a cost too.
-  return m.owedSlot ? "the slot of a player on IR" : null;
+  return null;
 }
 
 export interface ClaimDeps {
-  /** Is a claim of ours already pending? Then this one is not filed. "At
-   *  most one claim per cycle" was enforced per RUN only, and Tuesday has
-   *  several claim runs (the 20:00 job, one per drop in the league). Each
-   *  plans against the roster as it is today: the pending add is not in the
-   *  lineup it measures against, so two claims can each count the same
-   *  starter's seat as their gain, and each names its own drop. The next run
-   *  after the pending claim processes plans again from the real roster. */
-  claimPending: () => boolean;
   /** May an IR move be made at all right now? False while a game is in
-   *  progress (Sleeper locks reserve) or while another claim of ours is
-   *  pending. Asked BEFORE the two looks, so a held claim keeps its recorded
-   *  look and goes through on the first run that can write. */
+   *  progress (Sleeper locks reserve). Asked BEFORE the two looks, so a
+   *  held claim keeps its recorded look and goes through on the first run
+   *  that can write.
+   *
+   *  More than one claim of ours may be pending (Filip, 2026-10-06: two
+   *  injured players, two pickups). The planner counts a pending add as
+   *  ours (RailPlayer.claimAdd) and holds his seat, so a second claim
+   *  measures its gain against a roster with the first one landed and
+   *  cannot name the first one's drop (railsWithPendingDrops). Until
+   *  2026-10-06 a pending claim held every later claim. */
   stashReady: () => Promise<boolean>;
   /** The two looks (drop-intent.ts). True when this run may write. */
   confirmed: (kind: string, add: string, cost: string | null) => boolean;
@@ -53,12 +53,10 @@ export interface ClaimDeps {
 export type ClaimOutcome =
   | { status: "filed"; transactionId: string; submitStatus: string }
   | { status: "waiting" } // first look recorded, or inside the confirmation window
-  | { status: "held" }; // a claim of ours is pending, or the IR slot cannot be freed now: nothing written, nothing filed
+  | { status: "held" }; // the IR slot cannot be freed now: nothing written, nothing filed
 
 export async function fileClaim(claim: ClaimMove, deps: ClaimDeps): Promise<ClaimOutcome> {
   const viaStash = claim.dropPath === "ir-stash";
-  // Before the looks, so nothing is recorded for a claim that cannot go.
-  if (deps.claimPending()) return { status: "held" };
   // No slot, no claim: it would be refused at processing and the player lost.
   if (viaStash && (!claim.irStash || !(await deps.stashReady()))) return { status: "held" };
   if (!deps.confirmed("claim", claim.add, moveCost(claim))) return { status: "waiting" };

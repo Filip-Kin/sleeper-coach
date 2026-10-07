@@ -54,28 +54,36 @@ describe("a claim through an open IR slot", () => {
     expect(m.reason).toContain("stash Travis Etienne");
     expect(m.reason.endsWith("— no drop")).toBe(false);
   });
-  test("a bench upgrade of 2.3 a week is the same claim with the IR slot open or full: a swap for the man he beats", () => {
-    for (const state of [irFull, irOpen]) {
-      const m = planOne(onWaivers("Malik Washington", 180), state, DEFAULT_WAIVERS);
-      expect(m.kind).toBe("waiver-claim");
-      expect(m.dropPath).toBe("drop");
-      expect(m.drop).toBe("Josh Downs");
-      expect(m.irStash).toBeNull();
-    }
+  // 2026-10-06 (Filip: "take advantage of IR"): with the IR slot open the
+  // same bench upgrade parks Etienne and drops nobody today. Downs stays as
+  // depth; on Etienne's return the activation cuts the lowest value on the
+  // roster, Mark Andrews at 119.8, who is the man the roster sheds first
+  // whatever this move does (cutFirst). With the IR slots full it is the
+  // swap it always was.
+  test("a bench upgrade of 2.3 a week: a swap for Downs with IR full, a stash of Etienne with IR open", () => {
+    const full = planOne(onWaivers("Malik Washington", 180), irFull, DEFAULT_WAIVERS);
+    expect(full.kind).toBe("waiver-claim");
+    expect(full.drop).toBe("Josh Downs");
+    const open = planOne(onWaivers("Malik Washington", 180), irOpen, DEFAULT_WAIVERS);
+    expect(open.kind).toBe("waiver-claim");
+    expect(open.dropPath).toBe("ir-stash");
+    expect(open.irStash).toBe("Travis Etienne");
+    expect(open.drop).toBeNull();
+    expect(open.reason).toContain("Mark Andrews goes");
   });
-  test("the same for a back: 2.6 a week over Croskey-Merritt, who is the drop", () => {
-    for (const state of [irFull, irOpen]) {
-      const m = planOne(onWaivers("RJ Harvey", 180), state, DEFAULT_WAIVERS);
-      expect(m.kind).toBe("waiver-claim");
-      expect(m.drop).toBe("Jacory Croskey-Merritt");
-      expect(m.irStash).toBeNull();
-    }
+  test("the same for a back: 2.6 a week over Croskey-Merritt", () => {
+    const full = planOne(onWaivers("RJ Harvey", 180), irFull, DEFAULT_WAIVERS);
+    expect(full.drop).toBe("Jacory Croskey-Merritt");
+    const open = planOne(onWaivers("RJ Harvey", 180), irOpen, DEFAULT_WAIVERS);
+    expect(open.kind).toBe("waiver-claim");
+    expect(open.irStash).toBe("Travis Etienne");
+    expect(open.drop).toBeNull();
   });
-  test("a free agent bench upgrade is a swap too, never a stash", () => {
+  test("a free agent bench upgrade goes the same way", () => {
     const m = planOne({ ...onWaivers("Malik Washington", 170), onWaivers: false }, irOpen, DEFAULT_WAIVERS);
     expect(m.kind).toBe("free-add");
-    expect(m.drop).toBe("Josh Downs");
-    expect(m.irStash).toBeNull();
+    expect(m.irStash).toBe("Travis Etienne");
+    expect(m.drop).toBeNull();
   });
   test("why: after a stash claim for a starter, Etienne's return cuts the same man the direct claim names", () => {
     const direct = planOne(onWaivers("Malik Washington", 260), irFull, DEFAULT_WAIVERS);
@@ -108,32 +116,47 @@ describe("the stash is judged on the season lineup with the stashed man in it", 
     const full = planOne(onWaivers("Malik Washington", 165), st(0), DEFAULT_WAIVERS);
     expect(open.kind).not.toBe("waiver-claim");
     expect(open.kind).toBe(full.kind);
-    expect(open.irStash).toBeNull();
+    expect(open.irStash).not.toBe("Nico Collins");
   });
 });
 
-describe("an open slot that belongs to a player on IR", () => {
-  // Etienne parked, his slot empty (a stash claim that lost).
+describe("an open slot left by a player on IR (2026-10-06: an IR slot is a roster expansion)", () => {
+  // Etienne parked, his slot empty (a stash claim that lost). The seat is a
+  // seat; his return is priced on the way in: whoever the activation would
+  // cut when he comes back must be the newcomer, Etienne himself, or the
+  // player the direct path would drop today (waivers.ts returnsAcceptable).
   const active = roster.filter((p) => p.name !== "Travis Etienne");
-  const owed: RosterState = { ...irOpen, roster: active, openBenchSlots: 1, owedBenchSlots: 1, openIrSlots: 1 };
+  const etienne = roster.find((p) => p.name === "Travis Etienne")!;
+  const open: RosterState = { ...irOpen, roster: active, reserve: [{ ...etienne, onIr: true }], openBenchSlots: 1, openIrSlots: 1 };
   const fa = (name: string, points?: number): AvailablePlayer => ({ ...tradePlayer(idOf(name)), ...(points ? { points } : {}), onWaivers: false });
-  test("it is not a free seat: the depth receiver who would take a truly open slot is left on the wire", () => {
-    expect(planOne(fa("Malik Washington"), { ...owed, owedBenchSlots: 0 }, DEFAULT_WAIVERS).kind).toBe("free-add");
-    expect(planOne(fa("Malik Washington"), owed, DEFAULT_WAIVERS).kind).toBe("skip");
+  test("a depth receiver worth more than Mark Andrews is not seated: the seat costs Andrews on Etienne's return, and a fifth receiver is no upgrade at his position", () => {
+    const m = planOne(fa("Malik Washington"), open, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("skip");
+    expect(m.reason).toContain("bench -5.1");
+    expect(chooseForcedDrops(active, 1, undefined, starters)[0]?.name).toBe("Mark Andrews");
+    expect(chooseForcedDrops([...active, fa("Malik Washington"), { ...etienne, injuryStatus: undefined, returnsBeforePlayoffs: false }], 1, undefined, starters)[0]?.name).toBe("Mark Andrews");
+  });
+  test("a body worth less than Andrews is seated: on Etienne's return he is the one who goes", () => {
+    const cheap = fa("Malik Washington", 100);
+    const m = planOne(cheap, open, DEFAULT_WAIVERS);
+    expect(m.kind).toBe("free-add");
+    expect(m.dropPath).toBe("bench-slot");
+    expect(chooseForcedDrops([...active, cheap, { ...etienne, injuryStatus: undefined, returnsBeforePlayoffs: false }], 1, undefined, starters)[0]?.name).toBe("Malik Washington");
   });
   test("an add the lineup justifies goes INTO it: nobody dropped, and Rico Dowdle is not parked as well", () => {
     for (const p of [fa("Malik Washington", 260), onWaivers("Malik Washington", 260)]) {
-      const m = planOne(p, owed, DEFAULT_WAIVERS);
+      const m = planOne(p, open, DEFAULT_WAIVERS);
       expect(["free-add", "waiver-claim"]).toContain(m.kind);
       expect(m.dropPath).toBe("bench-slot");
       expect(m.drop).toBeNull();
       expect(m.irStash).toBeNull();
     }
   });
-  test("a bench upgrade is still a swap with the man he beats", () => {
-    const m = planOne(fa("Malik Washington", 170), owed, DEFAULT_WAIVERS);
+  test("a bench upgrade over Downs takes the seat and Downs stays as depth; Mark Andrews, the man shed first anyway, goes on the return", () => {
+    const m = planOne(fa("Malik Washington", 170), open, DEFAULT_WAIVERS);
     expect(m.kind).toBe("free-add");
-    expect(m.drop).toBe("Josh Downs");
+    expect(m.dropPath).toBe("bench-slot");
+    expect(m.drop).toBeNull();
+    expect(chooseForcedDrops(active, 1, undefined, starters)[0]?.name).toBe("Mark Andrews");
   });
 });
-

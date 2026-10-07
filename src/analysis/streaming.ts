@@ -133,7 +133,10 @@ export interface StreamDecision {
  *  `week` is the current NFL week. `mayLeave` answers whether a rostered
  *  player may be dropped at all (never-drop list, the drop of a pending
  *  claim). `forcedDrop` is the cheapest legal cut for a scarce position, or
- *  null when the rails allow none; it is only asked when a cut is the path. */
+ *  null when the rails allow none; it is only asked when a cut is the path.
+ *  `currentStarters` are this week's starters on the site; a spare kicker
+ *  or defense who is starting this week is not a spare. `priorityFree`:
+ *  we are last in the waiver order, so a claim costs nothing. */
 export function planStream(args: {
   need: StreamNeed;
   week: number;
@@ -142,8 +145,12 @@ export function planStream(args: {
   roster: TradePlayer[];
   mayLeave: (name: string) => boolean;
   forcedDrop: () => string | null;
+  currentStarters?: string[];
+  priorityFree?: boolean;
 }): StreamDecision {
   const { need, week, openBenchSlots, pool, roster, mayLeave, forcedDrop } = args;
+  const priorityFree = !!args.priorityFree;
+  const starters = new Set((args.currentStarters ?? []).map((n) => n.toLowerCase()));
   const out = (how: StreamHow, add: StreamPoolPlayer | null, drop: string | null, reason: string): StreamDecision =>
     ({ need, how, add: add?.name ?? null, drop, onWaivers: add?.onWaivers ?? false, points: add?.weekPoints ?? 0, reason });
   const plays = pool.filter((p) => p.position === need.position && p.bye !== need.week && p.weekPoints > 0);
@@ -155,10 +162,12 @@ export function planStream(args: {
   if (openBenchSlots > 0) {
     // A kicker or a defense is never worth waiver priority, open slot or
     // not: every one of them clears on Wednesday and the next free one is
-    // within a point a week. Before 2026-10-06 this branch took the best
-    // by projection whatever his status, and the claim job would have
-    // filed for him with no second look, using up the run's one claim.
-    const pick = SWAP_POSITIONS.has(need.position) ? byWeek.find((p) => !p.onWaivers) : best;
+    // within a point a week. Unless the priority is free (we are last),
+    // when the claim costs nothing and gets him a day sooner. Before
+    // 2026-10-06 this branch took the best by projection whatever his
+    // status, and the claim job would have filed for him with no second
+    // look, using up the run's one claim.
+    const pick = SWAP_POSITIONS.has(need.position) && !priorityFree ? byWeek.find((p) => !p.onWaivers) : best;
     if (!pick) return out("wait", null, null, `every ${need.position} who plays week ${need.week} is on waivers until the run clears; a ${need.position} is not worth a claim`);
     return out("open-slot", pick, null, `into an open bench slot, covering ${need.coveringFor.join(", ")} in week ${need.week}`);
   }
@@ -167,6 +176,30 @@ export function planStream(args: {
     const covered = roster
       .filter((p) => p.position === need.position && need.coveringFor.includes(p.name) && mayLeave(p.name))
       .sort((a, b) => a.points - b.points)[0];
+    // A SPARE kicker or defense (Filip, 2026-10-06: "keep our starters"):
+    // a second body at either streamable position who is not starting
+    // this week, usually last week's one-week rental, worth less for the
+    // rest of the season than the player on bye. He leaves instead, now,
+    // and the starter stays. Kicker and defense are compared on the one
+    // value (they are the two interchangeable positions).
+    const bestAt = (pos: string): TradePlayer | undefined => roster.filter((p) => p.position === pos).sort((a, b) => b.points - a.points)[0];
+    const spare = roster
+      .filter((p) => SWAP_POSITIONS.has(p.position) && !need.coveringFor.includes(p.name) && !starters.has(p.name.toLowerCase()) && mayLeave(p.name))
+      // The extra body at his position only: never our one kicker or our
+      // one defense, never the better of two.
+      .filter((p) => bestAt(p.position)?.name !== p.name)
+      .filter((p) => !covered || p.points <= covered.points)
+      .sort((a, b) => a.points - b.points)[0];
+    // He stays, so rank on rest-of-season value; and a swap is never worth
+    // waiver priority, so only a player who can be added for free now,
+    // unless the priority is free (we are last).
+    const free = plays.filter((p) => priorityFree || !p.onWaivers).sort((a, b) => b.value - a.value || b.weekPoints - a.weekPoints)[0];
+    if (spare) {
+      // He is not playing for us this week either way, so the swap may
+      // happen before the need week; but only for a free body, as below.
+      if (!free) return out("wait", null, null, `every ${need.position} who plays week ${need.week} is on waivers until the run clears`);
+      return out("swap", free, spare.name, `${spare.name} is a spare ${spare.position} worth less than ${covered?.name ?? "the starter"}; ${free.name} plays week ${need.week} and takes his slot`);
+    }
     if (covered) {
       // In his bye week he is not playing, so the swap costs this week
       // nothing. A week early it would take a kicker who plays out of the
@@ -174,9 +207,6 @@ export function planStream(args: {
       if (need.week !== week) {
         return out("wait", null, null, `${covered.name} is swapped for a ${need.position} who plays in week ${need.week} itself, not before`);
       }
-      // He stays, so rank on rest-of-season value; and a swap is never worth
-      // waiver priority, so only a player who can be added for free now.
-      const free = plays.filter((p) => !p.onWaivers).sort((a, b) => b.value - a.value || b.weekPoints - a.weekPoints)[0];
       if (!free) return out("wait", null, null, `every ${need.position} who plays week ${need.week} is on waivers until the run clears`);
       return out("swap", free, covered.name, `${covered.name} is off in week ${need.week}; ${free.name} plays it and replaces him`);
     }

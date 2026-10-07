@@ -14,7 +14,6 @@ const slotClaim = { add: "Star Receiver", drop: null, dropPath: "bench-slot" as 
 function deps(over: Partial<ClaimDeps> = {}): { d: ClaimDeps; calls: string[] } {
   const calls: string[] = [];
   const d: ClaimDeps = {
-    claimPending: () => false,
     stashReady: async () => { calls.push("ready?"); return true; },
     confirmed: (kind, add, cost) => { calls.push(`confirmed ${kind} ${add} ${cost}`); return true; },
     stash: async (name) => { calls.push(`stash ${name}`); return true; },
@@ -29,7 +28,7 @@ describe("what a move costs the roster", () => {
   test("a drop costs the dropped player", () => expect(moveCost(dropClaim)).toBe("Josh Downs"));
   test("an IR stash costs the stashed player: he comes back and somebody makes room", () => expect(moveCost(stashClaim)).toBe("stash Travis Etienne"));
   test("an open slot costs nobody", () => expect(moveCost(slotClaim)).toBeNull());
-  test("the open slot of a player on IR is a cost: an add into it takes two looks", () => expect(moveCost({ ...slotClaim, owedSlot: true })).toBe("the slot of a player on IR"));
+  test("an open slot of a player on IR costs nobody either: his return was priced on the way in (waivers.ts returnsAcceptable)", () => expect(moveCost({ ...slotClaim })).toBeNull());
 });
 
 describe("filing a claim", () => {
@@ -45,7 +44,7 @@ describe("filing a claim", () => {
     expect(r.status).toBe("waiting");
     expect(calls).toEqual(["ready?"]);
   });
-  test("IR locked by a game, or a claim of ours already pending: held BEFORE the looks, so the recorded look is not used up", async () => {
+  test("IR locked by a game: held BEFORE the looks, so the recorded look is not used up", async () => {
     const { d, calls } = deps({ stashReady: async () => false });
     const r = await fileClaim(stashClaim, d);
     expect(r.status).toBe("held");
@@ -68,14 +67,10 @@ describe("filing a claim", () => {
     await expect(fileClaim(stashClaim, d)).rejects.toThrow("roster invalid");
     expect(calls.at(-1)).toBe("undo Travis Etienne");
   });
-  test("a claim of ours already pending: a drop claim is held before the looks, nothing recorded, nothing filed", async () => {
-    // 2026-10-06 review. One claim per cycle was a per-run rule; Tuesday has
-    // several claim runs and each names its own drop.
-    const { d, calls } = deps({ claimPending: () => true });
-    expect((await fileClaim(dropClaim, d)).status).toBe("held");
-    expect((await fileClaim(stashClaim, d)).status).toBe("held");
-    expect((await fileClaim(slotClaim, d)).status).toBe("held");
-    expect(calls).toEqual([]);
+  test("a claim of ours already pending holds nothing: the planner counts the pending add as ours and holds his seat (2026-10-06, two injured players, two pickups)", async () => {
+    const { d, calls } = deps();
+    expect((await fileClaim(slotClaim, d)).status).toBe("filed");
+    expect(calls).toEqual(["confirmed claim Star Receiver null", "submit Star Receiver null"]);
   });
   test("a claim with a drop asks nothing about IR and moves nobody", async () => {
     const { d, calls } = deps();

@@ -138,9 +138,15 @@ describe("the waiver run is wired to the two-week schedule", () => {
   test("a failed read of the drops is not swallowed into 'nobody was dropped'", () => {
     expect(src).not.toMatch(/sleeper\.transactions\([^)]*\)\.catch/);
   });
-  test("one claim of ours pending at a time, on both claim paths", () => {
-    expect(src).toContain("claimPending: () => pending.adds.length > 0");
-    expect(src).toContain("if (!doClaims || claimUsed || pending.adds.length > 0)");
+  test("a pending claim of ours is planned with as ours, and holds no later claim (2026-10-06)", () => {
+    expect(src).not.toContain("claimPending");
+    expect(src).toContain("claimAdd: true");
+    expect(src).toContain("if (!doClaims || claimUsed) {");
+  });
+  test("the planner is told when a claim costs nothing and which week table to rent from", () => {
+    expect(src).toContain("priorityFree,");
+    expect(src).toContain("weekPoints,");
+    expect(src).toContain("reserve,");
   });
 });
 

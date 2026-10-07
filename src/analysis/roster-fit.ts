@@ -48,7 +48,7 @@ export interface ForcedDrop { name: string; cost: number; reason: string }
  *  the cap forces a drop, the question is only whom. */
 export function chooseForcedDrops(
   roster: RailPlayer[], count: number, _cfg: FairnessConfig = DEFAULT_FAIRNESS,
-  keep: string[] = [], rails: RailConfig = DEFAULT_RAILS,
+  keep: string[] = [], rails: RailConfig = DEFAULT_RAILS, slots: readonly string[] = STARTING_SLOTS,
 ): ForcedDrop[] {
   if (count <= 0) return [];
   const keepSet = new Set(keep.map((n) => n.toLowerCase()));
@@ -58,10 +58,14 @@ export function chooseForcedDrops(
   const candidates = cutOrder(roster
     .filter((p) => !keepSet.has(p.name.toLowerCase()))
     .filter((p) => canDrop(p.name, roster, forcedRails).allowed));
+  // A slot already empty before the cut is not the cut's doing: compare the
+  // holes after with the holes before, so a roster with no kicker can still
+  // shed a fifth receiver.
+  const holes = (r: RailPlayer[]): number => bestLineup(r, slots).starters.filter((x) => x.player === null).length;
   for (const c of candidates) {
     if (chosen.length >= count) break;
     const after = remaining.filter((p) => p.name.toLowerCase() !== c.name.toLowerCase());
-    const emptiesMandatory = bestLineup(after, STARTING_SLOTS).starters.some((x) => x.player === null);
+    const emptiesMandatory = holes(after) > holes(remaining);
     if (emptiesMandatory) continue;
     chosen.push({ name: c.name, cost: c.points, reason: `lowest rest-of-season value that keeps every starting slot filled (${Math.round(c.points)} points left this season)` });
     remaining.splice(remaining.findIndex((p) => p.name.toLowerCase() === c.name.toLowerCase()), 1);
