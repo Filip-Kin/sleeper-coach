@@ -76,9 +76,13 @@ export function chooseForcedDrops(
 }
 
 /** The starters a cut keeps. A starter is kept because the lineup guard
- *  chose him and a cut would empty his slot for the week. At a swap
- *  position (K, DEF) the slot does not empty when a BETTER body by the one
- *  rest-of-season value sits behind him and can take the slot this week:
+ *  chose him and a cut would empty his slot for the week. The slot does not
+ *  empty when a BETTER body by the one rest-of-season value can take it this
+ *  week: at a swap position (K, DEF) one sitting behind him on the roster;
+ *  at a flex position (RB, WR, TE) the newcomer the drop is for, when he is
+ *  the same position (the 2026-10-08 review: Josh Downs, 136, a bench
+ *  receiver on the one value starting week 6 at FLEX for Brown's bye, kept
+ *  from Matthew Golden, 154, who plays that week). At a swap position:
  *  the guard starts that body and the week costs a point or two, never the
  *  season. So a starting one-week rental is cut before the better kicker or
  *  defense on the bench, and before any season body (the review of
@@ -97,17 +101,33 @@ export function chooseForcedDrops(
  *  full-season talent; a full tie keeps the starter, since name order is no
  *  reason to lift a protection. Names compare as `keep` does,
  *  case-insensitively, within the one roster list. */
-export function keptStarters(starters: readonly string[], roster: readonly RailPlayer[], canFill: (body: RailPlayer, starter: RailPlayer) => boolean): string[] {
+export function keptStarters(starters: readonly string[], roster: readonly RailPlayer[], canFill: (body: RailPlayer, starter: RailPlayer) => boolean, newcomer?: RailPlayer): string[] {
   const lower = (n: string): string => n.toLowerCase();
   const starting = new Set(starters.map(lower));
   const betterThan = (q: RailPlayer, s: RailPlayer): boolean =>
     q.points > s.points || (q.points === s.points && (q.seasonPoints ?? 0) > (s.seasonPoints ?? 0));
   return starters.filter((name) => {
     const s = roster.find((p) => lower(p.name) === lower(name));
-    if (!s || !SWAP_POSITIONS.has(s.position)) return true;
+    if (!s) return true;
+    // The newcomer: a back, receiver or tight end arriving at the starter's
+    // own position who beats him on the one value and plays this week
+    // takes his slot, so the starter is not kept from the newcomer's own
+    // drop (waivers.ts evalPaths). Never across positions (a quarterback
+    // put DK Metcalf on the table on 2026-09-23), never a quarterback (a
+    // second one plays only when he beats the first, so his points are not
+    // his value), never a kicker or defense (a bye there is a swap in the
+    // bye week, streaming.ts, and the rostered rule below covers a rental).
+    if (newcomer && NEWCOMER_POSITIONS.has(s.position) && newcomer.position === s.position && betterThan(newcomer, s) && canFill(newcomer, s)) return false;
+    if (!SWAP_POSITIONS.has(s.position)) return true;
     const better = roster.some((q) => lower(q.name) !== lower(s.name) && q.position === s.position
       && !starting.has(lower(q.name)) && !q.onIr && !q.claimAdd && !q.claimDrop
       && betterThan(q, s) && canFill(q, s));
     return !better;
   });
 }
+
+/** The positions a newcomer may take a starter's slot at (keptStarters): the
+ *  flex positions, where a body is worth his rest-of-season points, the same
+ *  set a same-position upgrade may reach past the top-N rail for
+ *  (waivers.ts UPGRADE_POSITIONS). */
+const NEWCOMER_POSITIONS: ReadonlySet<string> = new Set(["RB", "WR", "TE"]);

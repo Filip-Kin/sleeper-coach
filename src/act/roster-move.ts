@@ -27,6 +27,7 @@ import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, u
 import { loadValues, liveStatusFromRosters, toRail, cutOrder, type PlayerValue } from "../analysis/value.ts";
 import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
 import { keptStarters } from "../analysis/roster-fit.ts";
+import { bestLineup } from "../analysis/trade.ts";
 import { loadStartableThisWeek } from "../analysis/week-projections.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { logEvent } from "../log.ts";
@@ -81,8 +82,12 @@ const pendingDrops: string[] = pending.drops;
 // A starter is kept from the cut unless he is a kicker or defense with a
 // better body behind him who can take the slot this week (roster-fit.ts
 // keptStarters): a starting one-week rental is cut before the better one.
+// For an add, the target counts as a body who can take a slot: a starting
+// back, receiver or tight end he beats at his own position and can replace
+// this week is a legal cut for him (the engine's same-position upgrade).
+const newcomer = (cmd === "add" || cmd === "claim") && name ? values.get(byName(name)?.playerId ?? "") : undefined;
 const kept = new Set(keptStarters(rail.filter((p) => starters.has(p.playerId!)).map((p) => p.name), rail,
-  (body, starter) => startable(body, starter) && !pendingDrops.includes(body.playerId ?? "")).map((n) => n.toLowerCase()));
+  (body, starter) => startable(body, starter) && !pendingDrops.includes(body.playerId ?? ""), newcomer ? toRail(newcomer) : undefined).map((n) => n.toLowerCase()));
 const legalCuts = cutOrder(rail.filter((p) => !kept.has(p.name.toLowerCase()) && !pendingDrops.includes(p.playerId!) && canDrop(p.name, rail, { ...DEFAULT_RAILS, protectTopN: 0 }).allowed));
 console.log(`\nWeek ${week}. Active ${view.active.length}/${league.roster_positions.length}, IR ${view.reserve.map((e) => e.name).join(", ") || "empty"}. Pending claims: +${pending.adds.length} / -${pending.drops.length}.`);
 console.log("\nOUR ROSTER (live values; * = starts this week; cut order among legal cuts shown)");
@@ -99,10 +104,19 @@ const drop = dropName ? byName(dropName) : undefined;
 if (dropName && !drop) { console.error(`no player named "${dropName}"`); process.exit(2); }
 
 // The cut check: whoever leaves must be the cheapest legal cut, or say why not.
-function checkCut(leaving: PlayerValue): void {
-  const cheapest = legalCuts[0];
+// A swap at the target's own position by a target who would NOT start in
+// the rest-of-season lineup is the engine's bench upgrade (waivers.ts
+// evalPaths: the cheapest same-position body goes, whatever a cheaper body
+// at another position is worth), so the order is among that position's
+// legal cuts. A target who starts costs the cheapest cut overall, as the
+// engine charges him.
+function checkCut(leaving: PlayerValue, target?: PlayerValue): void {
+  const slots = league.roster_positions.filter((s) => s !== "BN" && s !== "IR");
+  const targetStarts = !!target && bestLineup([...rail, toRail(target)], slots).starters.some((s) => s.player?.playerId === target.playerId);
+  const order = target && !targetStarts && target.position === leaving.position ? legalCuts.filter((p) => p.position === leaving.position) : legalCuts;
+  const cheapest = order[0];
   if (!cheapest) { console.error("no legal cut exists"); process.exit(2); }
-  const rank = legalCuts.findIndex((p) => p.playerId === leaving.playerId);
+  const rank = order.findIndex((p) => p.playerId === leaving.playerId);
   if (rank < 0) {
     console.error(`\n${leaving.name} is not a legal cut (a kept starter this week, pending claim's drop, never-drop, or a protected stash).`);
     if (!OVERRIDE) process.exit(2);
@@ -133,7 +147,7 @@ switch (cmd) {
     const full = view.active.length + pending.slotsNeeded >= cap;
     if (full && !drop) { console.error(`roster full (${view.active.length} + ${pending.slotsNeeded} held); name a --drop. Cheapest legal cut: ${legalCuts[0]?.name}`); process.exit(2); }
     if (drop) {
-      checkCut(drop);
+      checkCut(drop, target);
       const gainWk = Math.round(((target.value - drop.value) / target.weeksLeft) * 10) / 10;
       console.log(`swap value: ${target.name} ${target.valueAvg}/wk for ${drop.name} ${drop.valueAvg}/wk = ${gainWk >= 0 ? "+" : ""}${gainWk}/wk`);
       if (gainWk < 1 && !OVERRIDE) { console.error("under 1.0 points per week: not a swap worth a drop. --override to insist."); process.exit(2); }

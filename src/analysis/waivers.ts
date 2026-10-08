@@ -175,12 +175,14 @@ export interface RosterState {
    *  lineup guard decides who starts, and a drop table that can name DK
    *  Metcalf is the 2026-09-23 audit's finding R7. */
   currentStarters?: string[];
-  /** Whether a body can take a starter's slot this week: projected to play,
-   *  not locked out of the slot, not leaving on a pending claim
-   *  (week-projections.ts startableThisWeek). It decides which starter a cut
-   *  keeps (roster-fit.ts keptStarters): a starting kicker or defense with a
-   *  better body behind him who can fill the slot is the cut, not the better
-   *  body. Absent = nobody can, and every starter is kept. */
+  /** Whether a body, ours or arriving, can take a starter's slot this week:
+   *  projected to play, not locked out of the slot, not leaving on a pending
+   *  claim (week-projections.ts startableThisWeek). It decides which starter
+   *  a cut keeps (roster-fit.ts keptStarters): a starting kicker or defense
+   *  with a better body behind him who can fill the slot is the cut, not the
+   *  better body, and a starting back, receiver or tight end the newcomer
+   *  beats at his own position and can replace this week is a drop path for
+   *  that newcomer. Absent = nobody can, and every starter is kept. */
   canFill?: (body: RailPlayer, starter: RailPlayer) => boolean;
   /** Weeks left in the fantasy season, to turn a per-week margin into points. */
   weeksLeft?: number;
@@ -280,7 +282,7 @@ function lineupDelta(
   // drop path that is the dropped player; for a no-drop path (open slot, IR
   // stash) it is the cheapest bench body we could otherwise have cut, since
   // that is who the add is really being compared with.
-  const dropped = dropName && !seat ? state.roster.find((p) => p.name === dropName) ?? null : cheapestSwappable(incoming.position, state, rails);
+  const dropped = dropName && !seat ? state.roster.find((p) => p.name === dropName) ?? null : cheapestSwappable(incoming, state, rails);
   const benchGain = dropped && swappable(incoming.position, dropped.position)
     ? Math.round((incoming.points - dropped.points) * 10) / 10
     : 0;
@@ -336,14 +338,24 @@ const DEPTH_POSITIONS: ReadonlySet<string> = new Set(DEFAULT_FAIRNESS.depthPosit
  *  kicker or defense is never bench depth at all. */
 export const UPGRADE_POSITIONS: ReadonlySet<string> = new Set(["RB", "WR", "TE"]);
 
-function cheapestSwappable(position: string, state: RosterState, rails: RailConfig): RailPlayer | null {
-  const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
+/** The starters the newcomer's drop paths may not touch (roster-fit.ts
+ *  keptStarters): every name on the leg but a kicker or defense with a
+ *  better body behind him who can fill the slot, and a back, receiver or
+ *  tight end the newcomer himself beats on the one value and can replace
+ *  this week. With no `canFill` nobody fills a slot and every starter is
+ *  kept, the 2026-09-23 finding R7 as it stood. */
+function keptFrom(incoming: RailPlayer, state: RosterState): Set<string> {
+  return new Set(keptStarters(state.currentStarters ?? [], state.roster, state.canFill ?? (() => false), incoming).map((n) => n.toLowerCase()));
+}
+
+function cheapestSwappable(incoming: RailPlayer, state: RosterState, rails: RailConfig): RailPlayer | null {
+  const kept = keptFrom(incoming, state);
   // Same-position comparison, so the top-N rail is off here as it is for the
   // same-position drop path in evalPaths; every other rail holds.
   const swapRails: RailConfig = { ...rails, protectTopN: 0 };
   let best: RailPlayer | null = null;
   for (const p of state.roster) {
-    if (starters.has(p.name.toLowerCase()) || !swappable(position, p.position)) continue;
+    if (kept.has(p.name.toLowerCase()) || !swappable(incoming.position, p.position)) continue;
     if (!canDrop(p.name, state.roster, swapRails).allowed) continue;
     if (!best || p.points < best.points || (p.points === best.points && (p.seasonPoints ?? 0) < (best.seasonPoints ?? 0))) best = p;
   }
@@ -395,7 +407,12 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
 
   // Every canDrop-ALLOWED player is a candidate drop. canDrop is the authority on
   // what may leave the roster; we pick among the allowed ones by lineup delta.
-  // A current-week starter is never on the table (R7).
+  // A current-week starter the cut keeps is never on the table (R7, as
+  // narrowed on 2026-10-08: a starter is kept only while nobody better can
+  // fill his slot this week, the newcomer included. Josh Downs, a bench
+  // receiver on the one value starting a bye week at FLEX, was no path for
+  // Matthew Golden, 18 ROS better at his position and playing that week,
+  // and the add read as "drop Dowdle, +0").
   //
   // One widening (2026-09-30 review): at a flex position (UPGRADE_POSITIONS)
   // a better player at the SAME position may replace a bench player the
@@ -407,10 +424,10 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   // receiver. Never-drop, the stash, IR and a pending claim's drop are
   // checked with the top-N rail off and still refuse. Such a path is marked
   // upgradeOnly: it serves a bench upgrade and nothing else (see the sort).
-  const starters = new Set((state.currentStarters ?? []).map((n) => n.toLowerCase()));
+  const kept = keptFrom(incoming, state);
   const upgradeRails: RailConfig = { ...cfg.rails, protectTopN: 0 };
   for (const p of state.roster) {
-    if (starters.has(p.name.toLowerCase())) continue;
+    if (kept.has(p.name.toLowerCase())) continue;
     if (canDrop(p.name, state.roster, cfg.rails).allowed) {
       paths.push({ path: "drop", drop: p.name, reason: `drop ${p.name}` });
       continue;
@@ -422,8 +439,8 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   }
 
   // A spare kicker or defense (the extra body at his position, not the
-  // best there, not starting this week: a rental whose week is over) is a
-  // seat, not a cut. Without this a spent rental blocked his own seat:
+  // best there, not a kept starter this week: a rental whose week is over)
+  // is a seat, not a cut. Without this a spent rental blocked his own seat:
   // every depth body read as "drop the Bengals, lifts the lineup +0".
   const bestAt = new Map<string, string>();
   for (const p of state.roster) { const b = bestAt.get(p.position); if (!b || (state.roster.find((q) => q.name === b)?.points ?? 0) < p.points) bestAt.set(p.position, p.name); }
@@ -432,7 +449,7 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   // lineup guard writes the leg (second review, 2026-10-06).
   const isSpare = (name: string | null): boolean => {
     const p = name ? state.roster.find((q) => q.name === name) : undefined;
-    return !!p && SWAP_POSITIONS.has(p.position) && bestAt.get(p.position) !== p.name && !starters.has(p.name.toLowerCase())
+    return !!p && SWAP_POSITIONS.has(p.position) && bestAt.get(p.position) !== p.name && !kept.has(p.name.toLowerCase())
       && (state.weekPoints?.get(p.name) ?? 0) === 0;
   };
   const evals = paths.map((p) => {
@@ -701,7 +718,12 @@ export function planOne(
   // value on the roster and goes on the next move whatever this one does).
   const seatFree = laterCost.every((c) => (best.returning ?? []).includes(c) || c === cutFirst)
     && (!needsDrop || !!best.spare || (!!droppedPlayer && likeForLike(incoming.position, droppedPlayer.position) && droppedPlayer.points <= incoming.points));
-  const rentalOk = weekGain >= cfg.weekRentalMinPts && seatFree && gain >= 0;
+  // Never the seat of a body the top-N rail protects (an upgradeOnly path):
+  // a starter-tier player is not rented over for one week of points, however
+  // small the one-value gap the newcomer clears him by (the 2026-10-08
+  // review: a 140-point receiver with an 18-point week would have cut Josh
+  // Downs, 136 and starting, as a "rental").
+  const rentalOk = weekGain >= cfg.weekRentalMinPts && seatFree && gain >= 0 && !best.upgradeOnly;
   const move = (kind: MoveKind, priorityWorthy: boolean, rental: boolean, reason: string): WaiverMove =>
     ({ ...base, kind, drop, dropPath: path, irStash, rental, weekGainPts: weekGain, gainPts: gain, benchGainPts: benchGain, startsForUs: starts, priorityWorthy, byeCredit, depthPts,
       score: rental ? weekGain : costless ? depthPts : Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
