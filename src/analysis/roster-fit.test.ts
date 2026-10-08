@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { activeCapacity, overCapBy, chooseForcedDrops } from "./roster-fit.ts";
+import { activeCapacity, overCapBy, chooseForcedDrops, keptStarters } from "./roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "./trade-fair.ts";
 
 const P = (name: string, position: string, points: number, extra: Record<string, unknown> = {}) =>
@@ -103,4 +103,58 @@ test("returns fewer than asked rather than dropping a protected player", () => {
 test("zero or negative count is a no-op", () => {
   expect(chooseForcedDrops(roster, 0, cfg)).toEqual([]);
   expect(chooseForcedDrops(roster, -1, cfg)).toEqual([]);
+});
+
+// A starting one-week rental (2026-10-07 review): Jacksonville (DEF10, 86)
+// started week 5 for the matchup while Seattle (DEF3, 97) sat, and the cut
+// order listed Seattle first and Jacksonville nowhere. Of two bodies at a
+// swap position the one who is not the best by rest-of-season value is the
+// cut, even while he starts: the better body takes the slot.
+const rental = [
+  P("McCaffrey","RB",253), P("Walker","RB",229), P("Prescott","QB",225), P("Hurts","QB",223),
+  P("Collins","WR",212), P("Brown","RB",200), P("Evans","WR",175), P("Smith","WR",159),
+  P("LaPorta","TE",140), P("Harvey","RB",137), P("Downs","WR",136), P("Andrews","TE",132),
+  P("Dowdle","RB",105), P("Bates","K",98), P("SEA","DEF",97), P("JAX","DEF",86),
+];
+const rentalStarters = ["Prescott","McCaffrey","Brown","Collins","Evans","LaPorta","Harvey","Downs","Bates","JAX"];
+const plays = () => true;
+
+test("a starting rental is cut before the better defense behind him and before any season body", () => {
+  const kept = keptStarters(rentalStarters, rental, plays);
+  expect(kept).not.toContain("JAX");
+  expect(kept).toContain("Bates"); // the only kicker: nobody behind him
+  expect(kept).toContain("Harvey"); // a back is never swapped for the bench by this rule
+  const drops = chooseForcedDrops(rental, 2, cfg, kept);
+  expect(drops.map((d) => d.name)).toEqual(["JAX", "Dowdle"]);
+  // The defense slot stays filled: Seattle is still there.
+  expect(drops.map((d) => d.name)).not.toContain("SEA");
+});
+
+test("the better body must be able to take the slot this week: on bye, locked, ruled out, or leaving on a claim, the rental stays kept", () => {
+  const seaOut = (p: { name: string }) => p.name !== "SEA"; // on bye, ruled out, or locked while the rental has not kicked off
+  expect(keptStarters(rentalStarters, rental, seaOut)).toContain("JAX");
+  // With the rental kept, the one value decides among the rest: Seattle (97) before Dowdle (105), as the defect was filed.
+  expect(chooseForcedDrops(rental, 1, cfg, keptStarters(rentalStarters, rental, seaOut))[0]?.name).toBe("SEA");
+  const seaLeaving = rental.map((p) => (p.name === "SEA" ? { ...p, claimDrop: true } : p));
+  expect(keptStarters(rentalStarters, seaLeaving, plays)).toContain("JAX");
+  const seaNotOursYet = rental.map((p) => (p.name === "SEA" ? { ...p, claimAdd: true } : p));
+  expect(keptStarters(rentalStarters, seaNotOursYet, plays)).toContain("JAX");
+  const seaOnIr = rental.map((p) => (p.name === "SEA" ? { ...p, onIr: true } : p));
+  expect(keptStarters(rentalStarters, seaOnIr, plays)).toContain("JAX");
+});
+
+test("the starter who IS the best at his position stays kept; without a week table every starter stays kept", () => {
+  const seaStarts = rentalStarters.map((n) => (n === "JAX" ? "SEA" : n));
+  expect(keptStarters(seaStarts, rental, plays)).toContain("SEA");
+  expect(chooseForcedDrops(rental, 1, cfg, keptStarters(seaStarts, rental, plays))[0]?.name).toBe("JAX");
+  // No numbers: the old protection, Seattle goes first (the defect as filed).
+  expect(keptStarters(rentalStarters, rental, () => false)).toContain("JAX");
+  expect(chooseForcedDrops(rental, 1, cfg, keptStarters(rentalStarters, rental, () => false))[0]?.name).toBe("SEA");
+});
+
+test("a tie on the one value breaks on season talent, never on name: a full tie keeps the starter", () => {
+  const tied = rental.map((p) => (p.name === "SEA" ? { ...p, points: 86 } : p));
+  expect(keptStarters(rentalStarters, tied, plays)).toContain("JAX");
+  const talent = tied.map((p) => (p.name === "SEA" ? { ...p, seasonPoints: 103 } : p.name === "JAX" ? { ...p, seasonPoints: 91 } : p));
+  expect(keptStarters(rentalStarters, talent, plays)).not.toContain("JAX");
 });

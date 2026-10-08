@@ -17,6 +17,7 @@ import { type FairnessConfig, DEFAULT_FAIRNESS } from "./trade-fair.ts";
 import { cutOrder } from "./value.ts";
 import { bestLineup, STARTING_SLOTS } from "./trade.ts";
 import { canDrop, type RailPlayer, type RailConfig, DEFAULT_RAILS } from "./rails.ts";
+import { SWAP_POSITIONS } from "./streaming.ts";
 
 /** Active roster capacity: the starting slots plus the bench. IR (reserve) is a
  *  separate pool and does not count, so an injured player parked on IR frees a
@@ -41,7 +42,8 @@ export interface ForcedDrop { name: string; cost: number; reason: string }
  *  Etienne was a tie at "zero lineup cost" resolved by Sleeper's array order.
  *
  *  What is never cut, whatever the number says: a name in `keep` (this week's
- *  starters, a player we just traded for, the drop side of a pending claim),
+ *  starters as keptStarters leaves them, a player we just traded for, the
+ *  drop side of a pending claim),
  *  the never-drop list, a player on IR, an injured stash, and the only body
  *  for a mandatory slot (a lone kicker or defense; at a full roster we cannot
  *  add a replacement without dropping again). The top-N rail does NOT apply:
@@ -71,4 +73,41 @@ export function chooseForcedDrops(
     remaining.splice(remaining.findIndex((p) => p.name.toLowerCase() === c.name.toLowerCase()), 1);
   }
   return chosen;
+}
+
+/** The starters a cut keeps. A starter is kept because the lineup guard
+ *  chose him and a cut would empty his slot for the week. At a swap
+ *  position (K, DEF) the slot does not empty when a BETTER body by the one
+ *  rest-of-season value sits behind him and can take the slot this week:
+ *  the guard starts that body and the week costs a point or two, never the
+ *  season. So a starting one-week rental is cut before the better kicker or
+ *  defense on the bench, and before any season body (the review of
+ *  2026-10-07: Jacksonville, DEF10 at 86, started week 5 while Seattle, DEF3
+ *  at 97, headed the cut order and Dowdle, RB28 at 105, came next).
+ *
+ *  `canFill(body, starter)` says whether the body can take the starter's
+ *  slot this week: projected to play (a game, not on bye, not ruled out),
+ *  not locked out of the slot (his game begun while the starter's has not:
+ *  a locked bench body cannot be moved into the lineup), and not leaving on
+ *  a pending claim (week-projections.ts startableThisWeek, plus the
+ *  caller's pending drops). A caller with no week table answers false for
+ *  everyone, and every starter stays kept, as before 2026-10-07. A body on
+ *  IR, the add of a pending claim or a starter himself never fills a slot. "Better" is
+ *  the cut order's test, more rest-of-season points or, tied, more
+ *  full-season talent; a full tie keeps the starter, since name order is no
+ *  reason to lift a protection. Names compare as `keep` does,
+ *  case-insensitively, within the one roster list. */
+export function keptStarters(starters: readonly string[], roster: readonly RailPlayer[], canFill: (body: RailPlayer, starter: RailPlayer) => boolean): string[] {
+  const lower = (n: string): string => n.toLowerCase();
+  const starting = new Set(starters.map(lower));
+  const betterThan = (q: RailPlayer, s: RailPlayer): boolean =>
+    q.points > s.points || (q.points === s.points && (q.seasonPoints ?? 0) > (s.seasonPoints ?? 0));
+  return starters.filter((name) => {
+    const s = roster.find((p) => lower(p.name) === lower(name));
+    if (!s || !SWAP_POSITIONS.has(s.position)) return true;
+    const better = roster.some((q) => lower(q.name) !== lower(s.name) && q.position === s.position
+      && !starting.has(lower(q.name)) && !q.onIr && !q.claimAdd && !q.claimDrop
+      && betterThan(q, s) && canFill(q, s));
+    return !better;
+  });
 }

@@ -33,7 +33,8 @@ import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { staleReserve, reserveWritable, RESERVE_LOCKED_RE, type Settings } from "../sleeper/rules.ts";
 import type { RosterView } from "../analysis/roster-view.ts";
-import { activeCapacity } from "../analysis/roster-fit.ts";
+import { activeCapacity, keptStarters } from "../analysis/roster-fit.ts";
+import { loadStartableThisWeek } from "../analysis/week-projections.ts";
 import { DEFAULT_FAIRNESS, type FairnessConfig } from "../analysis/trade-fair.ts";
 import { DEFAULT_RAILS, type RailConfig, type RailPlayer } from "../analysis/rails.ts";
 import { activeRailRoster, chooseLegalForcedDrops, type LegalDrop } from "../analysis/reconcile-plan.ts";
@@ -77,7 +78,9 @@ export interface ReserveDecision {
  *  (RB26 rest-of-season) to make room for Rico Dowdle (RB32) because it only
  *  looked at active players and priced every bench player at zero. `keep`
  *  is this week's starters plus the drop side of any pending claim; those
- *  are never cut.
+ *  are never cut, except a starting kicker or defense with a better body
+ *  behind him who can take the slot this week (`canFill`, roster-fit.ts
+ *  keptStarters): the rental is the cut, not the better body.
  *
  *  `heldClaims` are our pending claims with no drop. A seat one of them
  *  holds is still a free seat for the returning man (2026-10-07): the claim
@@ -85,11 +88,10 @@ export interface ReserveDecision {
  *  without a seat are cancelled, cheapest first, never traded for a cut. */
 export function planReserveActivation(args: {
   view: RosterView; settings: Settings; cap: number; railRoster: RailPlayer[]; cfg: FairnessConfig; rails?: RailConfig;
-  keep?: string[]; heldClaims?: HeldClaim[];
+  keep?: string[]; heldClaims?: HeldClaim[]; canFill?: (body: RailPlayer, starter: RailPlayer) => boolean;
 }): ReserveDecision[] {
   const { view, settings, cap, railRoster, cfg } = args;
   const rails = args.rails ?? DEFAULT_RAILS;
-  const keep = args.keep ?? [];
   const held = args.heldClaims ?? [];
   const stale = staleReserve(view, settings);
   const e = stale[0];
@@ -109,6 +111,7 @@ export function planReserveActivation(args: {
   const cancel = claimsToCancel(held, 0);
   const note = cancel.length ? `; ${cancel.map((c) => `the claim for ${c.names.join(" + ")} has no seat and is cancelled`).join("; ")}` : "";
   const full = activeRailRoster(view, railRoster);
+  const keep = keptStarters(args.keep ?? [], full, args.canFill ?? (() => false));
   // The IR player as a cut candidate, valued like everyone else.
   const self = railRoster.find((p) => p.playerId === e.playerId);
   const selfRail: RailPlayer = self
@@ -225,7 +228,8 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   // Sleeper refuses reserve writes while a game is in progress. Check before
   // dropping anyone, so a locked week does not cost a player for nothing. A
   // failed read is not a lock: proceed and let the write decide.
-  const week = Math.max(1, (await sleeper.nflState()).week || 1);
+  const state = await sleeper.nflState();
+  const week = Math.max(1, state.week || 1);
   const games = await weekGames(week).catch(() => []);
   if (games.length && !reserveWritable(games)) {
     deferrals.deferLocked(first.playerId, now, games.map((g) => g.startTime));
@@ -255,7 +259,11 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
     value: Math.max(0, ...c.adds.map((id) => snap.playerById.get(id)?.points ?? 0)),
     names: c.adds.map((id) => snap.playerById.get(id)?.name ?? id),
   }));
-  const plan = planReserveActivation({ view, settings: league.settings, cap, railRoster, cfg, rails, keep, heldClaims })[0];
+  // Who can take a starting slot this week, for the starter the cut keeps.
+  const startable = await loadStartableThisWeek(state.season || config.season, week, league.scoring_settings, now);
+  const pendingDrops = new Set<string>(pending.drops);
+  const canFill = (body: RailPlayer, starter: RailPlayer): boolean => startable(body, starter) && !pendingDrops.has(body.playerId ?? "");
+  const plan = planReserveActivation({ view, settings: league.settings, cap, railRoster, cfg, rails, keep, heldClaims, canFill })[0];
   if (!plan) return null;
 
   if (plan.action === "stuck") {

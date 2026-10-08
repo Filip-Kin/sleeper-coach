@@ -18,6 +18,8 @@ import { bootCanary, releaseCanaryFreeze, canaryFreezeActive, logDeploy } from "
 import { runInvariants, collectInvariantInput } from "./invariants.ts";
 import { pruneDeadJobs } from "./soak/migrations.ts";
 import { activeRailRoster, chooseLegalForcedDrops } from "./analysis/reconcile-plan.ts";
+import { keptStarters } from "./analysis/roster-fit.ts";
+import { loadStartableThisWeek } from "./analysis/week-projections.ts";
 import { reconcileReserve } from "./act/reserve-reconcile.ts";
 import { DropIntentStore, decideIntent } from "./act/drop-intent.ts";
 import { pendingClaimPlayers, railsWithPendingDrops } from "./act/pending-claims.ts";
@@ -461,14 +463,21 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     const sched = await scheduleContext(null);
     const cfg = { ...DEFAULT_FAIRNESS, ...sched };
     // Never cut this week's starters (the matchup leg) or the drop side of a
-    // pending claim; hold the slots a pending no-drop claim needs.
-    const week = Math.max(1, (await sleeper.nflState()).week || 1);
+    // pending claim; hold the slots a pending no-drop claim needs. A starting
+    // kicker or defense with a better body behind him who can take the slot
+    // this week is not kept (roster-fit.ts keptStarters): the rental is the
+    // cut, not the better body and not a season body.
+    const state = await sleeper.nflState();
+    const week = Math.max(1, state.week || 1);
     const starterIds = await currentStarters(gql, week, []).catch(() => [] as string[]);
     // Names as the rail roster spells them (a defense is "SEA" there).
     const nameOf = new Map(full.map((p) => [p.playerId ?? "", p.name]));
-    const keep = starterIds.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
+    const starterNames = starterIds.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
     const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
     const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, full, pending.drops);
+    const startable = await loadStartableThisWeek(state.season || config.season, week, league.scoring_settings);
+    const pendingDrops = new Set<string>(pending.drops);
+    const keep = keptStarters(starterNames, full, (body, starter) => startable(body, starter) && !pendingDrops.has(body.playerId ?? ""));
     // Only the overflow is cut. A pending no-drop claim needs a slot, but a
     // claim can lose on priority; the waiver job holds the slot, it is not
     // made by cutting somebody now.

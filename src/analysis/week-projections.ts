@@ -2,6 +2,8 @@ import { DATA_DIR } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { projectPoints } from "./scoring.ts";
 import { byeWeek } from "../data/byes.ts";
+import { weekSchedule } from "../sleeper/graphql.ts";
+import { availabilityOf } from "./lineup.ts";
 import { logEvent } from "../log.ts";
 import type { ProjectionRecord, ScoringSettings, Position } from "../sleeper/types.ts";
 
@@ -206,4 +208,46 @@ export async function loadWeekProjections(
 // Index a week by player id for O(1) lookup when assembling a specific roster.
 export function byPlayerId(week: WeekProjection[]): Map<string, WeekProjection> {
   return new Map(week.map((p) => [p.playerId, p]));
+}
+
+/** Whether a bench body can take a starter's slot this week (roster-fit.ts
+ *  keptStarters): a projection row with a game, not on bye, not ruled out by
+ *  his live status, points above zero, and not locked out of the slot. The
+ *  lock compares the two games: a body whose game has kicked off cannot be
+ *  moved into the lineup while the starter's game is still to come, so the
+ *  slot would empty. Every other pairing is fine: before either kicks off
+ *  the guard swaps them; once the starter's own game has begun the week's
+ *  slot is settled by him, and a drop Sleeper refuses for his lock is retried
+ *  later, never a cut of the better body (the review of 2026-10-07: on a
+ *  Monday and a Tuesday before the week flips both defenses have played and
+ *  the rental is still the cut). Pure over the loaded table and schedule.
+ *  The live status on the player wins over the table's; a starter with no
+ *  row is taken as not yet kicked off. */
+export function startableThisWeek(
+  table: Map<string, WeekProjection>, games: readonly { away: string; home: string; startTime: number }[], now: number,
+): (body: { playerId?: string; injuryStatus?: string | null }, starter: { playerId?: string }) => boolean {
+  const kickedOff = new Set<string>();
+  for (const g of games) if (g.startTime > 0 && g.startTime <= now) { kickedOff.add(g.away); kickedOff.add(g.home); }
+  const started = (p: { playerId?: string }): boolean => { const r = p.playerId ? table.get(p.playerId) : undefined; return !!r && kickedOff.has(r.team); };
+  return (body, starter) => {
+    const r = body.playerId ? table.get(body.playerId) : undefined;
+    if (!r || !r.hasGame || r.onBye || r.points <= 0) return false;
+    if (started(body) && !started(starter)) return false;
+    return availabilityOf({ playerId: r.playerId, name: r.name, position: r.position, points: r.points, injuryStatus: body.injuryStatus ?? r.injuryStatus }).available;
+  };
+}
+
+/** startableThisWeek over the live week table and schedule. No numbers, no
+ *  decision: a failed or unusable read answers false for everyone, so every
+ *  starter stays kept from a cut, and says so on the console. */
+export async function loadStartableThisWeek(
+  season: string, week: number, scoring: ScoringSettings, now = Date.now(),
+): Promise<(body: { playerId?: string; injuryStatus?: string | null }, starter: { playerId?: string }) => boolean> {
+  try {
+    const [table, games] = await Promise.all([loadWeekProjections(season, week, scoring), weekSchedule(season, week)]);
+    return startableThisWeek(byPlayerId(table), games, now);
+  } catch (err) {
+    console.log(`[week] no usable week ${week} table or schedule (${err instanceof Error ? err.message : String(err)}); every starter is kept from the cut`);
+    return () => false;
+  }
 }

@@ -28,11 +28,12 @@ import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRos
 import { streamNeeds, planStream, type StreamPoolPlayer, type StreamDecision } from "../analysis/streaming.ts";
 import { canDrop } from "../analysis/rails.ts";
 import { chooseLegalForcedDrops } from "../analysis/reconcile-plan.ts";
+import { keptStarters } from "../analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
 import { loadValues, liveStatusFromRosters, toRail, weeksLeft } from "../analysis/value.ts";
 import { DropIntentStore, decideIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
-import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts";
+import { loadWeekProjections, byPlayerId, startableThisWeek } from "../analysis/week-projections.ts";
 import { startingSlots, availabilityOf } from "../analysis/lineup.ts";
 import {
   planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities, stashCandidates, claimFallbackAllowed,
@@ -252,7 +253,10 @@ async function main(): Promise<void> {
   // this week has kicked off. The week is the planning week; kickoffs are
   // only known for the week as it is now.
   const weekTable = byPlayerId(await loadWeekProjections(season, week, league.scoring_settings).catch(() => []));
-  const thisWeekGames = week === (state.week || week) ? await weekSchedule(season, week).catch(() => []) : [];
+  // A failed schedule read must not read as "nobody has kicked off" for the
+  // starter a cut keeps (canFill below): with no schedule nobody fills a slot.
+  let scheduleKnown = true;
+  const thisWeekGames = week === (state.week || week) ? await weekSchedule(season, week).catch(() => { scheduleKnown = false; return []; }) : [];
   const kickedOff = new Set<string>();
   for (const g of thisWeekGames) if (g.startTime > 0 && g.startTime <= nowMs) { kickedOff.add(g.away); kickedOff.add(g.home); }
   // A kicked-off team is zero for the POOL only: a starter of ours whose
@@ -265,6 +269,13 @@ async function main(): Promise<void> {
   const weekPoints = new Map<string, number>();
   for (const p of roster) weekPoints.set(p.name, weekPointsOf(p.playerId ?? "", p.injuryStatus, liveStatus[p.playerId ?? ""]?.team ?? ros.get(p.playerId ?? "")?.team));
   for (const p of availableRos) weekPoints.set(p.name, weekPointsOf(p.playerId, p.injuryStatus, p.team, true));
+  // Who can be moved INTO the lineup this week, for the starter a cut keeps
+  // (roster-fit.ts keptStarters): plays, his game not begun, not the drop of
+  // a pending claim. A starting rental with a better kicker or defense
+  // behind him who can fill the slot is the cut, not the better body.
+  const startable = startableThisWeek(weekTable, thisWeekGames, nowMs);
+  const pendingDropIds = new Set<string>(pending.drops);
+  const canFill = (body: RailPlayer, starter: RailPlayer): boolean => scheduleKnown && startable(body, starter) && !pendingDropIds.has(body.playerId ?? "");
   // Last in the rolling waiver order: a successful claim moves us nowhere,
   // so a claim costs nothing (waivers.ts).
   const waiverPosition = Number((mine.settings as { waiver_position?: number }).waiver_position ?? 0);
@@ -289,6 +300,7 @@ async function main(): Promise<void> {
     weeksLeft: weeksLeft(week),
     priorityFree,
     weekPoints,
+    canFill,
   };
 
   // Look ahead for a crowded STARTER bye we still have time to relieve (the
@@ -358,12 +370,13 @@ async function main(): Promise<void> {
       .map((p) => ({ ...p, weekPoints: table.get(p.playerId)?.points ?? 0, onWaivers: isOnWaivers(p.playerId, p.team) }));
     // Kicker and defense: the covered player is swapped in his bye week
     // (streaming.ts planStream). A scarce position: the cheapest legal cut,
-    // never the player being covered for (he returns) nor a current starter;
+    // never the player being covered for (he returns) nor a kept starter (a
+    // starting rental with a better body behind him is not kept);
     // chooseForcedDrops refuses to empty a mandatory slot or cut a stash.
     const d = planStream({
       need, week, openBenchSlots: rosterState.openBenchSlots, pool, roster,
       mayLeave: (n) => canDrop(n, roster, leaveRails).allowed,
-      forcedDrop: () => chooseLegalForcedDrops(view, roster, 1, streamCfg, rails, [...need.coveringFor, ...currentStarters])[0]?.name ?? null,
+      forcedDrop: () => chooseLegalForcedDrops(view, roster, 1, streamCfg, rails, [...need.coveringFor, ...keptStarters(currentStarters, roster, canFill)])[0]?.name ?? null,
       currentStarters, priorityFree,
     });
     if (!d.add || d.how === "wait" || d.how === "stuck") { streamNotes.push(d); continue; }

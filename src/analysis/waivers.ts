@@ -3,7 +3,7 @@ import { solveLineup, type LineupPlayer } from "./lineup.ts";
 import { irEligible as ruleIrEligible, type Settings } from "../sleeper/rules.ts";
 import { LAST_WEEK, notPlaying } from "./value.ts";
 import { byeAwareLineupTotal, depthInsurance, DEFAULT_FAIRNESS } from "./trade-fair.ts";
-import { chooseForcedDrops } from "./roster-fit.ts";
+import { chooseForcedDrops, keptStarters } from "./roster-fit.ts";
 import { SWAP_POSITIONS } from "./streaming.ts";
 
 // The waiver engine, priced in WAIVER PRIORITY, not dollars.
@@ -116,11 +116,14 @@ export interface AvailablePlayer extends RailPlayer {
  *  no legal cut. */
 export function forecastReturnCut(
   roster: RailPlayer[], returning: RailPlayer, incoming: RailPlayer, currentStarters: string[], rails: RailConfig, slots?: readonly string[],
+  canFill: (body: RailPlayer, starter: RailPlayer) => boolean = () => false,
 ): string | null {
   const back: RailPlayer = { ...returning, onIr: false, claimAdd: false, injuryStatus: undefined, returnsBeforePlayoffs: false };
   // A pending claim's add is ours by then.
   const then = [...roster.filter((p) => p.name !== returning.name).map((p) => ({ ...p, claimAdd: false })), back, { ...incoming, onIr: false, claimAdd: false }];
-  return chooseForcedDrops(then, 1, undefined, currentStarters, rails, slots)[0]?.name ?? null;
+  // A starting kicker or defense with a better body behind him who plays is
+  // not kept (roster-fit.ts keptStarters): the rental is the cut.
+  return chooseForcedDrops(then, 1, undefined, keptStarters(currentStarters, then, canFill), rails, slots)[0]?.name ?? null;
 }
 
 /** Every return the move leaves to come (the players on IR after it) cuts
@@ -130,6 +133,8 @@ export function returnsAcceptable(args: {
   active: RailPlayer[]; reserveAfter: RailPlayer[]; incoming: RailPlayer; directDrop: string | null; currentStarters: string[]; rails: RailConfig; slots?: readonly string[];
   /** The newcomer starts this week: forecast with him kept as well. */
   incomingStarts?: boolean;
+  /** Who can take a starter's slot this week (RosterState.canFill). */
+  canFill?: (body: RailPlayer, starter: RailPlayer) => boolean;
 }): { ok: boolean; cuts: { returning: string; cut: string | null }[] } {
   // Per return: with this week's starters kept, and, for a newcomer who
   // starts this week, with him kept as well, since a rental starts in
@@ -138,8 +143,8 @@ export function returnsAcceptable(args: {
   // Dowdle flipping to Questionable, and the cut landing on
   // Croskey-Merritt instead of the Bengals).
   const cuts = args.reserveAfter.flatMap((r) => [
-    { returning: r.name, cut: forecastReturnCut(args.active, r, args.incoming, args.currentStarters, args.rails, args.slots) },
-    ...(args.incomingStarts ? [{ returning: r.name, cut: forecastReturnCut(args.active, r, args.incoming, [...args.currentStarters, args.incoming.name], args.rails, args.slots) }] : []),
+    { returning: r.name, cut: forecastReturnCut(args.active, r, args.incoming, args.currentStarters, args.rails, args.slots, args.canFill) },
+    ...(args.incomingStarts ? [{ returning: r.name, cut: forecastReturnCut(args.active, r, args.incoming, [...args.currentStarters, args.incoming.name], args.rails, args.slots, args.canFill) }] : []),
   ]);
   const ok = cuts.every((c) => c.cut !== null && [args.incoming.name, c.returning, args.directDrop].includes(c.cut));
   return { ok, cuts };
@@ -170,6 +175,13 @@ export interface RosterState {
    *  lineup guard decides who starts, and a drop table that can name DK
    *  Metcalf is the 2026-09-23 audit's finding R7. */
   currentStarters?: string[];
+  /** Whether a body can take a starter's slot this week: projected to play,
+   *  not locked out of the slot, not leaving on a pending claim
+   *  (week-projections.ts startableThisWeek). It decides which starter a cut
+   *  keeps (roster-fit.ts keptStarters): a starting kicker or defense with a
+   *  better body behind him who can fill the slot is the cut, not the better
+   *  body. Absent = nobody can, and every starter is kept. */
+  canFill?: (body: RailPlayer, starter: RailPlayer) => boolean;
   /** Weeks left in the fantasy season, to turn a per-week margin into points. */
   weeksLeft?: number;
   /** Players of ours already on injured reserve. Each one comes back, and
@@ -462,7 +474,7 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   // with no legal cut at all is not offered (the activation would be stuck).
   const forecast = (active: RailPlayer[], reserveAfter: RailPlayer[], dropName: string | null = null): { returning: string[]; returnCuts: string[] } | null => {
     const incomingStarts = weekLineupGain(incoming, dropName, state) > 0;
-    const r = returnsAcceptable({ active, reserveAfter, incoming, directDrop: null, currentStarters: starterNames, rails: cfg.rails, slots: state.startingSlots, incomingStarts });
+    const r = returnsAcceptable({ active, reserveAfter, incoming, directDrop: null, currentStarters: starterNames, rails: cfg.rails, slots: state.startingSlots, incomingStarts, canFill: state.canFill });
     if (r.cuts.some((c) => c.cut === null)) return null;
     return { returning: r.cuts.map((c) => c.returning), returnCuts: r.cuts.map((c) => c.cut!) };
   };
@@ -606,8 +618,10 @@ export function planOne(
   // number). The forecast refuses a seat only when a return would have no
   // legal cut at all, or would reach somebody this move neither names nor
   // leaves as the first-shed man; it names him in the reason otherwise.
-  const shedFirst = (roster: RailPlayer[]): string | null =>
-    chooseForcedDrops(roster.map((p) => ({ ...p, claimAdd: false })), 1, undefined, state.currentStarters ?? [], cfg.rails, state.startingSlots)[0]?.name ?? null;
+  const shedFirst = (roster: RailPlayer[]): string | null => {
+    const then = roster.map((p) => ({ ...p, claimAdd: false }));
+    return chooseForcedDrops(then, 1, undefined, keptStarters(state.currentStarters ?? [], then, state.canFill ?? (() => false)), cfg.rails, state.startingSlots)[0]?.name ?? null;
+  };
   const cutFirst = shedFirst(state.roster);
   const seatOk = (e: PathEval): boolean => {
     if (!e.returnCuts?.length) return true;

@@ -26,6 +26,8 @@ import { leagueRosters } from "../sleeper/graphql.ts";
 import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, currentStarters, cancelWaiverClaim } from "../league/api.ts";
 import { loadValues, liveStatusFromRosters, toRail, cutOrder, type PlayerValue } from "../analysis/value.ts";
 import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
+import { keptStarters } from "../analysis/roster-fit.ts";
+import { loadStartableThisWeek } from "../analysis/week-projections.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { logEvent } from "../log.ts";
 import { pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
@@ -58,6 +60,7 @@ const values = await loadValues(state.season || config.season, week, league.scor
 const view = await myRosterView();
 const starters = new Set(await currentStarters(gql, week, []).catch(() => [] as string[]));
 const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0, claims: [] as PendingClaim[] }));
+const startable = await loadStartableThisWeek(state.season || config.season, week, league.scoring_settings);
 const taken = new Set(rosters.flatMap((r) => r.players ?? []));
 
 const byName = (n: string): PlayerValue | undefined => {
@@ -75,7 +78,12 @@ const fmt = (v: PlayerValue | undefined, id: string): string => v
 // The picture, live.
 const rail = view.active.map((e) => { const v = values.get(e.playerId); return v ? toRail(v) : { playerId: e.playerId, name: e.name, position: e.position, points: 0 }; });
 const pendingDrops: string[] = pending.drops;
-const legalCuts = cutOrder(rail.filter((p) => !starters.has(p.playerId!) && !pendingDrops.includes(p.playerId!) && canDrop(p.name, rail, { ...DEFAULT_RAILS, protectTopN: 0 }).allowed));
+// A starter is kept from the cut unless he is a kicker or defense with a
+// better body behind him who can take the slot this week (roster-fit.ts
+// keptStarters): a starting one-week rental is cut before the better one.
+const kept = new Set(keptStarters(rail.filter((p) => starters.has(p.playerId!)).map((p) => p.name), rail,
+  (body, starter) => startable(body, starter) && !pendingDrops.includes(body.playerId ?? "")).map((n) => n.toLowerCase()));
+const legalCuts = cutOrder(rail.filter((p) => !kept.has(p.name.toLowerCase()) && !pendingDrops.includes(p.playerId!) && canDrop(p.name, rail, { ...DEFAULT_RAILS, protectTopN: 0 }).allowed));
 console.log(`\nWeek ${week}. Active ${view.active.length}/${league.roster_positions.length}, IR ${view.reserve.map((e) => e.name).join(", ") || "empty"}. Pending claims: +${pending.adds.length} / -${pending.drops.length}.`);
 console.log("\nOUR ROSTER (live values; * = starts this week; cut order among legal cuts shown)");
 for (const e of [...view.active].sort((a, b) => (values.get(b.playerId)?.value ?? 0) - (values.get(a.playerId)?.value ?? 0))) {
@@ -96,7 +104,7 @@ function checkCut(leaving: PlayerValue): void {
   if (!cheapest) { console.error("no legal cut exists"); process.exit(2); }
   const rank = legalCuts.findIndex((p) => p.playerId === leaving.playerId);
   if (rank < 0) {
-    console.error(`\n${leaving.name} is not a legal cut (starter this week, pending claim's drop, never-drop, or a protected stash).`);
+    console.error(`\n${leaving.name} is not a legal cut (a kept starter this week, pending claim's drop, never-drop, or a protected stash).`);
     if (!OVERRIDE) process.exit(2);
     console.error(`override given: ${OVERRIDE}`);
   } else if (rank > 0) {

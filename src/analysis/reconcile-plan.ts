@@ -26,8 +26,9 @@ export function activeRailRoster(view: RosterView, railRoster: RailPlayer[]): Ra
 }
 
 /** `count` drops chosen over the full active roster, every one of which passes
- *  droppable(). `keep` names are never cut (this week's starters, a pending
- *  claim's drop, a player just traded for). `alsoDroppable` are ids outside
+ *  droppable(). `keep` names are never cut (this week's starters as
+ *  roster-fit.ts keptStarters leaves them, a pending claim's drop, a player
+ *  just traded for). `alsoDroppable` are ids outside
  *  the active set that may still be cut (the IR player being activated). When the solver picks a name the rails protect (a backup QB
  *  whose season points rank him in the top twelve but whose removal costs
  *  nothing), that name is pinned as a keep and the solver runs again, so a
