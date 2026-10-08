@@ -134,9 +134,17 @@ export interface StreamDecision {
  *  player may be dropped at all (never-drop list, the drop of a pending
  *  claim). `forcedDrop` is the cheapest legal cut for a scarce position, or
  *  null when the rails allow none; it is only asked when a cut is the path.
- *  `currentStarters` are this week's starters on the site; a spare kicker
- *  or defense who is starting this week is not a spare. `priorityFree`:
- *  we are last in the waiver order, so a claim costs nothing. */
+ *  `currentStarters` are this week's starters on the site. `kept` are the
+ *  starters a cut keeps (roster-fit.ts keptStarters: every starter but a
+ *  kicker or defense with a better body behind him who can fill his slot
+ *  this week); it defaults to every starter. A kept starter is never a
+ *  spare. A starter who is not kept, a rental the guard's margin left on
+ *  the leg over the better body, is the spare in the need week only: before
+ *  it he plays for us, and the rental was made for his game (2026-10-08:
+ *  the Jaguars, 86, on the week-6 leg over Seattle, 97, with Bates on bye;
+ *  the old read swapped Bates, K2 at 98, and kept the rental, on bye the
+ *  week after). `priorityFree`: we are last in the waiver order, so a claim
+ *  costs nothing. */
 export function planStream(args: {
   need: StreamNeed;
   week: number;
@@ -146,11 +154,15 @@ export function planStream(args: {
   mayLeave: (name: string) => boolean;
   forcedDrop: () => string | null;
   currentStarters?: string[];
+  kept?: string[];
   priorityFree?: boolean;
 }): StreamDecision {
   const { need, week, openBenchSlots, pool, roster, mayLeave, forcedDrop } = args;
   const priorityFree = !!args.priorityFree;
-  const starters = new Set((args.currentStarters ?? []).map((n) => n.toLowerCase()));
+  const lower = (n: string): string => n.toLowerCase();
+  const leg = args.currentStarters ?? [];
+  const starters = new Set(leg.map(lower));
+  const kept = new Set((args.kept ?? leg).map(lower));
   const out = (how: StreamHow, add: StreamPoolPlayer | null, drop: string | null, reason: string): StreamDecision =>
     ({ need, how, add: add?.name ?? null, drop, onWaivers: add?.onWaivers ?? false, points: add?.weekPoints ?? 0, reason });
   const plays = pool.filter((p) => p.position === need.position && p.bye !== need.week && p.weekPoints > 0);
@@ -177,14 +189,18 @@ export function planStream(args: {
       .filter((p) => p.position === need.position && need.coveringFor.includes(p.name) && mayLeave(p.name))
       .sort((a, b) => a.points - b.points)[0];
     // A SPARE kicker or defense (Filip, 2026-10-06: "keep our starters"):
-    // a second body at either streamable position who is not starting
-    // this week, usually last week's one-week rental, worth less for the
-    // rest of the season than the player on bye. He leaves instead, now,
-    // and the starter stays. Kicker and defense are compared on the one
-    // value (they are the two interchangeable positions).
-    const bestAt = (pos: string): TradePlayer | undefined => roster.filter((p) => p.position === pos).sort((a, b) => b.points - a.points)[0];
+    // a second body at either streamable position who is not a kept
+    // starter this week, usually last week's one-week rental, worth less
+    // for the rest of the season than the player on bye. He leaves instead,
+    // now, and the starter stays. Kicker and defense are compared on the
+    // one value (they are the two interchangeable positions). A starter
+    // the cut order does not keep is the spare too, in the need week only.
+    // Ties break as the cut order does (roster-fit.ts keptStarters): on
+    // season talent, never on list order.
+    const bestAt = (pos: string): TradePlayer | undefined => roster.filter((p) => p.position === pos).sort((a, b) => b.points - a.points || (b.seasonPoints ?? 0) - (a.seasonPoints ?? 0))[0];
     const spare = roster
-      .filter((p) => SWAP_POSITIONS.has(p.position) && !need.coveringFor.includes(p.name) && !starters.has(p.name.toLowerCase()) && mayLeave(p.name))
+      .filter((p) => SWAP_POSITIONS.has(p.position) && !need.coveringFor.includes(p.name) && !kept.has(lower(p.name)) && mayLeave(p.name))
+      .filter((p) => !starters.has(lower(p.name)) || need.week === week)
       // The extra body at his position only: never our one kicker or our
       // one defense, never the better of two.
       .filter((p) => bestAt(p.position)?.name !== p.name)

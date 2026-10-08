@@ -25,7 +25,7 @@ import { buildRosterView, takenAcrossLeague } from "../analysis/roster-view.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadPlayers } from "../data/players.ts";
 import { tokenGql, addFreeAgent, submitWaiverClaim, pendingRosterDelta, applyRosterDelta, updateReserve, currentStarters as legStarters } from "../league/api.ts";
-import { streamNeeds, planStream, type StreamPoolPlayer, type StreamDecision } from "../analysis/streaming.ts";
+import { streamNeeds, planStream, SWAP_POSITIONS, type StreamPoolPlayer, type StreamDecision } from "../analysis/streaming.ts";
 import { canDrop } from "../analysis/rails.ts";
 import { chooseLegalForcedDrops } from "../analysis/reconcile-plan.ts";
 import { keptStarters } from "../analysis/roster-fit.ts";
@@ -363,6 +363,11 @@ async function main(): Promise<void> {
   // a pending claim say no; the protected top-N does not apply to a swap,
   // which replaces him at his own position.
   const leaveRails = { ...rails, protectTopN: 0 };
+  // The starters a cut keeps this week (roster-fit.ts keptStarters): a
+  // starting rental with a better kicker or defense behind him who can fill
+  // the slot is not kept, so he is the streamer's spare in the need week
+  // and never protected from the scarce-position cut.
+  const kept = keptStarters(currentStarters, roster, canFill);
   for (const need of needs) {
     const table = byPlayerId(await loadWeekProjections(season, need.week, league.scoring_settings).catch(() => []));
     const pool: StreamPoolPlayer[] = streamBase
@@ -373,11 +378,20 @@ async function main(): Promise<void> {
     // never the player being covered for (he returns) nor a kept starter (a
     // starting rental with a better body behind him is not kept);
     // chooseForcedDrops refuses to empty a mandatory slot or cut a stash.
+    // No schedule, no decision: with this week's kickoffs unknown nobody
+    // fills a slot, every starter is kept, and the swap due this week
+    // would take the covered kicker while a spare rental starts. It waits
+    // for a run that has the schedule; a body added Wednesday still plays
+    // Sunday.
+    if (!scheduleKnown && need.week === week && SWAP_POSITIONS.has(need.position)) {
+      streamNotes.push({ need, how: "wait", add: null, drop: null, onWaivers: false, points: 0, reason: `this week's schedule could not be read, so whether a starting ${need.position} or DEF is the spare is unknown; the swap waits for a run that has it` });
+      continue;
+    }
     const d = planStream({
       need, week, openBenchSlots: rosterState.openBenchSlots, pool, roster,
       mayLeave: (n) => canDrop(n, roster, leaveRails).allowed,
-      forcedDrop: () => chooseLegalForcedDrops(view, roster, 1, streamCfg, rails, [...need.coveringFor, ...keptStarters(currentStarters, roster, canFill)])[0]?.name ?? null,
-      currentStarters, priorityFree,
+      forcedDrop: () => chooseLegalForcedDrops(view, roster, 1, streamCfg, rails, [...need.coveringFor, ...kept])[0]?.name ?? null,
+      currentStarters, kept, priorityFree,
     });
     if (!d.add || d.how === "wait" || d.how === "stuck") { streamNotes.push(d); continue; }
     stream = { add: d.add, drop: d.drop, position: need.position, forWeek: need.week, onWaivers: d.onWaivers, points: d.points, coveringFor: need.coveringFor, how: d.how };

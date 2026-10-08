@@ -18,9 +18,10 @@ import { keptStarters } from "./roster-fit.ts";
 import { activeRailRoster, chooseLegalForcedDrops } from "./reconcile-plan.ts";
 import { planReserveActivation } from "../act/reserve-reconcile.ts";
 import { forecastReturnCut, returnsAcceptable } from "./waivers.ts";
+import { planStream, emptyStarterPositions, type StreamNeed, type StreamPoolPlayer } from "./streaming.ts";
 import type { Roster, League } from "../sleeper/types.ts";
 
-const { LEAGUE, fx, idOf, tradePlayer, ourRoster } = openFixture(raw);
+const { LEAGUE, fx, idOf, tradePlayer, ourRoster, availableAt } = openFixture(raw);
 const S = { reserve_slots: 2, reserve_allow_out: 1, reserve_allow_sus: 1, reserve_allow_cov: 1, reserve_allow_doubtful: 0, reserve_allow_na: 0, reserve_allow_dnr: 0, trade_deadline: 11, waiver_type: 0 } as unknown as League["settings"];
 const CAP = LEAGUE.rosterPositions.filter((s) => s !== "IR").length; // 16
 const SLOTS = LEAGUE.rosterPositions.filter((s) => s !== "BN" && s !== "IR");
@@ -90,5 +91,83 @@ describe("2026-10-07 21:15 ET: Jacksonville starts week 5, Seattle sits, Etienne
     expect(forecastReturnCut(active, etienne, newcomer, starters, DEFAULT_RAILS, SLOTS)).toBe("Seattle Seahawks");
     const r = returnsAcceptable({ active, reserveAfter: [etienne], incoming: newcomer, directDrop: "Jacksonville Jaguars", currentStarters: starters, rails: DEFAULT_RAILS, slots: SLOTS, canFill: plays });
     expect(r.ok).toBe(true);
+  });
+});
+
+// 2026-10-08 morning review: the week-6 streamer. Bates is on bye in week 6
+// and the guard's 1.0 margin keeps the Jaguars on the week-6 leg over Seattle
+// (6.46 + 1.0 > 7.24). planStream read the leg as the kept set, found no
+// spare (the Jaguars start, Seattle is the best defense) and swapped Bates,
+// K2 at 98, for the free kicker; the Jaguars, 86 and on bye the week after,
+// stayed. The cut order's rule applies here too: a starting kicker or
+// defense with a better body behind him who can fill the slot is not kept,
+// and in the need week he is the spare.
+describe("2026-10-13, week 6: Bates on bye, the Jaguars on the leg, Seattle behind them", () => {
+  const active = rail(mine.players.filter((id) => !mine.reserve.includes(id)), []);
+  const plays6 = (p: RailPlayer): boolean => (p.playerId ? (fx(p.playerId).weekly["6"] ?? 0) : 0) > 0;
+  const need: StreamNeed = { week: 6, position: "K", coveringFor: ["Jake Bates"] };
+  const leg6 = starters.filter((n) => !["Jake Bates", "Sam LaPorta", "Chase Brown"].includes(n));
+  // Tuesday: every kicker who played in week 5 is on waivers until Wednesday; Butker (bye 5) is free.
+  const pool = (): StreamPoolPlayer[] => availableAt("K").map((p) => ({ playerId: p.playerId, name: p.name, position: p.position, bye: p.bye, weekPoints: p.weekly["6"] ?? 0, onWaivers: p.bye !== 5, value: p.value }));
+  const never = (): string | null => { throw new Error("a swap position must not ask for a forced drop"); };
+
+  test("the fixture: the Jaguars start, Seattle plays week 6, Bates has no week-6 row, Butker is free", () => {
+    expect(leg6).toContain("Jacksonville Jaguars");
+    expect(fx("SEA").weekly["6"]).toBeGreaterThan(0);
+    expect(fx(idOf("Jake Bates")).weekly["6"] ?? 0).toBe(0);
+    expect(pool().filter((p) => !p.onWaivers).map((p) => p.name)).toEqual(["Harrison Butker"]);
+  });
+
+  test("in the need week the starting rental is the spare: Butker in, the Jaguars out, Bates stays", () => {
+    const kept = keptStarters(leg6, active, plays6);
+    expect(kept).not.toContain("Jacksonville Jaguars");
+    const d = planStream({ need, week: 6, openBenchSlots: 0, pool: pool(), roster: active, mayLeave: () => true, forcedDrop: never, currentStarters: leg6, kept });
+    expect(d.how).toBe("swap");
+    expect(d.add).toBe("Harrison Butker");
+    expect(d.drop).toBe("Jacksonville Jaguars");
+    expect(d.onWaivers).toBe(false);
+    // The week-6 lineup after the move fields a kicker and a defense: Seattle takes the slot.
+    const after = [...active.filter((p) => p.name !== d.drop), { playerId: "4227", name: "Harrison Butker", position: "K", points: 94.3, bye: 5 }];
+    expect(emptyStarterPositions(after, 6, SLOTS)).toEqual([]);
+  });
+
+  test("the defect as filed: with the leg as the kept set the swap cut Bates", () => {
+    const d = planStream({ need, week: 6, openBenchSlots: 0, pool: pool(), roster: active, mayLeave: () => true, forcedDrop: never, currentStarters: leg6 });
+    expect(d.how).toBe("swap");
+    expect(d.drop).toBe("Jake Bates");
+  });
+
+  test("a week early the rental plays for us: nothing moves until the need week", () => {
+    const leg5 = starters; // the Jaguars start week 5 too
+    const kept = keptStarters(leg5, active, plays);
+    expect(kept).not.toContain("Jacksonville Jaguars");
+    const d = planStream({ need, week: 5, openBenchSlots: 0, pool: pool(), roster: active, mayLeave: () => true, forcedDrop: never, currentStarters: leg5, kept });
+    expect(d.how).toBe("wait");
+    expect(d.drop).toBeNull();
+  });
+
+  test("when Seattle cannot fill the slot the Jaguars are kept and Bates is swapped as before", () => {
+    const kept = keptStarters(leg6, active, () => false);
+    expect(kept).toContain("Jacksonville Jaguars");
+    const d = planStream({ need, week: 6, openBenchSlots: 0, pool: pool(), roster: active, mayLeave: () => true, forcedDrop: never, currentStarters: leg6, kept });
+    expect(d.how).toBe("swap");
+    expect(d.drop).toBe("Jake Bates");
+  });
+
+  test("a released starter worth more than the covered kicker is not the spare: the kicker on bye leaves, as the value rule says", () => {
+    const dear = active.map((p) => (p.name === "Jacksonville Jaguars" ? { ...p, points: 120, seasonPoints: 120 } : p));
+    const seattleBetter = dear.map((p) => (p.name === "Seattle Seahawks" ? { ...p, points: 130 } : p));
+    const kept = keptStarters(leg6, seattleBetter, plays6);
+    expect(kept).not.toContain("Jacksonville Jaguars");
+    const d = planStream({ need, week: 6, openBenchSlots: 0, pool: pool(), roster: seattleBetter, mayLeave: () => true, forcedDrop: never, currentStarters: leg6, kept });
+    expect(d.how).toBe("swap");
+    expect(d.drop).toBe("Jake Bates");
+  });
+
+  test("a non-starting spare worth less still goes first, before the starting rental", () => {
+    const extra: RailPlayer = { playerId: "x-def", name: "Spare Defense", position: "DEF", points: 60, seasonPoints: 70 };
+    const d = planStream({ need, week: 6, openBenchSlots: 0, pool: pool(), roster: [...active, extra], mayLeave: () => true, forcedDrop: never, currentStarters: leg6, kept: keptStarters(leg6, [...active, extra], plays6) });
+    expect(d.how).toBe("swap");
+    expect(d.drop).toBe("Spare Defense");
   });
 });
