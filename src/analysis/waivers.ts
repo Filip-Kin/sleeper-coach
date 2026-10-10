@@ -615,8 +615,10 @@ function byeCreditFor(
 export function weekLineupGain(incoming: AvailablePlayer, dropName: string | null, state: RosterState): number {
   const wp = state.weekPoints;
   if (!wp) return 0;
-  const mine = (wp.get(incoming.name) ?? 0);
-  if (mine <= 0) return 0;
+  // A newcomer with nothing this week (bye, out, his game played) adds
+  // nothing, but the drop still costs what it costs: until 2026-10-09 the
+  // answer was 0 for him whoever left.
+  const mine = Math.max(0, wp.get(incoming.name) ?? 0);
   const week = (p: RailPlayer): LineupPlayer => ({ playerId: p.name, name: p.name, position: p.position, points: wp.get(p.name) ?? 0 });
   const baseline = solveLineup(state.roster.map(week), state.startingSlots).total;
   const kept = state.roster.filter((p) => p.name !== dropName).map(week);
@@ -766,9 +768,30 @@ export function planOne(
   // review: a 140-point receiver with an 18-point week would have cut Josh
   // Downs, 136 and starting, as a "rental").
   const rentalOk = weekGain >= cfg.weekRentalMinPts && seatFree && gain >= 0 && !best.upgradeOnly;
-  const move = (kind: MoveKind, priorityWorthy: boolean, rental: boolean, reason: string): WaiverMove =>
-    ({ ...base, kind, drop, dropPath: path, irStash, rental, weekGainPts: weekGain, gainPts: gain, benchGainPts: benchGain, startsForUs: starts, priorityWorthy, byeCredit, depthPts,
-      score: rental ? weekGain : costless ? depthPts : Math.round((gain + byeCredit) * 10) / 10, reason: reason + byeNote });
+  // THE WEEK WAIT (review of 2026-10-09). A free add the season justifies
+  // that LOWERS this week's lineup by cutting a man who plays for us this
+  // week waits for the week: Romeo Doubs, rented into DeVonta Smith's IR
+  // seat for +2.3 in week 5 and started at FLEX, was cut 31 minutes later
+  // for Jakobi Meyers, 20 ROS better and 4 points worse that week, before
+  // his Sunday game. The wait holds while his points this week count: from
+  // his kickoff Sleeper locks him ("wait until this week's games are
+  // complete") and every unrostered man is on waivers until Wednesday, so
+  // the swap lands on the Wednesday free-agent run, judged on the new
+  // week's numbers, exposed to a rival in between (the one-value swap is a
+  // bench upgrade, and a bench body is rarely contested). A man with no
+  // points this week (bye, out, a spare) costs the week nothing either way.
+  // Golden for Downs (14.3 against 12.1 that week) lifts the week and goes
+  // at once. A CLAIM is never held: its drop lands at the clear, after the
+  // week for the weekly run, and a reaction run that filed nothing would
+  // mark a rival's drop reacted and never claim him.
+  const playsThisWeek = !!droppedPlayer && (state.weekPoints?.get(droppedPlayer.name) ?? 0) > 0;
+  const waitsForWeek = needsDrop && weekGain < 0 && playsThisWeek;
+  const move = (kind: MoveKind, priorityWorthy: boolean, rental: boolean, reason: string): WaiverMove => {
+    const k: MoveKind = kind === "free-add" && waitsForWeek ? "wait" : kind;
+    const why = k === kind ? reason : `wait for ${drop}'s week: ${how} lowers this week's lineup by ${-weekGain} while he plays for us, and costs the week nothing once it is over — then ${reason}`;
+    return { ...base, kind: k, drop, dropPath: path, irStash, rental, weekGainPts: weekGain, gainPts: gain, benchGainPts: benchGain, startsForUs: starts, priorityWorthy: k === kind && priorityWorthy, byeCredit, depthPts,
+      score: rental ? weekGain : costless ? depthPts : Math.round((gain + byeCredit) * 10) / 10, reason: why + byeNote };
+  };
 
   // A move that would LOWER our starting lineup is never made, whatever the raw
   // point gap suggests. This is the guard against dropping a needed player (our

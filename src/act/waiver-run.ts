@@ -33,8 +33,8 @@ import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
 import { loadValues, liveStatusFromRosters, toRail, weeksLeft } from "../analysis/value.ts";
 import { DropIntentStore, decideIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
-import { loadWeekProjections, byPlayerId, startableThisWeek } from "../analysis/week-projections.ts";
-import { startingSlots, availabilityOf } from "../analysis/lineup.ts";
+import { loadWeekProjections, byPlayerId, startableThisWeek, weekPointsThisWeek } from "../analysis/week-projections.ts";
+import { startingSlots } from "../analysis/lineup.ts";
 import {
   planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities, stashCandidates, claimFallbackAllowed,
   DEFAULT_WAIVERS, type AvailablePlayer, type RosterState,
@@ -257,18 +257,14 @@ async function main(): Promise<void> {
   // starter a cut keeps (canFill below): with no schedule nobody fills a slot.
   let scheduleKnown = true;
   const thisWeekGames = week === (state.week || week) ? await weekSchedule(season, week).catch(() => { scheduleKnown = false; return []; }) : [];
-  const kickedOff = new Set<string>();
-  for (const g of thisWeekGames) if (g.startTime > 0 && g.startTime <= nowMs) { kickedOff.add(g.away); kickedOff.add(g.home); }
   // A kicked-off team is zero for the POOL only: a starter of ours whose
-  // game has begun is pinned in his slot by the guard, not an open seat.
-  const weekPointsOf = (id: string, status: string | null | undefined, team: string | null | undefined, pool = false): number => {
-    const r = weekTable.get(id);
-    if (!r || !r.hasGame || r.onBye || (pool && team && kickedOff.has(team))) return 0;
-    return availabilityOf({ playerId: id, name: r.name, position: r.position, points: r.points, injuryStatus: status ?? r.injuryStatus }).available ? r.points : 0;
-  };
+  // game has begun is pinned in his slot by the guard, not an open seat
+  // (week-projections.ts weekPointsThisWeek).
+  const weekFacts = weekPointsThisWeek(weekTable, thisWeekGames, nowMs);
+  const teamOf = (p: RailPlayer): string | undefined => liveStatus[p.playerId ?? ""]?.team ?? ros.get(p.playerId ?? "")?.team;
   const weekPoints = new Map<string, number>();
-  for (const p of roster) weekPoints.set(p.name, weekPointsOf(p.playerId ?? "", p.injuryStatus, liveStatus[p.playerId ?? ""]?.team ?? ros.get(p.playerId ?? "")?.team));
-  for (const p of availableRos) weekPoints.set(p.name, weekPointsOf(p.playerId, p.injuryStatus, p.team, true));
+  for (const p of roster) weekPoints.set(p.name, weekFacts.points(p, teamOf(p)));
+  for (const p of availableRos) weekPoints.set(p.name, weekFacts.points(p, p.team, true));
   // Who can be moved INTO the lineup this week, for the starter a cut keeps
   // (roster-fit.ts keptStarters): plays, his game not begun, not the drop of
   // a pending claim. A starting rental with a better kicker or defense

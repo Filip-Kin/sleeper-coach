@@ -237,6 +237,50 @@ export function startableThisWeek(
   };
 }
 
+/** THIS week's points of a body as the planner reads them (waivers.ts
+ *  weekLineupGain) and whether a team's game has kicked off. Zero for a
+ *  player with no row, no game, on bye, or ruled out by his live status;
+ *  for a POOL body also zero once his team has kicked off (free agency is
+ *  closed for him), while a starter of ours whose game has begun keeps his
+ *  points: he is pinned in his slot by the guard, not an open seat. The
+ *  team passed wins over the table's. Pure over the loaded table and
+ *  schedule. */
+export function weekPointsThisWeek(
+  table: Map<string, WeekProjection>, games: readonly { away: string; home: string; startTime: number }[], now: number,
+): { points: (p: { playerId?: string; injuryStatus?: string | null }, team?: string | null, pool?: boolean) => number; begun: (team?: string | null) => boolean } {
+  const kickedOff = new Set<string>();
+  for (const g of games) if (g.startTime > 0 && g.startTime <= now) { kickedOff.add(g.away); kickedOff.add(g.home); }
+  const begun = (team?: string | null): boolean => !!team && kickedOff.has(team);
+  const points = (p: { playerId?: string; injuryStatus?: string | null }, team?: string | null, pool = false): number => {
+    const r = p.playerId ? table.get(p.playerId) : undefined;
+    if (!r || !r.hasGame || r.onBye || (pool && begun(team ?? r.team))) return 0;
+    return availabilityOf({ playerId: r.playerId, name: r.name, position: r.position, points: r.points, injuryStatus: p.injuryStatus ?? r.injuryStatus }).available ? r.points : 0;
+  };
+  return { points, begun };
+}
+
+export interface WeekFacts {
+  /** The table and schedule were read. False = nothing below means anything: nobody fills a slot, nobody has points, nobody has kicked off. */
+  known: boolean;
+  startable: (body: { playerId?: string; injuryStatus?: string | null }, starter: { playerId?: string }) => boolean;
+  points: (p: { playerId?: string; injuryStatus?: string | null }, team?: string | null, pool?: boolean) => number;
+  teamOf: (playerId: string) => string | null;
+}
+
+/** startableThisWeek and weekPointsThisWeek over the live week table and
+ *  schedule, for a hand tool that needs both (act/roster-move.ts). A failed
+ *  or unusable read is `known: false` and every answer is the safe one. */
+export async function loadWeekFacts(season: string, week: number, scoring: ScoringSettings, now = Date.now()): Promise<WeekFacts> {
+  try {
+    const [table, games] = await Promise.all([loadWeekProjections(season, week, scoring), weekSchedule(season, week)]);
+    const t = byPlayerId(table);
+    return { known: true, startable: startableThisWeek(t, games, now), points: weekPointsThisWeek(t, games, now).points, teamOf: (id) => t.get(id)?.team ?? null };
+  } catch (err) {
+    console.log(`[week] no usable week ${week} table or schedule (${err instanceof Error ? err.message : String(err)}); every starter is kept from the cut and nobody has points this week`);
+    return { known: false, startable: () => false, points: () => 0, teamOf: () => null };
+  }
+}
+
 /** startableThisWeek over the live week table and schedule. No numbers, no
  *  decision: a failed or unusable read answers false for everyone, so every
  *  starter stays kept from a cut, and says so on the console. */

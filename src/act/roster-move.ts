@@ -28,7 +28,8 @@ import { loadValues, liveStatusFromRosters, toRail, cutOrder, notPlaying, LAST_W
 import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
 import { keptStarters } from "../analysis/roster-fit.ts";
 import { bestLineup } from "../analysis/trade.ts";
-import { loadStartableThisWeek } from "../analysis/week-projections.ts";
+import { loadWeekFacts } from "../analysis/week-projections.ts";
+import { weekLineupGain } from "../analysis/waivers.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { logEvent } from "../log.ts";
 import { pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
@@ -61,7 +62,9 @@ const values = await loadValues(state.season || config.season, week, league.scor
 const view = await myRosterView();
 const starters = new Set(await currentStarters(gql, week, []).catch(() => [] as string[]));
 const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0, claims: [] as PendingClaim[] }));
-const startable = await loadStartableThisWeek(state.season || config.season, week, league.scoring_settings);
+const weekFacts = await loadWeekFacts(state.season || config.season, week, league.scoring_settings);
+const startable = weekFacts.startable;
+const SLOTS = league.roster_positions.filter((s) => s !== "BN" && s !== "IR");
 const taken = new Set(rosters.flatMap((r) => r.players ?? []));
 
 const byName = (n: string): PlayerValue | undefined => {
@@ -157,8 +160,17 @@ switch (cmd) {
       // An unlisted drop (season 0) is unknown, not zero: the check fails (waivers.ts lineupDelta).
       const stableFails = notPlaying(target.injuryStatus) && (seasonWk < 1 || drop.seasonPoints <= 0);
       if (notPlaying(target.injuryStatus)) console.log(`stable check: ${target.name} is ${target.injuryStatus}; season ${Math.round(target.seasonPoints)} vs ${Math.round(drop.seasonPoints)} = ${seasonWk >= 0 ? "+" : ""}${seasonWk}/wk over the season`);
+      // The week wait (waivers.ts verdict): a swap that lowers this week's
+      // lineup by cutting a man who plays for us this week waits for the week.
+      const weekPoints = new Map<string, number>();
+      for (const p of rail) weekPoints.set(p.name, weekFacts.points(p, weekFacts.teamOf(p.playerId ?? "")));
+      weekPoints.set(target.name, weekFacts.points({ playerId: target.playerId, injuryStatus: target.injuryStatus }, target.team, true));
+      const weekGain = weekLineupGain({ ...toRail(target), onWaivers: false }, drop.name, { roster: rail, openBenchSlots: 0, openIrSlots: 0, startingSlots: SLOTS, weekPoints });
+      const playsThisWeek = (weekPoints.get(drop.name) ?? 0) > 0;
+      console.log(`this week: lineup ${weekGain >= 0 ? "+" : ""}${weekGain} with the swap${weekFacts.known ? "" : " (no week table: taken as 0)"}${playsThisWeek ? `; ${drop.name} plays this week (${weekPoints.get(drop.name)})` : ""}`);
       if (gainWk < 1 && !OVERRIDE) { console.error("under 1.0 points per week: not a swap worth a drop. --override to insist."); process.exit(2); }
       if (stableFails && !OVERRIDE) { console.error("not playing now and under 1.0 points per week on the season projection: the feed assumes his return, and a cut is for the season. --override to insist."); process.exit(2); }
+      if (weekGain < 0 && playsThisWeek && !OVERRIDE) { console.error(`lowers this week's lineup while ${drop.name} plays for us: wait for the week, the drop costs it nothing once it is over. --override to insist.`); process.exit(2); }
     }
     if (!WRITE) { console.log(`\n(dry) would ${cmd} him${drop ? ` dropping ${drop.name}` : ""}. Add --write.`); break; }
     let r: { transactionId: string; status: string };
