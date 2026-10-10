@@ -24,7 +24,7 @@ import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
 import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, currentStarters, cancelWaiverClaim } from "../league/api.ts";
-import { loadValues, liveStatusFromRosters, toRail, cutOrder, type PlayerValue } from "../analysis/value.ts";
+import { loadValues, liveStatusFromRosters, toRail, cutOrder, notPlaying, LAST_WEEK, type PlayerValue } from "../analysis/value.ts";
 import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
 import { keptStarters } from "../analysis/roster-fit.ts";
 import { bestLineup } from "../analysis/trade.ts";
@@ -150,7 +150,15 @@ switch (cmd) {
       checkCut(drop, target);
       const gainWk = Math.round(((target.value - drop.value) / target.weeksLeft) * 10) / 10;
       console.log(`swap value: ${target.name} ${target.valueAvg}/wk for ${drop.name} ${drop.valueAvg}/wk = ${gainWk >= 0 ? "+" : ""}${gainWk}/wk`);
+      // The stable check (waivers.ts verdict): a target who is not playing
+      // now carries a rest-of-season feed built on an assumed return, so the
+      // swap must hold on the full-season projection too, by the same bar.
+      const seasonWk = Math.round(((target.seasonPoints - drop.seasonPoints) / LAST_WEEK) * 10) / 10;
+      // An unlisted drop (season 0) is unknown, not zero: the check fails (waivers.ts lineupDelta).
+      const stableFails = notPlaying(target.injuryStatus) && (seasonWk < 1 || drop.seasonPoints <= 0);
+      if (notPlaying(target.injuryStatus)) console.log(`stable check: ${target.name} is ${target.injuryStatus}; season ${Math.round(target.seasonPoints)} vs ${Math.round(drop.seasonPoints)} = ${seasonWk >= 0 ? "+" : ""}${seasonWk}/wk over the season`);
       if (gainWk < 1 && !OVERRIDE) { console.error("under 1.0 points per week: not a swap worth a drop. --override to insist."); process.exit(2); }
+      if (stableFails && !OVERRIDE) { console.error("not playing now and under 1.0 points per week on the season projection: the feed assumes his return, and a cut is for the season. --override to insist."); process.exit(2); }
     }
     if (!WRITE) { console.log(`\n(dry) would ${cmd} him${drop ? ` dropping ${drop.name}` : ""}. Add --write.`); break; }
     let r: { transactionId: string; status: string };

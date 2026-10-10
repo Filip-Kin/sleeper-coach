@@ -857,6 +857,9 @@ async function buildIntent(week: number): Promise<IntentView> {
   if (!ourRoster) throw new Error(`roster ${config.rosterId} not found in league ${config.leagueId}`);
 
   const ros = await loadRestOfSeason(config.season, week, league.scoring_settings);
+  // The full-season projection, the stable number the planner holds a
+  // newcomer who is not playing now to (waivers.ts verdict).
+  const seasonPts = new Map((await loadSeasonProjections(config.season, league.scoring_settings).catch(() => [])).map((p) => [p.playerId, p.points]));
   const settings = league.settings as unknown as { waiver_type?: number; waiver_clear_days?: number; reserve_slots?: number; trade_deadline?: number };
 
   // Everything rostered anywhere in the league. What is left is addable.
@@ -871,6 +874,7 @@ async function buildIntent(week: number): Promise<IntentView> {
       name: r?.name ?? d?.full_name ?? (d ? `${d.first_name} ${d.last_name}`.trim() : isDef ? `${pid} DEF` : pid),
       position: r?.position ?? d?.position ?? (isDef ? "DEF" : ""),
       points: r?.points ?? 0,
+      seasonPoints: seasonPts.get(pid) ?? 0,
       injuryStatus: d?.injury_status ?? r?.injuryStatus ?? undefined,
       returnsBeforePlayoffs: r?.returnsBeforePlayoffs ?? false,
       bye: byeWeek(team) ?? undefined,
@@ -979,6 +983,7 @@ async function buildIntent(week: number): Promise<IntentView> {
       name: p.name,
       position: p.position,
       points: p.points,
+      seasonPoints: seasonPts.get(p.playerId) ?? 0,
       injuryStatus: players[p.playerId]?.injury_status ?? p.injuryStatus ?? undefined,
       returnsBeforePlayoffs: p.returnsBeforePlayoffs,
       bye: byeWeek(p.team) ?? undefined,

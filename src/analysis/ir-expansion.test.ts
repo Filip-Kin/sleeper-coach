@@ -227,9 +227,15 @@ describe("the reviewer's replays of 2026-10-06", () => {
     const week6Starters = starters.filter((n) => n !== "Jake Bates" && n !== "Sam LaPorta" && n !== "Chase Brown");
     const wk6: RosterState = { ...wednesday, currentStarters: week6Starters, weeksLeft: 12, weekPoints: weekPointsFor(allIds, 6) };
     const moves = wire.map((p) => planOne({ ...p, onWaivers: false }, wk6, DEFAULT_WAIVERS));
-    // Charbonnet beats Croskey-Merritt by 1.1 a week: with the Bengals' seat
-    // free he takes it and Croskey-Merritt stays.
-    const charbonnet = moves.find((m) => m.add === "Zach Charbonnet")!;
+    // Charbonnet beats Croskey-Merritt by 1.1 a week on the feed, but he is
+    // on PUP with no game played and 67 on the season against 128: a feed
+    // built on an assumed return is no number to cut on (2026-10-09 defect),
+    // so he is a skip. The same man playing takes the Bengals' seat and
+    // Croskey-Merritt stays.
+    const pup = moves.find((m) => m.add === "Zach Charbonnet")!;
+    expect(pup.kind).toBe("skip");
+    expect(pup.reason).toContain("not playing now (PUP)");
+    const charbonnet = planOne({ ...tradePlayer(idOf("Zach Charbonnet")), injuryStatus: undefined, onWaivers: false }, wk6, DEFAULT_WAIVERS);
     expect(charbonnet.kind).toBe("free-add");
     expect(charbonnet.drop).toBe("Cincinnati Bengals");
     // Nobody is cut while the seat is free; a body with no depth value is refused on depth.
@@ -250,11 +256,15 @@ describe("the second reviewer's replays of 2026-10-06", () => {
     roster: landed, reserve, openBenchSlots: 0, openIrSlots: 0, startingSlots: SLOTS, irEligible,
     currentStarters: week6Starters, weeksLeft: 12, priorityFree: true, weekPoints: weekPointsFor(allIds, 6),
   };
-  test("with a seat open nobody leaves: Charbonnet takes the open seat, not the Bengals' slot", () => {
-    const m = planOne({ ...tradePlayer(idOf("Zach Charbonnet")), onWaivers: false }, { ...wk6, openBenchSlots: 1 }, DEFAULT_WAIVERS);
+  test("with a seat open nobody leaves: Charbonnet, playing, takes the open seat, not the Bengals' slot; on PUP he takes nothing", () => {
+    const m = planOne({ ...tradePlayer(idOf("Zach Charbonnet")), injuryStatus: undefined, onWaivers: false }, { ...wk6, openBenchSlots: 1 }, DEFAULT_WAIVERS);
     expect(m.kind).toBe("free-add");
     expect(m.dropPath).toBe("bench-slot");
     expect(m.drop).toBeNull();
+    // The seat's later cut (a return) would reach Croskey-Merritt, a body a PUP newcomer does not beat on the season projection.
+    const pup = planOne({ ...tradePlayer(idOf("Zach Charbonnet")), onWaivers: false }, { ...wk6, openBenchSlots: 1 }, DEFAULT_WAIVERS);
+    expect(pup.kind).toBe("skip");
+    expect(pup.reason).toContain("season projection");
   });
   test("a defense with points this week is not spare, whatever the leg says: in week 5 the Bengals keep their seat before the guard starts them", () => {
     const wk5: RosterState = { ...wk6, currentStarters: starters, weeksLeft: 13, weekPoints: weekPointsFor(allIds, WEEK) };

@@ -266,7 +266,7 @@ function lineupDelta(
    *  measured as for a no-drop path, against the cheapest body at the
    *  newcomer's own position, not against the spare. */
   seat = false,
-): { gain: number; starts: boolean; benchGain: number; benchPerGame: number } {
+): { gain: number; starts: boolean; benchGain: number; benchPerGame: number; seasonGain: number; seasonLineupGain: number; against: string | null } {
   // The stashed man stays in both sides. `points` is rest-of-season value
   // and already carries nothing for the weeks he misses, so the season
   // lineup with him in it is the honest baseline. Until 2026-10-02 he was
@@ -292,7 +292,21 @@ function lineupDelta(
   const benchPerGame = dropped && swappable(incoming.position, dropped.position)
     ? Math.round((incoming.points / gamesLeft(incoming, state) - dropped.points / gamesLeft(dropped, state)) * 10) / 10
     : 0;
-  return { gain: Math.round((after.total - baseline) * 10) / 10, starts, benchGain, benchPerGame };
+  // The same gaps on the STABLE number, the full-season projection, for the
+  // newcomer who is not playing now (verdict: the stable check): the bench
+  // gap against the same man, and the lineup gain with every body at his
+  // season points. A man the season table does not list is unknown, not
+  // zero: the gap reads as nothing, and a newcomer held to it fails.
+  const seasonGain = dropped && swappable(incoming.position, dropped.position) && (dropped.seasonPoints ?? 0) > 0
+    ? Math.round(((incoming.seasonPoints ?? 0) - dropped.seasonPoints!) * 10) / 10
+    : 0;
+  const asSeason = (p: RailPlayer): LineupPlayer => ({ playerId: p.name, name: p.name, position: p.position, points: p.seasonPoints ?? 0 });
+  const seasonBefore = solveLineup(base.map(asSeason), state.startingSlots);
+  const seasonAfter = solveLineup([...base.filter((p) => p.name !== dropName).map(asSeason), asSeason(incoming)], state.startingSlots).total;
+  // A season starter the table does not list is unknown too: the gain reads as nothing.
+  const seasonKnown = seasonBefore.starters.every((x) => x.points > 0);
+  const seasonLineupGain = seasonKnown ? Math.round((seasonAfter - seasonBefore.total) * 10) / 10 : 0;
+  return { gain: Math.round((after.total - baseline) * 10) / 10, starts, benchGain, benchPerGame, seasonGain, seasonLineupGain, against: dropped?.name ?? null };
 }
 
 /** Games a player still has: the weeks left, less his bye if it is still to
@@ -377,6 +391,9 @@ interface PathEval {
   gain: number; // starting-lineup ROS delta of taking this path
   benchGain: number; // incoming minus dropped at a swappable position, else 0
   benchPerGame: number; // the same gap per game played, so a bye still to come is not an upgrade
+  seasonGain: number; // incoming minus dropped on the full-season projection, the stable number
+  seasonLineupGain: number; // the lineup gain with every body at his full-season projection
+  against: string | null; // the man benchGain and seasonGain are measured against (the drop, or the cheapest same-position body on a seat path)
   /** A drop only the same-position upgrade rule allows (the top-N rail
    *  protects him). It may serve a bench upgrade, never a lineup-gain add. */
   upgradeOnly?: boolean;
@@ -454,8 +471,8 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   };
   const evals = paths.map((p) => {
     const spare = isSpare(p.drop);
-    const { gain, starts, benchGain, benchPerGame } = lineupDelta(incoming, p.drop, state, cfg.rails, spare);
-    return { ...p, gain, starts, benchGain, benchPerGame, spare } as PathEval;
+    const { gain, starts, benchGain, benchPerGame, seasonGain, seasonLineupGain, against } = lineupDelta(incoming, p.drop, state, cfg.rails, spare);
+    return { ...p, gain, starts, benchGain, benchPerGame, seasonGain, seasonLineupGain, against, spare } as PathEval;
   });
   // Best lineup gain first; among equals drop nobody; then the bigger bench
   // gain (the cheapest body at the newcomer's own position, so a back
@@ -486,7 +503,7 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   const ordinary = evals.filter((e) => !e.upgradeOnly).sort(order);
   const direct = ordinary[0] && lineupEnough(ordinary[0]) ? ordinary : evals.sort(order);
   const starterNames = state.currentStarters ?? [];
-  const noDrop = (): Pick<PathEval, "gain" | "starts" | "benchGain" | "benchPerGame"> => lineupDelta(incoming, null, state, cfg.rails);
+  const noDrop = (): Pick<PathEval, "gain" | "starts" | "benchGain" | "benchPerGame" | "seasonGain" | "seasonLineupGain" | "against"> => lineupDelta(incoming, null, state, cfg.rails);
   // Who leaves when each player on IR after the move comes back. A return
   // with no legal cut at all is not offered (the activation would be stuck).
   const forecast = (active: RailPlayer[], reserveAfter: RailPlayer[], dropName: string | null = null): { returning: string[]; returnCuts: string[] } | null => {
@@ -652,7 +669,7 @@ export function planOne(
   return verdict(best);
 
   function verdict(best: PathEval): WaiverMove {
-  const { gain, starts, path, drop, benchGain, benchPerGame } = best;
+  const { gain, starts, path, drop, benchGain, benchPerGame, seasonGain, seasonLineupGain, against } = best;
   const irStash = best.irStash ?? null;
   const weeks = Math.max(1, state.weeksLeft ?? 14);
   // Last in the waiver order: a successful claim moves us nowhere, so a
@@ -669,8 +686,33 @@ export function planOne(
   // Never at kicker or defense: they are not bench depth, and a "better"
   // spare who never plays would churn the seat of a rental who does.
   const benchable = !SWAP_POSITIONS.has(incoming.position);
+  // THE STABLE CHECK (Filip, 2026-09-30: "if the numbers you are checking
+  // can swing ... you're checking the wrong numbers"; the brief: before
+  // trusting a Tuesday swap, check the static season projection). A
+  // newcomer who is not playing now (value.ts NOT_PLAYING: IR, PUP, Out
+  // and the rest) carries a rest-of-season feed built on an assumed
+  // return, and the feed re-rates every Tuesday. Zach Charbonnet, on PUP
+  // after ACL surgery with no game played, read 109 ROS as if he played
+  // from week 6, and 67 on the season (RB55), against Rico Dowdle's 104
+  // and 161; the week-6 re-rate took Dowdle's played game out and cleared
+  // the bar by 0.2 a week. For such a newcomer the swap must hold on the
+  // full-season projection too, by the same per-week margin over the whole
+  // season. A newcomer who plays is judged on the one value as before: the
+  // Golden-for-Downs swap (154 against 136 ROS, 170 against 172 season)
+  // stands, because his feed is his games, not a guess at a return.
+  // The same for the lineup gain: a newcomer not playing now whose feed
+  // makes him a rest-of-season starter must start on the season lineup too,
+  // by the same bar (the reviewer of this fix: a feed of 220 on a season of
+  // 60 cut Dowdle as "starts for us +60"). Every status in the set, a
+  // game-day Out included: the check holds for the week of the tag only,
+  // and a cut in doubt is no cut.
+  const held = notPlaying(incoming.injuryStatus);
+  const stableSwap = !held || seasonGain >= cfg.benchSwapMarginPerWeek * LAST_WEEK;
+  const stableClaim = !held || seasonGain >= cfg.benchClaimMarginPerWeek * LAST_WEEK;
+  const stableLineup = !held || seasonLineupGain >= cfg.freeAddMarginPts;
+  const stableLineupClaim = !held || seasonLineupGain >= cfg.claimMarginPts;
   // A seat whose later cut is the first-shed man is a deferred swap too.
-  const benchUpgrade = benchable && (drop !== null || path === "ir-stash" || laterCost.length > 0) && benchGain >= swapBar && benchPerGame >= cfg.benchSwapMarginPerWeek;
+  const benchUpgrade = benchable && (drop !== null || path === "ir-stash" || laterCost.length > 0) && benchGain >= swapBar && benchPerGame >= cfg.benchSwapMarginPerWeek && stableSwap;
   const droppedPlayer = drop ? state.roster.find((p) => p.name === drop) ?? null : null;
   const byeCredit = byeCreditFor(incoming, droppedPlayer, crowdedByes, cfg);
   const byeNote =
@@ -746,8 +788,15 @@ export function planOne(
     // position (the 2026-09-30 rule), OR this week's rental.
     const kind: MoveKind = incoming.onWaivers ? "waiver-claim" : "free-add";
     const label = incoming.onWaivers ? "claim at no priority cost (we are last)" : "free agent, costless";
-    if (costsSomething && gain < cfg.freeAddMarginPts && !benchUpgrade) {
+    const lineupOk = gain >= cfg.freeAddMarginPts && stableLineup;
+    if (costsSomething && !lineupOk && !benchUpgrade) {
       if (rentalOk) return move(kind, false, true, `${label} — ${how}; one-week rental, +${weekGain} this week`);
+      if (!stableLineup && gain >= cfg.freeAddMarginPts) {
+        return skip(`free agent, and ${describe(best)} reads as +${gain} ROS to the lineup, but he is not playing now (${incoming.injuryStatus}) and the feed assumes his return; on the season projection the lineup gains ${seasonLineupGain >= 0 ? "+" : ""}${seasonLineupGain} (needs ${cfg.freeAddMarginPts}): no cut on a number that can swing`);
+      }
+      if (!stableSwap && benchable && benchGain >= swapBar && benchPerGame >= cfg.benchSwapMarginPerWeek) {
+        return skip(`free agent, and ${describe(best)} reads as a bench upgrade of +${benchGain} ROS, but he is not playing now (${incoming.injuryStatus}) and the feed assumes his return; on the season projection he is ${seasonGain >= 0 ? "+" : ""}${seasonGain} against ${against ?? "the man he would replace"} (needs ${cfg.benchSwapMarginPerWeek}/week over the season): no cut on a number that can swing`);
+      }
       return skip(`free agent, but ${describe(best)} lifts the lineup just +${gain} ROS and the bench ${benchGain >= 0 ? "+" : ""}${benchGain} (${benchPerGame >= 0 ? "+" : ""}${benchPerGame} a game; needs ${cfg.freeAddMarginPts} lineup or ${cfg.benchSwapMarginPerWeek}/week bench, in total and per game)`);
     }
     if (costless && (depthPts <= 0 || depthPts < depthFloor)) {
@@ -763,9 +812,9 @@ export function planOne(
   // On waivers: burning a queue position. High bar: a real LINEUP improvement
   // from a player who starts, or a bench upgrade of claim size. A one-week
   // rental is never worth the position.
-  const bigEnough = gain >= cfg.claimMarginPts;
+  const bigEnough = gain >= cfg.claimMarginPts && stableLineupClaim;
   const startsOk = starts || !cfg.claimMustStart;
-  const benchClaim = benchable && (drop !== null || path === "ir-stash") && benchGain >= claimSwapBar && benchPerGame >= cfg.benchClaimMarginPerWeek;
+  const benchClaim = benchable && (drop !== null || path === "ir-stash") && benchGain >= claimSwapBar && benchPerGame >= cfg.benchClaimMarginPerWeek && stableClaim;
   if ((bigEnough && startsOk) || benchClaim) {
     // Name the stash: "no drop" on a full roster reads as a free move, and
     // the executor has to park him before it files (act/claim-exec.ts).
@@ -773,7 +822,9 @@ export function planOne(
     return move("waiver-claim", true, false, `worth a priority burn: ${why} — ${how}`);
   }
   // Not worth going last: wait for him to clear, then free-add for nothing.
-  const why = !bigEnough
+  const why = gain >= cfg.claimMarginPts && !stableLineupClaim
+    ? `+${gain} ROS to the lineup on the feed, but he is not playing now (${incoming.injuryStatus}) and the season-projection lineup gains only ${seasonLineupGain >= 0 ? "+" : ""}${seasonLineupGain} (needs ${cfg.claimMarginPts})`
+    : !bigEnough
     ? `only +${gain} ROS to the lineup, under the ${cfg.claimMarginPts}pt claim bar`
     : "would not start for us";
   return move("wait", false, false, `do NOT claim (${why}); wait for him to clear and free-add at no priority cost`);
