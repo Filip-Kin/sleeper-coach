@@ -170,7 +170,8 @@ switch (cmd) {
       console.log(`this week: lineup ${weekGain >= 0 ? "+" : ""}${weekGain} with the swap${weekFacts.known ? "" : " (no week table: taken as 0)"}${playsThisWeek ? `; ${drop.name} plays this week (${weekPoints.get(drop.name)})` : ""}`);
       if (gainWk < 1 && !OVERRIDE) { console.error("under 1.0 points per week: not a swap worth a drop. --override to insist."); process.exit(2); }
       if (stableFails && !OVERRIDE) { console.error("not playing now and under 1.0 points per week on the season projection: the feed assumes his return, and a cut is for the season. --override to insist."); process.exit(2); }
-      if (weekGain < 0 && playsThisWeek && !OVERRIDE) { console.error(`lowers this week's lineup while ${drop.name} plays for us: wait for the week, the drop costs it nothing once it is over. --override to insist.`); process.exit(2); }
+      // An add only: a claim's drop lands at the clear, after the week for the weekly run, and the engine never holds one.
+      if (cmd === "add" && weekGain < 0 && playsThisWeek && !OVERRIDE) { console.error(`lowers this week's lineup while ${drop.name} plays for us: wait for the week, the drop costs it nothing once it is over. --override to insist.`); process.exit(2); }
     }
     if (!WRITE) { console.log(`\n(dry) would ${cmd} him${drop ? ` dropping ${drop.name}` : ""}. Add --write.`); break; }
     let r: { transactionId: string; status: string };
