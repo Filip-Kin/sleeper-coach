@@ -44,6 +44,7 @@ function input(over: Partial<InvariantInput> = {}, r: Roster = roster()): Invari
     pendingClaims: { count: 0, adds: [] },
     outstandingOffers: [], proposalsDb: [],
     scheduledRuns: { "daily-9": occDaily, "sun-11": occSun },
+    kickoffs: [],
     dropHistory: [], alertsLastHour: 0, now: NOW, jobs: JOBS_FIXTURE,
     ...over,
   };
@@ -186,6 +187,21 @@ describe("schedule", () => {
     // 09:30 ET: daily-9 occurred 30 min ago with a 60 min window.
     const c = byName(evaluateInvariants(input({ now: Date.UTC(2026, 8, 23, 13, 30, 0), scheduledRuns: { "daily-9": 0, "sun-11": Date.UTC(2026, 8, 20, 15, 0, 0) } })))["schedule"]!;
     expect(c.ok).toBe(true);
+  });
+  test("a jittered job's window ends before the day's kickoff, as the daemon's due check has it", () => {
+    // The free-agent shape: 09:00 ET, a 12 h draw, the window ending 45 min
+    // before the first kickoff. Sunday 2026-10-11, 13:00 ET kickoffs: the
+    // window is 09:00 to 12:15 and the 2 h late allowance runs out by 14:15,
+    // so at 14:30 an unmarked occurrence is late. Without the kickoffs the
+    // same job could still be waiting for a 20:02 slot.
+    const fa: Job = { name: "fa", dow: -1, hour: 9, minute: 0, jitterMs: 12 * 3_600_000, maxLateMs: 2 * 3_600_000, kickoffLeadMs: 45 * 60_000, why: "t" };
+    const occ = Date.UTC(2026, 9, 11, 13, 0, 0); // Sun 2026-10-11 09:00 ET
+    const kickoff = Date.UTC(2026, 9, 11, 17, 0, 0); // 13:00 ET
+    const now = Date.UTC(2026, 9, 11, 18, 30, 0); // 14:30 ET
+    const base = { now, jobs: [fa], scheduledRuns: { fa: 0 } };
+    expect(byName(evaluateInvariants(input({ ...base, kickoffs: [kickoff] })))["schedule"]!.ok).toBe(false);
+    expect(byName(evaluateInvariants(input({ ...base, kickoffs: [] })))["schedule"]!.ok).toBe(true);
+    expect(byName(evaluateInvariants(input({ ...base, kickoffs: [kickoff], scheduledRuns: { fa: occ } })))["schedule"]!.ok).toBe(true);
   });
 });
 

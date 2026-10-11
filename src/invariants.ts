@@ -93,6 +93,9 @@ export interface InvariantInput {
   proposalsDb: ProposalRow[];
   /** job name -> last_run occurrence, from scheduled_runs. */
   scheduledRuns: Record<string, number>;
+  /** The week's kickoff instants, the same list the daemon's due check reads
+   *  (schedule.ts jitterWindow): a jittered job's window ends before them. */
+  kickoffs: number[];
   dropHistory: DropRecord[];
   /** The breaker's own marker, from breakerState() (DROP_FREEZE only, never
    *  the human FREEZE). Absent means not set. */
@@ -199,7 +202,7 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
     for (const job of jobs) {
       const occ = lastOccurrence(job, now);
       if (occ === null) continue;
-      const window = occ + jitterFor(job, occ) + job.maxLateMs;
+      const window = occ + jitterFor(job, occ, input.kickoffs) + job.maxLateMs;
       if (now <= window) continue; // still inside its useful window; the loop may yet run it
       if ((input.scheduledRuns[job.name] ?? 0) < occ) late.push(`${job.name} (${Math.round((now - occ) / 3_600_000)} h ago)`);
     }
@@ -324,7 +327,7 @@ export async function runInvariants(input: InvariantInput, deps: RunInvariantsDe
  *  sources the decision paths use (GraphQL rosters, the token probe, the
  *  ledger tables), so the invariants see what the coach sees. Six network
  *  reads; the daemon runs it every INVARIANT_EVERY polls, not every poll. */
-export async function collectInvariantInput(db: Database, gql: Gql, leg: number): Promise<InvariantInput> {
+export async function collectInvariantInput(db: Database, gql: Gql, leg: number, kickoffs: number[]): Promise<InvariantInput> {
   const now = Date.now();
   const [league, rosters, state, token] = await Promise.all([
     sleeper.league(config.leagueId),
@@ -347,7 +350,7 @@ export async function collectInvariantInput(db: Database, gql: Gql, leg: number)
   return {
     db, league, rosters, state, view, token, pendingClaims,
     outstandingOffers: offers.map((o) => ({ transactionId: o.transactionId })),
-    proposalsDb, scheduledRuns,
+    proposalsDb, scheduledRuns, kickoffs,
     dropHistory: dropHistory(),
     dropFreeze: breakerState(),
     alertsLastHour: alertsLastHour(db, now),

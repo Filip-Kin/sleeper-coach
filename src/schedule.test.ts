@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { pickemTriggerDue } from "./pickem/strategy.ts";
-import { zonedInstant, lastOccurrence, isDue, dayLabel, jitterFor, JOBS, type Job } from "./schedule.ts";
+import { zonedInstant, lastOccurrence, isDue, dayLabel, jitterFor, jitterWindow, MIN_JITTER_WINDOW_MS, JOBS, type Job } from "./schedule.ts";
+import { MIN_AGE_MS } from "./act/drop-intent.ts";
 
 let pass = 0, fail = 0;
 const t = (label: string, cond: boolean, detail = "") => {
@@ -31,18 +32,18 @@ t("from Thursday, the last Sunday lock is the previous Sunday", et(occ).startsWi
 
 // 4. Due logic.
 const justAfter = occ + 5 * 60_000;
-t("due when it has not run this occurrence", isDue(sundayJob, justAfter, occ - 86_400_000).due);
-t("not due when it already ran this occurrence", !isDue(sundayJob, justAfter, occ).due);
+t("due when it has not run this occurrence", isDue(sundayJob, justAfter, occ - 86_400_000, []).due);
+t("not due when it already ran this occurrence", !isDue(sundayJob, justAfter, occ, []).due);
 
 // 5. LATE RUNS ARE SKIPPED, not caught up: a lineup set after kickoff is worse
 //    than not setting one. Sunday lock allows 2h; 3h late must be refused.
 const wayLate = occ + 3 * 60 * 60_000;
-const v = isDue(sundayJob, wayLate, occ - 86_400_000);
+const v = isDue(sundayJob, wayLate, occ - 86_400_000, []);
 t("a lock missed past its useful window is skipped", !v.due && v.reason.includes("skipping"), v.reason);
 // A read-only job may run much later without harm.
 const compute = JOBS.find((j) => j.name === "waiver-compute")!;
 const cOcc = lastOccurrence(compute, zonedInstant(2026, 10, 6, 8, 0))!;
-t("a read-only job tolerates being hours late", isDue(compute, cOcc + 5 * 60 * 60_000, 0).due);
+t("a read-only job tolerates being hours late", isDue(compute, cOcc + 5 * 60 * 60_000, 0, []).due);
 
 // 6. Every job is self-documenting and internally sane.
 for (const j of JOBS) {
@@ -137,14 +138,14 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
     // Stability: the same occurrence must always give the same offset, or a
     // restart would re-roll and could buy an earlier slot than the one we drew.
     const occ = zonedInstant(2026, 10, 7, fa.hour, fa.minute);
-    t("the offset is stable for one occurrence", jitterFor(fa, occ) === jitterFor(fa, occ));
+    t("the offset is stable for one occurrence", jitterFor(fa, occ, []) === jitterFor(fa, occ, []));
 
     // Spread: different days must land in genuinely different places, otherwise
     // the others can just learn the time.
     const offsets = new Set<number>();
     let min = Infinity, max = -Infinity;
     for (let d = 0; d < 60; d++) {
-      const o = jitterFor(fa, zonedInstant(2026, 10, 1 + d, fa.hour, fa.minute));
+      const o = jitterFor(fa, zonedInstant(2026, 10, 1 + d, fa.hour, fa.minute), []);
       offsets.add(Math.floor(o / 3_600_000));
       min = Math.min(min, o); max = Math.max(max, o);
     }
@@ -153,14 +154,83 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
 
     // And the job must not be considered due before its drawn slot.
     const occ2 = zonedInstant(2026, 10, 8, fa.hour, fa.minute);
-    const drawn = jitterFor(fa, occ2);
-    t("not due before the drawn slot", isDue(fa, occ2 + drawn - 60_000, 0).due === false);
-    t("due at the drawn slot", isDue(fa, occ2 + drawn + 1000, 0).due === true);
+    const drawn = jitterFor(fa, occ2, []);
+    t("not due before the drawn slot", isDue(fa, occ2 + drawn - 60_000, 0, []).due === false);
+    t("due at the drawn slot", isDue(fa, occ2 + drawn + 1000, 0, []).due === true);
   }
 
   const submit = JOBS.find((j) => j.name === "waiver-submit");
   t("waiver-submit is NOT randomised, because claim timing changes nothing",
     submit !== undefined && !submit.jitterMs);
+}
+
+// 11. THE WINDOW ENDS BEFORE THE DAY'S FIRST KICKOFF. Replay of 2026-10-11:
+//     the free-agent slot for Sunday 09:00 ET fell at 20:02, seven hours after
+//     the 13:00 kickoffs that lock the pool until Wednesday, so the engine could
+//     not make the Loveland-for-Andrews swap the rule called for and the review
+//     made it by hand at 11:36. The kickoffs are the pick'em cache of that
+//     morning (src/analysis/incidents/kickoffs-2026-week5.json, 15 games,
+//     PHI@JAX in London at 09:30, the 13:00 slate, TB@DAL Thursday 20:15,
+//     BUF@LAR Monday 20:15).
+{
+  const fa = JOBS.find((j) => j.name === "free-agent")!;
+  const cache = JSON.parse(readFileSync(new URL("./analysis/incidents/kickoffs-2026-week5.json", import.meta.url), "utf8")) as { week: number; games: { startTime: number; label: string }[] };
+  const kickoffs = cache.games.map((g) => g.startTime);
+  t("the fixture is the week-5 cache with 15 games", cache.week === 5 && kickoffs.length === 15, `${cache.week} ${kickoffs.length}`);
+  const H = 3_600_000, M = 60_000;
+  const lead = fa.kickoffLeadMs ?? 0;
+  t("the free-agent job ends its window before a kickoff", lead > 0, `${lead}`);
+  t("the lead covers the confirming run's minimum age with room for a poll and the run", lead >= MIN_AGE_MS + 10 * M, `${lead / M} min`);
+
+  // Sunday 2026-10-11 09:00 ET, the occurrence of the defect.
+  const sun = zonedInstant(2026, 10, 11, 9, 0);
+  const first1300 = zonedInstant(2026, 10, 11, 13, 0);
+  t("the defect: with no kickoffs the Sunday slot was 20:02 ET", et(sun + jitterFor(fa, sun, [])).includes("20:02"), et(sun + jitterFor(fa, sun, [])));
+  const width = jitterWindow(fa, sun, kickoffs);
+  t("with the kickoffs the Sunday window is 09:00 to 12:15 (3 h 15 min)", width === first1300 - lead - sun && width === 3 * H + 15 * M, `${width / M} min`);
+  const slot = sun + jitterFor(fa, sun, kickoffs);
+  t("the Sunday slot lands before 12:15", slot >= sun && slot < sun + width, et(slot));
+  t("the confirming run after the slot lands before the 13:00 kickoff", slot + MIN_AGE_MS + 5 * M < first1300, et(slot + MIN_AGE_MS));
+  t("the 09:30 London game leaves under an hour and does not end the window", jitterWindow(fa, sun, [zonedInstant(2026, 10, 11, 9, 30)]) === fa.jitterMs);
+  t("the minimum window is an hour", MIN_JITTER_WINDOW_MS === H);
+  t("a kickoff exactly an hour plus the lead after the start still ends the window", jitterWindow(fa, sun, [sun + H + lead]) === H);
+  t("the draw is stable for one occurrence", jitterFor(fa, sun, kickoffs) === jitterFor(fa, sun, [...kickoffs].reverse()));
+  // isDue reads the same window: not due at 11:00 if the slot is later, due at the slot, the holding reason names the kickoff, and
+  // at 14:30 an unrun occurrence is skipped rather than fired after the games (the 2 h late allowance from a slot before 12:15).
+  const hold = isDue(fa, sun + 1000, 0, kickoffs);
+  t("holding before the slot names the shortened window", !hold.due && hold.reason.includes("3.3h") && hold.reason.includes("kickoff"), hold.reason);
+  t("due at the drawn slot", isDue(fa, slot + 1000, 0, kickoffs).due);
+  const late = isDue(fa, zonedInstant(2026, 10, 11, 14, 30), 0, kickoffs);
+  t("an occurrence not run by 14:30 is skipped, not fired after the kickoffs", !late.due && late.reason.includes("skipping"), late.reason);
+  t("the Sunday occurrence is marked with the same nominal time as before", late.occurrence === sun);
+
+  // Thursday 2026-10-08 (TB@DAL 20:15 ET): 09:00 to 19:30, so a Thursday-night
+  // player added at the latest slot is confirmed by 20:00 and written before
+  // the kickoff; Monday 2026-10-12 (BUF@LAR 20:15) the same; Saturday
+  // 2026-10-10 has no game and keeps the whole 12 hours.
+  const thu = zonedInstant(2026, 10, 8, 9, 0);
+  t("Thursday's window ends 45 min before the 20:15 kickoff", jitterWindow(fa, thu, kickoffs) === zonedInstant(2026, 10, 8, 20, 15) - lead - thu, `${jitterWindow(fa, thu, kickoffs) / M} min`);
+  const mon = zonedInstant(2026, 10, 12, 9, 0);
+  t("Monday's window ends 45 min before the 20:15 kickoff", jitterWindow(fa, mon, kickoffs) === zonedInstant(2026, 10, 12, 20, 15) - lead - mon);
+  const sat = zonedInstant(2026, 10, 10, 9, 0);
+  t("a day with no kickoff keeps the full 12 h window", jitterWindow(fa, sat, kickoffs) === fa.jitterMs);
+  t("a kickoff before the occurrence (Thursday's game seen from Friday) does not count", jitterWindow(fa, zonedInstant(2026, 10, 9, 9, 0), kickoffs) === fa.jitterMs);
+  t("a job without a lead ignores the kickoffs", jitterWindow({ ...fa, kickoffLeadMs: undefined }, sun, kickoffs) === fa.jitterMs);
+  t("a non-finite kickoff is ignored", jitterWindow(fa, sun, [Number.NaN, first1300]) === width);
+
+  // Fairness holds inside the shorter window: over the season's Sundays with a
+  // 13:00 slate the slots still spread across the morning and never leave it.
+  const hours = new Set<number>();
+  let inside = true;
+  for (let w = 0; w < 17; w++) {
+    const o = sun + w * 7 * 86_400_000;
+    const k = o + 4 * H; // 13:00 ET that Sunday (DST shifts the instant, not the wall clock gap)
+    const j = jitterFor(fa, o, [k]);
+    hours.add(Math.floor(j / H));
+    if (j < 0 || j >= k - lead - o) inside = false;
+  }
+  t("Sunday slots spread across the morning hours", hours.size >= 3, `${hours.size} distinct hours`);
+  t("Sunday slots never reach the kickoff lead", inside);
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed`);

@@ -31,6 +31,23 @@ export function decideIntent(prev: DropIntent | null, now: number, minAgeMs = MI
   return { action: "go", firstSeen: prev.firstSeen };
 }
 
+/** The intents a confirming run takes now: those past the minimum age, unless
+ *  the last confirming run was under `throttleMs` ago AND every one of them
+ *  was already due then (so that run saw it and could not write it: the
+ *  throttle is for a write that keeps failing, not for a new decision). An
+ *  intent that came due since the last run goes at once, which keeps a free
+ *  add recorded before a Sunday kickoff from waiting out the throttle of a
+ *  claim confirmed just before it. A `lastConfirm` in the future (the
+ *  daemon's two-hour backoff after three failures) holds everything. Pure. */
+export function intentsToConfirm(
+  intents: DropIntent[], now: number, lastConfirm: number, throttleMs: number, minAgeMs = MIN_AGE_MS, maxAgeMs = MAX_AGE_MS,
+): DropIntent[] {
+  const due = intents.filter((i) => decideIntent(i, now, minAgeMs, maxAgeMs).action === "go");
+  if (!due.length) return [];
+  if (now - lastConfirm < throttleMs && due.every((i) => i.firstSeen + minAgeMs <= lastConfirm)) return [];
+  return due;
+}
+
 export class DropIntentStore {
   constructor(private readonly path = `${STATE_DIR}/drop-intents.json`) {}
   private read(): Record<string, DropIntent> {

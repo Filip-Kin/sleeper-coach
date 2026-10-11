@@ -69,6 +69,20 @@ export interface Job {
   // The offset is derived from the occurrence, so it is stable across restarts
   // (a restart must not buy a second, earlier roll) and different every day.
   jitterMs?: number;
+  // A jittered job that acts on the free-agent pool: on a day with NFL
+  // kickoffs its window ends this long BEFORE the first kickoff after the
+  // nominal time, because from a team's kickoff every unrostered player of
+  // that team is on waivers until Wednesday (sleeper/rules.ts playerOnWaivers),
+  // so a look after the kickoff cannot add him. The lead must cover the second
+  // look: an add that costs a player is written only by a confirming run at
+  // least MIN_AGE_MS (act/drop-intent.ts, 30 min) after the first, on a later
+  // poll. On 2026-10-11 the Sunday slot fell at 20:02 ET, seven hours after
+  // the 13:00 kickoffs; the Loveland-for-Andrews swap the rule called for had
+  // to be made by hand at 11:36 (fixes/done/2026-10-11-1140-...). A kickoff
+  // that leaves less than MIN_JITTER_WINDOW_MS of window (a 09:30 ET London
+  // game against a 09:00 start) is ignored: its two teams go to waivers at
+  // their kickoff and are claimed instead, as before. See jitterWindow.
+  kickoffLeadMs?: number;
   // Why this time, so nobody has to re-derive it later.
   why: string;
 }
@@ -81,26 +95,56 @@ export function dayLabel(job: Job): string {
   return job.dow === -1 ? "daily" : WEEKDAYS[job.dow] ?? "?";
 }
 
-// The most recent scheduled occurrence at or before `now`, or null if none in the
-// last 8 days (which cannot happen for a weekly job, but keeps the search bounded).
-/** A stable pseudo-random offset in [0, jitterMs) for one occurrence of one job.
+/** The narrowest window a kickoff may leave a jittered job. A kickoff closer
+ *  to the nominal time than this (plus the lead) does not end the window. */
+export const MIN_JITTER_WINDOW_MS = 60 * 60_000;
+
+/** The width of a job's random window for one occurrence, in ms: jitterMs,
+ *  or less when a kickoff ends it early (Job.kickoffLeadMs). `kickoffs` are
+ *  game start instants, any week, in any order; only those after the
+ *  occurrence that leave at least MIN_JITTER_WINDOW_MS count, and the earliest
+ *  of them ends the window kickoffLeadMs before itself. Sunday 09:00 ET with
+ *  a 13:00 slate and a 45 min lead: 3 h 15 min, so the look lands by 12:15
+ *  and its confirming run by 13:00. Pure. */
+export function jitterWindow(job: Job, occurrence: number, kickoffs: number[]): number {
+  const full = job.jitterMs ?? 0;
+  if (full <= 0) return 0;
+  const lead = job.kickoffLeadMs ?? 0;
+  if (lead <= 0) return full;
+  let width = full;
+  for (const k of kickoffs) {
+    if (typeof k !== "number" || !Number.isFinite(k)) continue;
+    const w = k - lead - occurrence;
+    if (w >= MIN_JITTER_WINDOW_MS && w < width) width = w;
+  }
+  return width;
+}
+
+/** A stable pseudo-random offset in [0, jitterWindow) for one occurrence of
+ *  one job.
  *
  *  Deterministic on purpose. Restarting the container must not re-roll into an
  *  earlier slot, and two polls a minute apart must agree on whether the job has
  *  come due yet. FNV-1a over the job name and the occurrence: not cryptographic,
  *  and it does not need to be, it only needs to be unpredictable to someone
- *  watching from the outside and stable to us. */
-export function jitterFor(job: Job, occurrence: number): number {
-  if (!job.jitterMs || job.jitterMs <= 0) return 0;
+ *  watching from the outside and stable to us. The same hash scales to the
+ *  window of the day, so a game day keeps its draw inside the shorter window
+ *  and every caller (the daemon, the invariants, the canary) must pass the
+ *  same kickoffs to agree on the slot. */
+export function jitterFor(job: Job, occurrence: number, kickoffs: number[]): number {
+  const width = jitterWindow(job, occurrence, kickoffs);
+  if (width <= 0) return 0;
   const key = `${job.name}:${occurrence}`;
   let h = 0x811c9dc5;
   for (let i = 0; i < key.length; i++) {
     h ^= key.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  return Math.floor((h / 0x100000000) * job.jitterMs);
+  return Math.floor((h / 0x100000000) * width);
 }
 
+// The most recent scheduled occurrence at or before `now`, or null if none in the
+// last 8 days (which cannot happen for a weekly job, but keeps the search bounded).
 export function lastOccurrence(job: Job, now: number, zone = ZONE): number | null {
   for (let back = 0; back <= 8; back++) {
     const probe = now - back * 86_400_000;
@@ -119,8 +163,10 @@ export interface DueVerdict {
   reason: string;
 }
 
-// Should this job run right now, given when it last ran?
-export function isDue(job: Job, now: number, lastRun: number, zone = ZONE): DueVerdict {
+// Should this job run right now, given when it last ran? `kickoffs` are the
+// game start instants the window rule reads (jitterWindow); a job without
+// kickoffLeadMs ignores them.
+export function isDue(job: Job, now: number, lastRun: number, kickoffs: number[], zone = ZONE): DueVerdict {
   const occ = lastOccurrence(job, now, zone);
   if (occ === null) return { due: false, occurrence: null, reason: "no occurrence in the search window" };
   if (lastRun >= occ) return { due: false, occurrence: occ, reason: "already ran this occurrence" };
@@ -128,12 +174,14 @@ export function isDue(job: Job, now: number, lastRun: number, zone = ZONE): DueV
   // A jittered job does not run at its nominal time; it runs somewhere in the
   // window after it. Everything downstream still keys off the nominal
   // occurrence, so "already ran this occurrence" keeps working unchanged.
-  const jitter = jitterFor(job, occ);
+  const jitter = jitterFor(job, occ, kickoffs);
   if (now < occ + jitter) {
+    const width = jitterWindow(job, occ, kickoffs);
+    const shortened = width < (job.jitterMs ?? 0) ? ` (ends ${Math.round((job.kickoffLeadMs ?? 0) / 60000)} min before the day's first kickoff)` : "";
     return {
       due: false,
       occurrence: occ,
-      reason: `holding ${Math.round((occ + jitter - now) / 60000)} more min of this occurrence's ${Math.round((job.jitterMs ?? 0) / 3_600_000)}h random window`,
+      reason: `holding ${Math.round((occ + jitter - now) / 60000)} more min of this occurrence's ${(width / 3_600_000).toFixed(1)}h random window${shortened}`,
     };
   }
 
@@ -237,8 +285,17 @@ export const JOBS: Job[] = [
     //
     // Daily, because free agents appear continuously, and one add per pass at an
     // unguessable time is both fair and effective.
-    name: "free-agent", dow: -1, hour: 9, minute: 0, jitterMs: 12 * HOUR, maxLateMs: 2 * HOUR,
-    why: "Costless free-agent adds only, fired at a random point between 09:00 and 21:00 ET so the humans genuinely get a shot at the wire. Claims are unaffected: they resolve by waiver_position at the clear time, so their timing changes nothing for anyone.",
+    //
+    // On a game day the window ends 45 minutes before the day's first kickoff
+    // (Job.kickoffLeadMs, jitterWindow): a Sunday look is somewhere in 09:00 to
+    // 12:15 ET, a Thursday or Monday one in 09:00 to 19:30. From kickoff the
+    // pool is locked until Wednesday, so a later look can add nobody who
+    // plays, and the 45 minutes hold the confirming run (30 min after the
+    // first look, on a later poll) before the lock too. Still random inside
+    // the window, still the same draw after a restart, still never before
+    // 09:00.
+    name: "free-agent", dow: -1, hour: 9, minute: 0, jitterMs: 12 * HOUR, maxLateMs: 2 * HOUR, kickoffLeadMs: 45 * MIN,
+    why: "Costless free-agent adds only, fired at a random point between 09:00 and 21:00 ET, or 45 min before the day's first kickoff when that is earlier, so the humans genuinely get a shot at the wire and the look still lands before the pool locks. Claims are unaffected: they resolve by waiver_position at the clear time, so their timing changes nothing for anyone.",
   },
   {
     name: "waiver-submit", dow: 2, hour: 20, minute: 0, maxLateMs: 6 * HOUR,

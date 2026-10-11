@@ -61,6 +61,9 @@ export interface CanaryObservations {
   haConfigured: boolean;
   now: number;
   jobs?: Job[];
+  /** This week's kickoff instants from the pick'em cache, for the jittered
+   *  jobs' windows (schedule.ts jitterWindow); none read as the full window. */
+  kickoffs?: number[];
 }
 
 export interface CanaryVerdict {
@@ -103,7 +106,7 @@ export function canaryVerdict(o: CanaryObservations): CanaryVerdict {
     for (const job of jobs) {
       const occ = lastOccurrence(job, o.now);
       if (occ === null) continue;
-      if (o.now <= occ + jitterFor(job, occ) + job.maxLateMs) continue;
+      if (o.now <= occ + jitterFor(job, occ, o.kickoffs ?? []) + job.maxLateMs) continue;
       if ((o.scheduledRuns[job.name] ?? 0) < occ) late.push(job.name);
     }
     if (late.length) failures.push(`schedule: overdue and never marked: ${late.join(", ")}`);
@@ -209,9 +212,11 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
 
   let matchupWeek: number | null = null;
   let matchupPoints: number | null = null;
+  const kickoffCache = await readKickoffCache();
+  const kickoffs = (kickoffCache?.games ?? []).map((g) => Number(g.startTime)).filter((n) => Number.isFinite(n) && n > 0);
   try {
     const state = await sleeper.nflState();
-    matchupWeek = weekToScore(state, await readKickoffCache(), now);
+    matchupWeek = weekToScore(state, kickoffCache, now);
     if (matchupWeek !== null) matchupPoints = sumMatchupPoints(await sleeper.matchups(config.leagueId, matchupWeek));
   } catch (err) {
     console.error(`[canary] matchup read failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -223,7 +228,7 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
     scheduledRuns: await readScheduledRuns(),
     activityAppendable: activityAppendable(),
     haConfigured: !!process.env.HA_NOTIFY_URL && !!process.env.HA_TOKEN,
-    now,
+    now, kickoffs,
   };
 }
 // #endregion

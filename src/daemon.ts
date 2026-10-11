@@ -6,6 +6,7 @@ import { sleeper } from "./sleeper/client.ts";
 import { sendAlert } from "./alert.ts";
 import { logEvent } from "./log.ts";
 import { JOBS, isDue, dayLabel, type Job } from "./schedule.ts";
+import { weekSchedule } from "./sleeper/graphql.ts";
 import { pickemTriggerDue, FINAL_WINDOW_MIN } from "./pickem/strategy.ts";
 import { tokenGql as leagueGql, dropPlayers, completedTrades, myRosterView, pendingTrades, currentStarters } from "./league/api.ts";
 import { assessToken } from "./league/token.ts";
@@ -21,7 +22,7 @@ import { activeRailRoster, chooseLegalForcedDrops } from "./analysis/reconcile-p
 import { keptStarters } from "./analysis/roster-fit.ts";
 import { loadStartableThisWeek } from "./analysis/week-projections.ts";
 import { reconcileReserve } from "./act/reserve-reconcile.ts";
-import { DropIntentStore, decideIntent } from "./act/drop-intent.ts";
+import { DropIntentStore, decideIntent, intentsToConfirm } from "./act/drop-intent.ts";
 import { pendingClaimPlayers, railsWithPendingDrops } from "./act/pending-claims.ts";
 import { RunLedger } from "./act/run-ledger.ts";
 import { runJobProcess, runJobWithRetry, JOB_TIMEOUT_MS } from "./act/spawn-job.ts";
@@ -308,12 +309,58 @@ async function pickemKickoffPass(): Promise<void> {
 }
 // #endregion
 
+// #region kickoffs for the schedule
+// The free-agent window ends before the day's first kickoff (schedule.ts
+// jitterWindow), so the due check needs the week's kickoffs. They come from
+// the same public scores feed the waiver run's lock rule reads (weekSchedule,
+// canceled games filtered), for the week pollOnce last saw, memoised for an
+// hour; while that read fails the last good week stands, and with none yet
+// the pick'em cache (this week only, refreshed daily at 09:00) is the
+// fallback. The invariants and the canary are handed the same list, so the
+// three agree on the slot.
+let scheduleWeek = 0;
+let scheduleSeason: string = config.season;
+let scheduleKickoffs: { week: number; at: number; kickoffs: number[] } | null = null;
+let scheduleKickoffsFailedAt = 0;
+let scheduleKickoffsFailedLogged = 0;
+const SCHEDULE_KICKOFFS_TTL_MS = 60 * 60_000;
+// A failed read is not retried every poll: the public GraphQL call can take
+// its whole timeout and retries before the due check gets to run.
+const SCHEDULE_KICKOFFS_RETRY_MS = 5 * 60_000;
+
+async function kickoffsForSchedule(): Promise<number[]> {
+  const week = scheduleWeek;
+  if (!week) return cachedKickoffs();
+  const have = scheduleKickoffs;
+  const now = Date.now();
+  if (have && have.week === week && now - have.at < SCHEDULE_KICKOFFS_TTL_MS) return have.kickoffs;
+  const fallback = async (): Promise<number[]> => (have && have.week === week ? have.kickoffs : cachedKickoffs());
+  if (now - scheduleKickoffsFailedAt < SCHEDULE_KICKOFFS_RETRY_MS) return fallback();
+  try {
+    const games = await weekSchedule(scheduleSeason, week);
+    if (!games.length) throw new Error(`no games in the schedule for week ${week}`);
+    scheduleKickoffs = { week, at: Date.now(), kickoffs: games.map((g) => g.startTime) };
+    scheduleKickoffsFailedAt = 0;
+    scheduleKickoffsFailedLogged = 0;
+    return scheduleKickoffs.kickoffs;
+  } catch (err) {
+    scheduleKickoffsFailedAt = Date.now();
+    if (Date.now() - scheduleKickoffsFailedLogged > SCHEDULE_KICKOFFS_TTL_MS) {
+      scheduleKickoffsFailedLogged = Date.now();
+      console.error(`[schedule] week ${week} kickoffs unreadable (${err instanceof Error ? err.message : String(err)}); using ${have && have.week === week ? "the last good read" : "the pick'em kickoff cache"}, next try in ${SCHEDULE_KICKOFFS_RETRY_MS / 60_000} min`);
+    }
+    return fallback();
+  }
+}
+// #endregion
+
 let heldJobsLogged = false;
 
 async function runDueJobs(): Promise<void> {
   if (draftActive()) return; // the draft orchestrator owns the league while it runs
   const now = Date.now();
-  const due = JOBS.map((job) => ({ job, v: isDue(job, now, lastRunOf(job.name)) }));
+  const kickoffs = await kickoffsForSchedule();
+  const due = JOBS.map((job) => ({ job, v: isDue(job, now, lastRunOf(job.name), kickoffs) }));
   // Only pay for the token check when something actually wants to run, and
   // leave the occurrence UNMARKED so it is retried on the next poll instead of
   // being burned while the token is missing or Sleeper is unreachable.
@@ -557,14 +604,18 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
 // #region waiver intent confirmation
 let lastWaiverConfirm = 0;
 let waiverConfirmFailures = 0;
+const WAIVER_CONFIRM_THROTTLE_MS = 20 * 60_000;
 /** One confirming run per recorded waiver intent that has aged past the
  *  minimum, at most once every 20 minutes. The run re-plans from fresh data
  *  and writes only if it reaches the same move. */
 async function confirmWaiverIntents(): Promise<void> {
   const now = Date.now();
-  if (now - lastWaiverConfirm < 20 * 60_000) return;
   if (freezeState().frozen || draftActive()) return;
-  const due = new DropIntentStore().all().filter((i) => i.key.startsWith("waiver:") && decideIntent(i, now).action === "go");
+  // Once in twenty minutes, except that an intent which came due since the
+  // last confirming run is taken at once: a free add recorded before a
+  // Sunday kickoff must not wait on the throttle of a claim confirmed just
+  // before (act/drop-intent.ts intentsToConfirm).
+  const due = intentsToConfirm(new DropIntentStore().all().filter((i) => i.key.startsWith("waiver:")), now, lastWaiverConfirm, WAIVER_CONFIRM_THROTTLE_MS);
   if (!due.length) return;
   lastWaiverConfirm = now;
   const kinds = new Set(due.map((i) => i.key.split(":")[1]));
@@ -576,7 +627,7 @@ async function confirmWaiverIntents(): Promise<void> {
   // A run that fails before it can decide (token, network) is not retried
   // every twenty minutes for six hours: three failures back off two hours.
   waiverConfirmFailures = code === 0 ? 0 : waiverConfirmFailures + 1;
-  if (waiverConfirmFailures >= 3) { lastWaiverConfirm = now + 2 * 3_600_000 - 20 * 60_000; waiverConfirmFailures = 0; }
+  if (waiverConfirmFailures >= 3) { lastWaiverConfirm = now + 2 * 3_600_000 - WAIVER_CONFIRM_THROTTLE_MS; waiverConfirmFailures = 0; }
 }
 // #endregion
 
@@ -627,6 +678,8 @@ async function pollOnce(): Promise<void> {
   }
   const state = await sleeper.nflState();
   const round = Math.max(1, state.week || 1);
+  scheduleWeek = round;
+  if (state.season) scheduleSeason = state.season;
   if (draftActive()) return; // the draft orchestrator owns the league while it runs
 
   // A healed player still parked on IR makes the roster invalid and every
@@ -708,7 +761,7 @@ async function pollOnce(): Promise<void> {
   // roster at 9 AM instead of Filip at 10:38.
   if (polls % 10 === 1) {
     try {
-      await runInvariants(await collectInvariantInput(db, gql, round));
+      await runInvariants(await collectInvariantInput(db, gql, round, await kickoffsForSchedule()));
     } catch (err) {
       console.error(`[daemon] invariants failed: ${err instanceof Error ? err.message : String(err)}`);
     }
