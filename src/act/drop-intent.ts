@@ -37,8 +37,9 @@ export function decideIntent(prev: DropIntent | null, now: number, minAgeMs = MI
  *  throttle is for a write that keeps failing, not for a new decision). An
  *  intent that came due since the last run goes at once, which keeps a free
  *  add recorded before a Sunday kickoff from waiting out the throttle of a
- *  claim confirmed just before it. A `lastConfirm` in the future (the
- *  daemon's two-hour backoff after three failures) holds everything. Pure. */
+ *  claim confirmed just before it. The daemon's two-hour backoff after three
+ *  failed runs is a hold of its own (daemon.ts waiverConfirmHoldUntil), checked
+ *  before this is asked, so it holds every intent, new or old. Pure. */
 export function intentsToConfirm(
   intents: DropIntent[], now: number, lastConfirm: number, throttleMs: number, minAgeMs = MIN_AGE_MS, maxAgeMs = MAX_AGE_MS,
 ): DropIntent[] {

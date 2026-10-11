@@ -157,6 +157,19 @@ export function lastOccurrence(job: Job, now: number, zone = ZONE): number | nul
   return null;
 }
 
+/** The instant after which an unrun occurrence is skipped rather than fired:
+ *  the drawn slot plus maxLateMs, or the end of the day's random window,
+ *  whichever is later. The late allowance alone counted from the slot, and a
+ *  game-day window draws its slots early (Sunday in 09:00 to 12:15), so a
+ *  daemon or token held for two hours after a 09:22 slot skipped the look at
+ *  11:22 with the pool open until 13:00. Inside the window the job is never
+ *  skipped; past it the allowance runs as before. One rule for the due check,
+ *  the invariants and the canary. Pure. */
+export function lateDeadline(job: Job, occurrence: number, kickoffs: number[]): number {
+  const jitter = jitterFor(job, occurrence, kickoffs);
+  return occurrence + Math.max(jitter + job.maxLateMs, jitterWindow(job, occurrence, kickoffs));
+}
+
 export interface DueVerdict {
   due: boolean;
   occurrence: number | null;
@@ -186,11 +199,13 @@ export function isDue(job: Job, now: number, lastRun: number, kickoffs: number[]
   }
 
   const late = now - (occ + jitter);
-  if (late > job.maxLateMs) {
+  const deadline = lateDeadline(job, occ, kickoffs);
+  if (now > deadline) {
+    const until = deadline > occ + jitter + job.maxLateMs ? "the end of the day's random window" : `the ${Math.round(job.maxLateMs / 60000)} min useful window after the slot`;
     return {
       due: false,
       occurrence: occ,
-      reason: `missed by ${Math.round(late / 60000)} min, past the ${Math.round(job.maxLateMs / 60000)} min useful window; skipping rather than acting late`,
+      reason: `missed by ${Math.round(late / 60000)} min, past ${until}; skipping rather than acting late`,
     };
   }
   return {
@@ -293,7 +308,7 @@ export const JOBS: Job[] = [
     // plays, and the 45 minutes hold the confirming run (30 min after the
     // first look, on a later poll) before the lock too. Still random inside
     // the window, still the same draw after a restart, still never before
-    // 09:00.
+    // 09:00, and never skipped as late while the window is open (lateDeadline).
     name: "free-agent", dow: -1, hour: 9, minute: 0, jitterMs: 12 * HOUR, maxLateMs: 2 * HOUR, kickoffLeadMs: 45 * MIN,
     why: "Costless free-agent adds only, fired at a random point between 09:00 and 21:00 ET, or 45 min before the day's first kickoff when that is earlier, so the humans genuinely get a shot at the wire and the look still lands before the pool locks. Claims are unaffected: they resolve by waiver_position at the clear time, so their timing changes nothing for anyone.",
   },

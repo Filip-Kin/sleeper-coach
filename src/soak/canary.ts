@@ -20,13 +20,13 @@ import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
 import { config, isStagingTarget, REAL_LEAGUE_ID } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
-import { leagueRosters } from "../sleeper/graphql.ts";
+import { leagueRosters, weekSchedule } from "../sleeper/graphql.ts";
 import { buildRosterView, RosterSourceError } from "../analysis/roster-view.ts";
 import { rosterLegal, type Legality } from "../sleeper/rules.ts";
 import { activeCapacity } from "../analysis/roster-fit.ts";
 import { probeToken } from "../league/api.ts";
 import { assessToken, type TokenProbe } from "../league/token.ts";
-import { JOBS, jitterFor, lastOccurrence, type Job } from "../schedule.ts";
+import { JOBS, lateDeadline, lastOccurrence, type Job } from "../schedule.ts";
 import { ACTIVITY_LOG, DB_PATH, FREEZE_FILE, KICKOFF_CACHE } from "../paths.ts";
 import { logEvent } from "../log.ts";
 
@@ -61,8 +61,13 @@ export interface CanaryObservations {
   haConfigured: boolean;
   now: number;
   jobs?: Job[];
-  /** This week's kickoff instants from the pick'em cache, for the jittered
-   *  jobs' windows (schedule.ts jitterWindow); none read as the full window. */
+  /** This week's kickoff instants from the public scores feed, the list the
+   *  daemon's due check reads (daemon.ts kickoffsForSchedule), for the
+   *  jittered jobs' windows (schedule.ts jitterWindow). The pick'em cache is
+   *  not used here: it carries no game status, so a postponed early game
+   *  would give the canary a shorter window than the daemon's and a false
+   *  "overdue" that holds the boot freeze. An unreadable feed reads as the
+   *  full window, which can only delay this check, never fail it wrongly. */
   kickoffs?: number[];
 }
 
@@ -106,7 +111,7 @@ export function canaryVerdict(o: CanaryObservations): CanaryVerdict {
     for (const job of jobs) {
       const occ = lastOccurrence(job, o.now);
       if (occ === null) continue;
-      if (o.now <= occ + jitterFor(job, occ, o.kickoffs ?? []) + job.maxLateMs) continue;
+      if (o.now <= lateDeadline(job, occ, o.kickoffs ?? [])) continue;
       if ((o.scheduledRuns[job.name] ?? 0) < occ) late.push(job.name);
     }
     if (late.length) failures.push(`schedule: overdue and never marked: ${late.join(", ")}`);
@@ -213,9 +218,16 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
   let matchupWeek: number | null = null;
   let matchupPoints: number | null = null;
   const kickoffCache = await readKickoffCache();
-  const kickoffs = (kickoffCache?.games ?? []).map((g) => Number(g.startTime)).filter((n) => Number.isFinite(n) && n > 0);
+  let kickoffs: number[] = [];
   try {
     const state = await sleeper.nflState();
+    if (state.season_type === "regular" && state.week > 0) {
+      try {
+        kickoffs = (await weekSchedule(state.season, state.week)).map((g) => g.startTime);
+      } catch (err) {
+        console.error(`[canary] week ${state.week} kickoffs unreadable (${err instanceof Error ? err.message : String(err)}); the schedule check reads the full window`);
+      }
+    }
     matchupWeek = weekToScore(state, kickoffCache, now);
     if (matchupWeek !== null) matchupPoints = sumMatchupPoints(await sleeper.matchups(config.leagueId, matchupWeek));
   } catch (err) {

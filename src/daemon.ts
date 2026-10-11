@@ -320,6 +320,9 @@ async function pickemKickoffPass(): Promise<void> {
 // three agree on the slot.
 let scheduleWeek = 0;
 let scheduleSeason: string = config.season;
+// The scores feed is queried for the regular season only (graphql.ts
+// weekSchedule); outside it the read is skipped rather than failing hourly.
+let scheduleSeasonType = "regular";
 let scheduleKickoffs: { week: number; at: number; kickoffs: number[] } | null = null;
 let scheduleKickoffsFailedAt = 0;
 let scheduleKickoffsFailedLogged = 0;
@@ -330,7 +333,7 @@ const SCHEDULE_KICKOFFS_RETRY_MS = 5 * 60_000;
 
 async function kickoffsForSchedule(): Promise<number[]> {
   const week = scheduleWeek;
-  if (!week) return cachedKickoffs();
+  if (!week || scheduleSeasonType !== "regular") return cachedKickoffs();
   const have = scheduleKickoffs;
   const now = Date.now();
   if (have && have.week === week && now - have.at < SCHEDULE_KICKOFFS_TTL_MS) return have.kickoffs;
@@ -604,13 +607,19 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
 // #region waiver intent confirmation
 let lastWaiverConfirm = 0;
 let waiverConfirmFailures = 0;
+// After three failed confirming runs nothing is confirmed until this instant:
+// a hold of its own, not a last-run time pushed into the future, so an intent
+// that comes due inside it waits too (act/drop-intent.ts intentsToConfirm).
+let waiverConfirmHoldUntil = 0;
 const WAIVER_CONFIRM_THROTTLE_MS = 20 * 60_000;
+const WAIVER_CONFIRM_BACKOFF_MS = 2 * 3_600_000;
 /** One confirming run per recorded waiver intent that has aged past the
  *  minimum, at most once every 20 minutes. The run re-plans from fresh data
  *  and writes only if it reaches the same move. */
 async function confirmWaiverIntents(): Promise<void> {
   const now = Date.now();
   if (freezeState().frozen || draftActive()) return;
+  if (now < waiverConfirmHoldUntil) return;
   // Once in twenty minutes, except that an intent which came due since the
   // last confirming run is taken at once: a free add recorded before a
   // Sunday kickoff must not wait on the throttle of a claim confirmed just
@@ -627,7 +636,7 @@ async function confirmWaiverIntents(): Promise<void> {
   // A run that fails before it can decide (token, network) is not retried
   // every twenty minutes for six hours: three failures back off two hours.
   waiverConfirmFailures = code === 0 ? 0 : waiverConfirmFailures + 1;
-  if (waiverConfirmFailures >= 3) { lastWaiverConfirm = now + 2 * 3_600_000 - WAIVER_CONFIRM_THROTTLE_MS; waiverConfirmFailures = 0; }
+  if (waiverConfirmFailures >= 3) { waiverConfirmHoldUntil = now + WAIVER_CONFIRM_BACKOFF_MS; waiverConfirmFailures = 0; }
 }
 // #endregion
 
@@ -680,6 +689,7 @@ async function pollOnce(): Promise<void> {
   const round = Math.max(1, state.week || 1);
   scheduleWeek = round;
   if (state.season) scheduleSeason = state.season;
+  if (state.season_type) scheduleSeasonType = state.season_type;
   if (draftActive()) return; // the draft orchestrator owns the league while it runs
 
   // A healed player still parked on IR makes the roster invalid and every
@@ -785,7 +795,7 @@ async function main(): Promise<void> {
   }
   for (const j of JOBS) {
     const cmd = JOB_COMMAND[j.name];
-    console.log(`[schedule] ${j.name.padEnd(18)} ${dayLabel(j)} ${String(j.hour).padStart(2, "0")}:${String(j.minute).padStart(2, "0")} ET, up to ${Math.round(j.maxLateMs / 3600000)}h late  ->  ${cmd ? cmd.slice(2).join(" ") : "NO COMMAND"}`);
+    console.log(`[schedule] ${j.name.padEnd(18)} ${dayLabel(j)} ${String(j.hour).padStart(2, "0")}:${String(j.minute).padStart(2, "0")} ET, up to ${Math.round(Math.max(j.maxLateMs, j.jitterMs ?? 0) / 3600000)}h late  ->  ${cmd ? cmd.slice(2).join(" ") : "NO COMMAND"}`);
   }
   for (;;) {
     try {

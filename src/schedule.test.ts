@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { pickemTriggerDue } from "./pickem/strategy.ts";
-import { zonedInstant, lastOccurrence, isDue, dayLabel, jitterFor, jitterWindow, MIN_JITTER_WINDOW_MS, JOBS, type Job } from "./schedule.ts";
+import { zonedInstant, lastOccurrence, isDue, dayLabel, jitterFor, jitterWindow, lateDeadline, MIN_JITTER_WINDOW_MS, JOBS, type Job } from "./schedule.ts";
 import { MIN_AGE_MS } from "./act/drop-intent.ts";
 
 let pass = 0, fail = 0;
@@ -189,7 +189,7 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
   const width = jitterWindow(fa, sun, kickoffs);
   t("with the kickoffs the Sunday window is 09:00 to 12:15 (3 h 15 min)", width === first1300 - lead - sun && width === 3 * H + 15 * M, `${width / M} min`);
   const slot = sun + jitterFor(fa, sun, kickoffs);
-  t("the Sunday slot lands before 12:15", slot >= sun && slot < sun + width, et(slot));
+  t("the Sunday slot is 11:59 ET, inside 09:00 to 12:15", et(slot).includes("11:59") && slot >= sun && slot < sun + width, et(slot));
   t("the confirming run after the slot lands before the 13:00 kickoff", slot + MIN_AGE_MS + 5 * M < first1300, et(slot + MIN_AGE_MS));
   t("the 09:30 London game leaves under an hour and does not end the window", jitterWindow(fa, sun, [zonedInstant(2026, 10, 11, 9, 30)]) === fa.jitterMs);
   t("the minimum window is an hour", MIN_JITTER_WINDOW_MS === H);
@@ -200,9 +200,49 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
   const hold = isDue(fa, sun + 1000, 0, kickoffs);
   t("holding before the slot names the shortened window", !hold.due && hold.reason.includes("3.3h") && hold.reason.includes("kickoff"), hold.reason);
   t("due at the drawn slot", isDue(fa, slot + 1000, 0, kickoffs).due);
+  // The late allowance runs from the slot (11:59 + 2 h = 13:59), so a daemon
+  // held past the kickoff may still fire a catch-up look at 13:30 (the lock
+  // rule keeps kicked-off teams out of the pool; late-slate and night-game
+  // players are still adds); by 14:30 it is skipped and marked.
+  t("the deadline is the slot plus the late allowance when that is past the window end", lateDeadline(fa, sun, kickoffs) === slot + fa.maxLateMs && lateDeadline(fa, sun, kickoffs) > sun + width);
+  t("held past the kickoff, a catch-up look at 13:30 is still due", isDue(fa, zonedInstant(2026, 10, 11, 13, 30), 0, kickoffs).due);
   const late = isDue(fa, zonedInstant(2026, 10, 11, 14, 30), 0, kickoffs);
-  t("an occurrence not run by 14:30 is skipped, not fired after the kickoffs", !late.due && late.reason.includes("skipping"), late.reason);
+  t("an occurrence not run by 14:30 (slot + 2 h) is skipped, not fired", !late.due && late.reason.includes("skipping"), late.reason);
   t("the Sunday occurrence is marked with the same nominal time as before", late.occurrence === sun);
+  // NEVER SKIPPED WHILE THE WINDOW IS OPEN. A game-day window draws early
+  // slots; the allowance alone skipped a 09:22 slot at 11:22 with the pool
+  // open until 13:00. Over the season's Sundays with a 13:00 slate, every
+  // occurrence whose slot + 2 h falls inside the window is due until the
+  // window ends, and skipped after; one such Sunday must exist to pin it.
+  {
+    let earlySundays = 0;
+    const bad: string[] = [];
+    for (let w = 0; w < 17; w++) {
+      const day = new Date(Date.UTC(2026, 9, 11 + 7 * w));
+      const o = zonedInstant(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), 9, 0);
+      const k = zonedInstant(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), 13, 0);
+      const wd = jitterWindow(fa, o, [k]);
+      const j = jitterFor(fa, o, [k]);
+      if (j + fa.maxLateMs + M >= wd) continue; // the old skip point must sit inside the window by a minute to be probed
+      earlySundays++;
+      if (lateDeadline(fa, o, [k]) !== o + wd) bad.push(`${et(o)} deadline`);
+      if (!isDue(fa, o + wd - M, 0, [k]).due) bad.push(`${et(o)} not due before the window end`);
+      if (isDue(fa, o + wd + M, 0, [k]).due) bad.push(`${et(o)} due after the window end`);
+      if (!isDue(fa, o + j + fa.maxLateMs + M, 0, [k]).due) bad.push(`${et(o)} skipped at slot + 2 h, the old rule`);
+    }
+    t("at least one Sunday draws a slot more than 2 h before the window end", earlySundays > 0, `${earlySundays}`);
+    t("such an occurrence is due until the window ends and skipped after", bad.length === 0, bad.join("; "));
+  }
+  t("a day with no kickoff keeps the slot + 2 h deadline when that is past 21:00, else 21:00", (() => {
+    const o = zonedInstant(2026, 10, 10, 9, 0); // Saturday, full 12 h
+    const j = jitterFor(fa, o, kickoffs);
+    return lateDeadline(fa, o, kickoffs) === o + Math.max(j + fa.maxLateMs, fa.jitterMs!);
+  })());
+  t("a job without jitter keeps its plain late allowance", (() => {
+    const sunday = JOBS.find((j) => j.name === "lineup-sunday")!;
+    const o = zonedInstant(2026, 10, 11, sunday.hour, sunday.minute);
+    return lateDeadline(sunday, o, kickoffs) === o + sunday.maxLateMs;
+  })());
 
   // Thursday 2026-10-08 (TB@DAL 20:15 ET): 09:00 to 19:30, so a Thursday-night
   // player added at the latest slot is confirmed by 20:00 and written before
@@ -223,8 +263,9 @@ t("the daily (dow -1) job renders as 'daily'", JOBS.filter((j) => j.dow === -1).
   const hours = new Set<number>();
   let inside = true;
   for (let w = 0; w < 17; w++) {
-    const o = sun + w * 7 * 86_400_000;
-    const k = o + 4 * H; // 13:00 ET that Sunday (DST shifts the instant, not the wall clock gap)
+    const day = new Date(Date.UTC(2026, 9, 11 + 7 * w));
+    const o = zonedInstant(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), 9, 0); // 09:00 ET that Sunday, across the 1 Nov DST change
+    const k = zonedInstant(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), 13, 0); // 13:00 ET
     const j = jitterFor(fa, o, [k]);
     hours.add(Math.floor(j / H));
     if (j < 0 || j >= k - lead - o) inside = false;

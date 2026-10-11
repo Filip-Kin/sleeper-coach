@@ -74,11 +74,13 @@ describe("the confirming run's throttle holds a failing write, never a new decis
     expect(intentsToConfirm([add, claim], T + 29 * MIN, lastConfirm, THROTTLE)).toEqual([]);
     expect(intentsToConfirm([add, claim], T + 30 * MIN, lastConfirm, THROTTLE)).toEqual([add, claim]);
   });
-  test("the two-hour backoff after three failures holds everything, new or old", () => {
+  test("a lastConfirm far in the past never holds a due intent", () => {
+    // The daemon's two-hour backoff after three failures is its own hold
+    // (daemon.ts waiverConfirmHoldUntil), checked before this is asked, so a
+    // future lastConfirm is never passed here; this only pins the plain path.
     const now = 100 * MIN;
     const old = { key: "waiver:add:X:Y", firstSeen: 0, note: "" };
     const fresh = { key: "waiver:add:P:Q", firstSeen: now - MIN_AGE_MS, note: "" };
-    const backoff = now + 2 * 3_600_000 - THROTTLE; // what the daemon sets
-    expect(intentsToConfirm([old, fresh], now, backoff, THROTTLE)).toEqual([]);
+    expect(intentsToConfirm([old, fresh], now, 0, THROTTLE)).toEqual([old, fresh]);
   });
 });

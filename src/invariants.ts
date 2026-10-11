@@ -44,7 +44,7 @@ import { alertsLastHour } from "./alert.ts";
 import { activeCapacity } from "./analysis/roster-fit.ts";
 import { SLOT_ELIGIBILITY, startingSlots } from "./analysis/lineup.ts";
 import { assessToken, type TokenProbe } from "./league/token.ts";
-import { JOBS, jitterFor, lastOccurrence, type Job } from "./schedule.ts";
+import { JOBS, lastOccurrence, type Job, lateDeadline } from "./schedule.ts";
 import { DAILY_LIMIT, automaticDrops, type DropRecord } from "./analysis/drop-guard.ts";
 import { breakerState, dropFreezeNow } from "./killswitch.ts";
 import { byeWeek } from "./data/byes.ts";
@@ -202,8 +202,7 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
     for (const job of jobs) {
       const occ = lastOccurrence(job, now);
       if (occ === null) continue;
-      const window = occ + jitterFor(job, occ, input.kickoffs) + job.maxLateMs;
-      if (now <= window) continue; // still inside its useful window; the loop may yet run it
+      if (now <= lateDeadline(job, occ, input.kickoffs)) continue; // still inside its useful window; the loop may yet run it
       if ((input.scheduledRuns[job.name] ?? 0) < occ) late.push(`${job.name} (${Math.round((now - occ) / 3_600_000)} h ago)`);
     }
     out.push({
