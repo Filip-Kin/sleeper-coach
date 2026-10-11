@@ -200,6 +200,7 @@ const JOB_RETRIES = 2;
 const JOB_RETRY_WAIT_MS = 20_000;
 const JOB_RETRY_MAX_FAIL_SECS = 60;
 
+const heldByCanary = new Set<string>();
 async function runJob(job: Job, occurrence: number): Promise<void> {
   const cmd = JOB_COMMAND[job.name];
   if (!cmd) {
@@ -207,6 +208,20 @@ async function runJob(job: Job, occurrence: number): Promise<void> {
     return;
   }
   const frozen = freezeState();
+  if (frozen.frozen && frozen.reason.startsWith("kill-switch file") && canaryFreezeActive()) {
+    // The boot canary's own freeze is no decision: the occurrence stays
+    // unmarked and the next poll retries it (pollOnce runs the canary first,
+    // so the look fires the poll the checks pass). Marking it here burned a
+    // game-day look whenever a deploy landed inside the free-agent window.
+    // Past lateDeadline the due check skips and marks it as before. A human
+    // freeze (env or file) is still marked below.
+    const key = `${job.name}:${occurrence}`;
+    if (!heldByCanary.has(key)) {
+      heldByCanary.add(key);
+      console.log(`[schedule] ${job.name} held, not marked: the boot canary's freeze is up; retried every poll until it lifts or the occurrence passes its deadline`);
+    }
+    return;
+  }
   if (frozen.frozen) {
     // Mark it handled anyway: the freeze is a deliberate human decision, and we
     // do not want a queue of missed locks all firing the moment it is lifted.

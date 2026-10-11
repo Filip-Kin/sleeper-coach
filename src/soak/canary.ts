@@ -64,10 +64,11 @@ export interface CanaryObservations {
   /** This week's kickoff instants from the public scores feed, the list the
    *  daemon's due check reads (daemon.ts kickoffsForSchedule), for the
    *  jittered jobs' windows (schedule.ts jitterWindow). The pick'em cache is
-   *  not used here: it carries no game status, so a postponed early game
-   *  would give the canary a shorter window than the daemon's and a false
-   *  "overdue" that holds the boot freeze. An unreadable feed reads as the
-   *  full window, which can only delay this check, never fail it wrongly. */
+   *  not used here: it is refreshed once a day (pickem-slate, 09:00), so a
+   *  game postponed since then would give the canary a shorter window than
+   *  the daemon's and a false "overdue" that holds the boot freeze. An
+   *  unreadable feed reads as the full window, which can only delay this
+   *  check, never fail it wrongly. */
   kickoffs?: number[];
 }
 
