@@ -80,10 +80,23 @@ describe("2026-10-07 03:16 ET, as it happened: Harvey landed, the Bengals lost, 
 describe("had both claims landed before the flip: sixteen active, Etienne on IR, Dowdle stale", () => {
   const players = [...mine.players, HARVEY, CIN];
   const view = buildRosterView(roster(players, mine.reserve, flip));
-  test("physically full: one forced drop, the Bengals (71, not starting) go, no season body is cut", () => {
+  const SMITH = idOf("DeVonta Smith");
+  // DeVonta Smith was Out on the bench that morning (he went to IR by hand
+  // later in the week). Until 2026-10-12 this path cut the Bengals here; the
+  // seat rule (reserve-stash.replay.test.ts) stashes Smith and cuts nobody.
+  test("physically full: Smith (Out) takes the IR seat, nobody is cut, the Bengals and Croskey-Merritt both stay", () => {
     const plan = planReserveActivation({ view, settings: S, cap: CAP, railRoster: rail(players, mine.reserve, flip), cfg, rails: DEFAULT_RAILS, keep: starters, heldClaims: [] })[0]!;
     expect(view.active.length).toBe(16);
     expect(plan.action).toBe("activate");
+    expect(plan.drop).toBeNull();
+    expect(plan.stash?.playerId).toBe(SMITH);
+    expect(plan.reserveAfter.sort()).toEqual([idOf("Travis Etienne"), SMITH].sort());
+  });
+  test("with Smith healthy too, nobody qualifies: one forced drop, the Bengals (71, not starting) go, no season body is cut", () => {
+    const status = { ...flip, [SMITH]: null };
+    const plan = planReserveActivation({ view: buildRosterView(roster(players, mine.reserve, status)), settings: S, cap: CAP, railRoster: rail(players, mine.reserve, status), cfg, rails: DEFAULT_RAILS, keep: starters, heldClaims: [] })[0]!;
+    expect(plan.action).toBe("activate");
+    expect(plan.stash).toBeNull();
     expect(plan.drop?.playerId).toBe(CIN);
     expect(plan.drop?.playerId).not.toBe(JCM);
   });

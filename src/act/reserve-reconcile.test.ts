@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildRosterView } from "../analysis/roster-view.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
+import { DEFAULT_RAILS } from "../analysis/rails.ts";
 import { planReserveActivation, claimsToCancel, ReserveDeferrals, type HeldClaim } from "./reserve-reconcile.ts";
 import type { Roster, League } from "../sleeper/types.ts";
 import type { RailPlayer } from "../analysis/rails.ts";
@@ -105,12 +106,74 @@ describe("the IR player is himself a cut candidate (Filip, 2026-09-30)", () => {
   });
 });
 
+const claim = (transactionId: string, value: number, seats = 1): HeldClaim => ({ transactionId, leg: 5, adds: [`add-${transactionId}`], drops: [], seats, value, names: [`Add ${transactionId}`] });
+// 2026-10-12: sixteen active, a man coming off IR, and a bench player who
+// qualifies for IR under the league's flags. An IR slot is a roster
+// expansion (Filip): he takes the seat, nobody is cut. The filter is the
+// waiver run's stashCandidates (never a starter, never a claim's drop,
+// longest absence first).
+describe("a bench player who qualifies for IR takes the returning man's seat (2026-10-12)", () => {
+  const withStatus = (rail: RailPlayer[], status: Record<string, string>): RailPlayer[] => rail.map((p) => (p.playerId! in status ? { ...p, injuryStatus: status[p.playerId!] } : p));
+  test("full roster, one Out bench man: activate, stash him, no drop, reserve list swaps the two", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: withStatus(rail, { rb5: "Out" }), cfg })[0]!;
+    expect(plan.action).toBe("activate");
+    expect(plan.drop).toBeNull();
+    expect(plan.stash?.playerId).toBe("rb5");
+    expect(plan.reserveAfter).toEqual(["rb5"]);
+    expect(plan.reason).toContain("P rb5");
+  });
+  test("a man the NFL parked (IR) is stashed before a game-day Out, whatever their values", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: withStatus(rail, { wr4: "Out", rb5: "IR" }), cfg })[0]!;
+    expect(plan.stash?.playerId).toBe("rb5");
+  });
+  test("Questionable and Doubtful are not IR-eligible here: no stash, the forced cut as before", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: withStatus(rail, { rb5: "Questionable", wr6: "Doubtful" }), cfg })[0]!;
+    expect(plan.stash).toBeNull();
+    expect(plan.drop?.playerId).toBe("wr6");
+  });
+  test("a pending claim's drop (never-drop) is never the stash", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const r = withStatus(rail, { rb5: "Out", wr6: "Out" });
+    const asClaimDrop = planReserveActivation({ view, settings: S, cap: 16, railRoster: r, cfg, rails: { ...DEFAULT_RAILS, neverDrop: ["P rb5", "P wr6"] } })[0]!;
+    expect(asClaimDrop.stash).toBeNull();
+    expect(asClaimDrop.drop?.playerId).toBe("wr5");
+  });
+  test("a starter in the leg whose own tag qualifies for IR is stashed anyway: the guard benches him as soon as writes are legal", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const r = withStatus(rail, { rb5: "Out" });
+    const p = planReserveActivation({ view, settings: S, cap: 16, railRoster: r, cfg, keep: ["P rb5"] })[0]!;
+    expect(p.stash?.playerId).toBe("rb5");
+    expect(p.drop).toBeNull();
+  });
+  test("the returning man worth less than everyone is still activated, not released, when a seat can be made", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const cheap = withStatus(rail.map((p) => (p.playerId === "collins" ? { ...p, points: 20 } : p)), { rb5: "Out" });
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: cheap, cfg })[0]!;
+    expect(plan.action).toBe("activate");
+    expect(plan.stash?.playerId).toBe("rb5");
+  });
+  test("held no-drop claims are cancelled: the roster is at the cap after the swap", () => {
+    const { view, rail } = fixture(16, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: withStatus(rail, { rb5: "Out" }), cfg, heldClaims: [claim("t1", 50)] })[0]!;
+    expect(plan.stash?.playerId).toBe("rb5");
+    expect(plan.cancel.map((c) => c.transactionId)).toEqual(["t1"]);
+  });
+  test("a free seat needs no stash", () => {
+    const { view, rail } = fixture(15, "Questionable");
+    const plan = planReserveActivation({ view, settings: S, cap: 16, railRoster: withStatus(rail, { rb5: "Out" }), cfg })[0]!;
+    expect(plan.stash).toBeNull();
+    expect(plan.drop).toBeNull();
+  });
+});
+
 // 2026-10-07, 03:07 ET: fourteen active, two on IR, two no-drop claims pending,
 // Dowdle flips Out -> Questionable eight minutes before the waiver run. The
 // old rule counted the held seats as taken and recorded "drop Croskey-Merritt
 // (96 for the season) and activate Dowdle". A claim is a maybe (we were last
 // in the order and the Bengals claim did lose); a drop is for the season.
-const claim = (transactionId: string, value: number, seats = 1): HeldClaim => ({ transactionId, leg: 5, adds: [`add-${transactionId}`], drops: [], seats, value, names: [`Add ${transactionId}`] });
 describe("a seat held for a pending no-drop claim is still a seat for the returning man (2026-10-07)", () => {
   test("one free seat, one held claim: he takes it, nobody is dropped, the claim is cancelled", () => {
     const { view, rail } = fixture(15, "Questionable");

@@ -58,22 +58,59 @@ const active0930: RailPlayer[] = [
 const ir0930: RailPlayer[] = [P("Rico Dowdle", "Questionable", true), P("Nico Collins", "Questionable", true)];
 
 describe("2026-09-30: activating Dowdle off IR", () => {
-  test("the cut is Gainwell, the lowest rest-of-season value on the bench; never Etienne or Croskey-Merritt", () => {
+  // Since 2026-10-12 (reserve-reconcile.ts, the seat rule) the man the bot
+  // cut that morning is the man who takes the seat: Etienne was Out and
+  // IR-eligible, so he goes to IR in Dowdle's place and nobody is cut. Evans
+  // was Out too but a starter, never a stash.
+  test("Etienne (Out, the man the bot cut) takes Dowdle's IR seat; nobody is cut", () => {
     const view = viewOf(active0930, ir0930, STARTERS_0930);
     const plan = planReserveActivation({ view, settings: SETTINGS, cap: 16, railRoster: [...active0930, ...ir0930], cfg, keep: STARTERS_0930 })[0]!;
     expect(plan.name).toBe("Rico Dowdle");
     expect(plan.action).toBe("activate");
+    expect(plan.drop).toBeNull();
+    expect(plan.stash?.name).toBe("Travis Etienne");
+    expect(plan.reserveAfter.length).toBe(2);
+  });
+  // Evans was Out in the leg that week: a starter whose tag qualifies for IR
+  // is a stash too (the guard benches him), so the no-stash variants list
+  // him Questionable.
+  const q = (p: RailPlayer): RailPlayer => (p.name === "Travis Etienne" || p.name === "Mike Evans" ? P(p.name, "Questionable") : p);
+  test("with Etienne and Evans merely Questionable nobody qualifies: the cut is Gainwell, the lowest rest-of-season value on the bench; never Etienne or Croskey-Merritt", () => {
+    const active = active0930.map(q);
+    const view = viewOf(active, ir0930, STARTERS_0930);
+    const plan = planReserveActivation({ view, settings: SETTINGS, cap: 16, railRoster: [...active, ...ir0930], cfg, keep: STARTERS_0930 })[0]!;
+    expect(plan.stash).toBeNull();
     expect(plan.drop?.name).toBe("Kenny Gainwell");
   });
   test("Etienne is a protected stash: Out, but RB18 on the season", () => {
     expect(P("Travis Etienne", "Out").returnsBeforePlayoffs).toBe(true);
   });
-  test("then Collins: with Dowdle active and Gainwell gone, the cut is Spears", () => {
-    const active = [...active0930.filter((p) => p.name !== "Kenny Gainwell"), P("Rico Dowdle", "Questionable")];
-    const ir = [P("Nico Collins", "Questionable", true)];
+  test("then Collins: Dowdle active, Etienne on IR, both seats taken, Evans Questionable so nobody else qualifies: the cut is Gainwell, never Spears or Croskey-Merritt", () => {
+    const active = [...active0930.filter((p) => p.name !== "Travis Etienne").map(q), P("Rico Dowdle", "Questionable")];
+    const ir = [P("Nico Collins", "Questionable", true), P("Travis Etienne", "Out", true)];
     const view = viewOf(active, ir, STARTERS_0930);
     const plan = planReserveActivation({ view, settings: SETTINGS, cap: 16, railRoster: [...active, ...ir], cfg, keep: STARTERS_0930 })[0]!;
     expect(plan.name).toBe("Nico Collins");
+    expect(plan.stash).toBeNull();
+    expect(plan.drop?.name).toBe("Kenny Gainwell");
+  });
+  test("a free seat (Etienne on IR, Gainwell gone, fifteen active): Collins takes it and nobody is cut", () => {
+    const active = [...active0930.filter((p) => p.name !== "Kenny Gainwell" && p.name !== "Travis Etienne"), P("Rico Dowdle", "Questionable")];
+    const ir = [P("Nico Collins", "Questionable", true), P("Travis Etienne", "Out", true)];
+    const view = viewOf(active, ir, STARTERS_0930);
+    const plan = planReserveActivation({ view, settings: SETTINGS, cap: 16, railRoster: [...active, ...ir], cfg, keep: STARTERS_0930 })[0]!;
+    expect(view.active.length).toBe(15);
+    expect(plan.name).toBe("Nico Collins");
+    expect(plan.drop).toBeNull();
+    expect(plan.stash).toBeNull();
+  });
+  test("counterfactual, Etienne and Evans Questionable (not eligible; Etienne 130) and Gainwell gone: the cut for Collins is Spears (111)", () => {
+    const active = [...active0930.filter((p) => p.name !== "Kenny Gainwell").map(q), P("Rico Dowdle", "Questionable")];
+    const ir = [P("Nico Collins", "Questionable", true)];
+    const view = viewOf(active, ir, STARTERS_0930);
+    const plan = planReserveActivation({ view, settings: SETTINGS, cap: 16, railRoster: [...active, ...ir], cfg, keep: STARTERS_0930 })[0]!;
+    expect(view.active.length).toBe(16);
+    expect(plan.stash).toBeNull();
     expect(plan.drop?.name).toBe("Tyjae Spears");
   });
   test("a starter is never the cut even when he is the cheapest body", () => {

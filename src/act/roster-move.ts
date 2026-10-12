@@ -13,8 +13,13 @@
 //   bun run src/act/roster-move.ts drop     <name>                       # release a player
 //   bun run src/act/roster-move.ts add      <name> [--drop <name>]       # free-agent add
 //   bun run src/act/roster-move.ts claim    <name> [--drop <name>]       # waiver claim
-//   bun run src/act/roster-move.ts activate <name> [--drop <name>]       # off IR
+//   bun run src/act/roster-move.ts activate <name> [--drop <name> | --stash <name>]  # off IR
 //   bun run src/act/roster-move.ts stash    <name>                       # onto IR
+//
+// A full roster is not yet a cut: an active player who qualifies for IR takes
+// the returning man's seat (--stash, one reserve write, nobody cut), and the
+// tool refuses a --drop while such a man exists unless told why (the daemon's
+// rule, reserve-reconcile.ts, 2026-10-12).
 //
 // Nothing is written without --write. A cut that is not the lowest-valued
 // legal candidate needs --override "<reason>". Every write is recorded in the
@@ -29,7 +34,7 @@ import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
 import { keptStarters } from "../analysis/roster-fit.ts";
 import { bestLineup } from "../analysis/trade.ts";
 import { loadWeekFacts } from "../analysis/week-projections.ts";
-import { weekLineupGain } from "../analysis/waivers.ts";
+import { weekLineupGain, stashCandidates } from "../analysis/waivers.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { logEvent } from "../log.ts";
 import { pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
@@ -39,17 +44,23 @@ const cmd = args[0] ?? "";
 const WRITE = args.includes("--write");
 const opt = (k: string): string | undefined => { const i = args.indexOf(`--${k}`); return i >= 0 ? args[i + 1] : undefined; };
 const OVERRIDE = opt("override");
-// Words up to the first flag are the target; the words after --drop up to the
-// next flag are the drop. Quoting is optional either way.
+// Words up to the first flag are the target; the words after --drop (or
+// --stash) up to the next flag are that name. Quoting is optional either way.
 const rest = args.slice(1);
 const firstFlag = rest.findIndex((a) => a.startsWith("--"));
 const name = (firstFlag < 0 ? rest : rest.slice(0, firstFlag)).join(" ").trim();
-const dropIdx = rest.indexOf("--drop");
-const dropWords = dropIdx < 0 ? [] : rest.slice(dropIdx + 1, (() => { const n = rest.slice(dropIdx + 1).findIndex((a) => a.startsWith("--")); return n < 0 ? rest.length : dropIdx + 1 + n; })());
-const dropName = dropWords.length ? dropWords.join(" ") : undefined;
+const flagName = (flag: string): string | undefined => {
+  const i = rest.indexOf(`--${flag}`);
+  if (i < 0) return undefined;
+  const n = rest.slice(i + 1).findIndex((a) => a.startsWith("--"));
+  const words = rest.slice(i + 1, n < 0 ? rest.length : i + 1 + n);
+  return words.length ? words.join(" ") : undefined;
+};
+const dropName = flagName("drop");
+const stashName = flagName("stash");
 
 if (!cmd || !name) {
-  console.log("usage: roster-move.ts <drop|add|claim|activate|stash> <player name> [--drop <name>] [--write] [--override <reason>]");
+  console.log("usage: roster-move.ts <drop|add|claim|activate|stash> <player name> [--drop <name> | --stash <name>] [--write] [--override <reason>]");
   process.exit(2);
 }
 
@@ -92,6 +103,15 @@ const newcomer = (cmd === "add" || cmd === "claim") && name ? values.get(byName(
 const kept = new Set(keptStarters(rail.filter((p) => starters.has(p.playerId!)).map((p) => p.name), rail,
   (body, starter) => startable(body, starter) && !pendingDrops.includes(body.playerId ?? ""), newcomer ? toRail(newcomer) : undefined).map((n) => n.toLowerCase()));
 const legalCuts = cutOrder(rail.filter((p) => !kept.has(p.name.toLowerCase()) && !pendingDrops.includes(p.playerId!) && canDrop(p.name, rail, { ...DEFAULT_RAILS, protectTopN: 0 }).allowed));
+// Who could go to IR instead of a cut (the daemon's filter, waivers.ts
+// stashCandidates): IR-eligible under the league's flags, not a starter this
+// week (a starter whose own tag qualifies for IR is benched by the guard as
+// soon as writes are legal, so he counts as a bench man), not a pending
+// claim's drop; longest absence first.
+const stashable = stashCandidates(
+  { roster: rail, irEligible: (st) => irEligible(st, league.settings), currentStarters: rail.filter((p) => starters.has(p.playerId!) && !irEligible(p.injuryStatus, league.settings)).map((p) => p.name) },
+  { rails: { ...DEFAULT_RAILS, neverDrop: [...DEFAULT_RAILS.neverDrop, ...rail.filter((p) => pendingDrops.includes(p.playerId!)).map((p) => p.name)] } },
+);
 console.log(`\nWeek ${week}. Active ${view.active.length}/${league.roster_positions.length}, IR ${view.reserve.map((e) => e.name).join(", ") || "empty"}. Pending claims: +${pending.adds.length} / -${pending.drops.length}.`);
 console.log("\nOUR ROSTER (live values; * = starts this week; cut order among legal cuts shown)");
 for (const e of [...view.active].sort((a, b) => (values.get(b.playerId)?.value ?? 0) - (values.get(a.playerId)?.value ?? 0))) {
@@ -105,6 +125,10 @@ if (!target) { console.error(`\nno player named "${name}" in the value table`); 
 console.log(`\nTARGET  ${fmt(target, target.playerId)}`);
 const drop = dropName ? byName(dropName) : undefined;
 if (dropName && !drop) { console.error(`no player named "${dropName}"`); process.exit(2); }
+const stash = stashName ? byName(stashName) : undefined;
+if (stashName && !stash) { console.error(`no player named "${stashName}"`); process.exit(2); }
+if (stash && cmd !== "activate") { console.error("--stash is for `activate` only"); process.exit(2); }
+if (stash && drop) { console.error("--stash or --drop, not both: the stash makes the seat"); process.exit(2); }
 
 // The cut check: whoever leaves must be the cheapest legal cut, or say why not.
 // A swap at the target's own position by a target who would NOT start in
@@ -200,15 +224,35 @@ switch (cmd) {
       ...c, value: Math.max(0, ...c.adds.map((id) => values.get(id)?.value ?? 0)), names: c.adds.map((id) => values.get(id)?.name ?? id),
     }));
     const cancel = claimsToCancel(held, full ? 0 : cap - view.active.length - 1);
+    const seatBy = stashable.length ? `IR-eligible for his seat: ${stashable.map((p) => `${p.name} (${p.injuryStatus})`).join(", ")}; use --stash "<name>"` : "nobody on the bench is IR-eligible";
     if (full) {
-      if (!drop) { console.error(`roster full; name a --drop. Cheapest legal cut: ${legalCuts[0]?.name}${legalCuts[0] && target.value < legalCuts[0].points ? ` (he is worth less than that himself: release him instead)` : ""}`); process.exit(2); }
-      checkCut(drop);
-    } else if (drop) { console.error(`a seat is free (${view.active.length} active${pending.slotsNeeded ? `, ${pending.slotsNeeded} held by pending claims` : ""}); no --drop for an activation`); process.exit(2); }
+      if (!drop && !stash) { console.error(`roster full; name a --stash or a --drop. ${seatBy}. Cheapest legal cut: ${legalCuts[0]?.name}${legalCuts[0] && target.value < legalCuts[0].points ? ` (he is worth less than that himself: release him instead)` : ""}`); process.exit(2); }
+      if (stash) {
+        // The daemon's seat rule: the same filter, so a hand stash is one the
+        // engine would make. A man it would not stash needs the reason in writing.
+        if (!view.activeIds.has(stash.playerId)) { console.error(`${stash.name} is not on our active roster`); process.exit(2); }
+        if (!irEligible(stash.injuryStatus, league.settings)) { console.error(`${stash.name} is ${stash.injuryStatus ?? "healthy"}: not IR-eligible in this league`); process.exit(2); }
+        if (!stashable.some((p) => p.playerId === stash.playerId)) {
+          console.error(`\n${stash.name} is IR-eligible but the engine would not stash him (a starter this week, a pending claim's drop, or never-drop). ${seatBy}.`);
+          if (!OVERRIDE) { console.error("refusing without --override \"<reason>\""); process.exit(2); }
+          console.error(`override given: ${OVERRIDE}`);
+        } else if (stashable[0]!.playerId !== stash.playerId) {
+          console.log(`\n${stash.name} is a stash; the engine would stash ${stashable[0]!.name} first (longest absence first).`);
+        }
+        console.log(`\n${stash.name} (${stash.injuryStatus}) takes the IR seat; nobody is cut.`);
+      } else {
+        if (stashable.length && !OVERRIDE) { console.error(`\na cut is not needed: ${seatBy}. --override to cut ${drop!.name} anyway.`); process.exit(2); }
+        if (stashable.length) console.error(`override given: ${OVERRIDE}`);
+        checkCut(drop!);
+      }
+    } else if (drop || stash) { console.error(`a seat is free (${view.active.length} active${pending.slotsNeeded ? `, ${pending.slotsNeeded} held by pending claims` : ""}); no --drop or --stash for an activation`); process.exit(2); }
     for (const c of cancel) console.log(`the pending claim for ${c.names.join(" + ")} (${Math.round(c.value)} ROS) has no seat once he is active: cancelled`);
-    if (!WRITE) { console.log(`\n(dry) would ${full ? `drop ${drop!.name} and ` : ""}activate him${cancel.length ? ` and cancel ${cancel.length} claim(s)` : ""}. Add --write.`); break; }
-    if (full) await dropPlayers(gql, [drop!.playerId], config.rosterId, config.leagueId, "manual");
-    const back = await updateReserve(gql, view.reserve.map((e) => e.playerId).filter((id) => id !== target.playerId));
-    logEvent("coach", "manual-move", `Manual activation of ${target.name}${drop ? `, dropping ${drop.name}` : ""}.`, { activate: target.playerId, drop: drop?.playerId ?? null, reserve: back, override: OVERRIDE ?? null, cancel: cancel.map((c) => c.transactionId) });
+    const reserveAfter = [...view.reserve.map((e) => e.playerId).filter((id) => id !== target.playerId), ...(stash ? [stash.playerId] : [])];
+    if (!WRITE) { console.log(`\n(dry) would ${full ? (stash ? `move ${stash.name} to IR and ` : `drop ${drop!.name} and `) : ""}activate him${cancel.length ? ` and cancel ${cancel.length} claim(s)` : ""}; IR would be [${reserveAfter.join(", ")}]. Add --write.`); break; }
+    if (full && drop) await dropPlayers(gql, [drop.playerId], config.rosterId, config.leagueId, "manual");
+    const back = await updateReserve(gql, reserveAfter);
+    if (stash && !back.includes(stash.playerId)) { console.error(`Sleeper echoed IR [${back.join(", ")}] without ${stash.name}; check the roster`); }
+    logEvent("coach", "manual-move", `Manual activation of ${target.name}${drop ? `, dropping ${drop.name}` : ""}${stash ? `, ${stash.name} to IR in his place` : ""}.`, { activate: target.playerId, drop: drop?.playerId ?? null, stash: stash?.playerId ?? null, reserve: back, override: OVERRIDE ?? null, cancel: cancel.map((c) => c.transactionId) });
     console.log(`activated; IR now [${back.join(", ")}]`);
     for (const c of cancel) {
       try {
@@ -226,7 +270,11 @@ switch (cmd) {
   case "stash": {
     if (!view.activeIds.has(target.playerId)) { console.error("not on our active roster"); process.exit(2); }
     if (!irEligible(target.injuryStatus, league.settings)) { console.error(`${target.injuryStatus ?? "healthy"} is not IR-eligible in this league`); process.exit(2); }
-    if (view.reserve.length >= (league.settings.reserve_slots ?? 0)) { console.error("IR is full"); process.exit(2); }
+    if (view.reserve.length >= (league.settings.reserve_slots ?? 0)) {
+      const stale = staleReserve(view, league.settings).map((e) => e.name);
+      console.error(`IR is full (${view.reserve.map((e) => e.name).join(", ")})${stale.length ? `; ${stale.join(", ")} must come off` : ""}. To put him in for a man coming off IR, one write: activate "<name>" --stash "${target.name}"`);
+      process.exit(2);
+    }
     if (!WRITE) { console.log("\n(dry) would move him to IR. Add --write."); break; }
     const back = await updateReserve(gql, [...view.reserve.map((e) => e.playerId), target.playerId]);
     logEvent("coach", "manual-move", `Manual IR stash of ${target.name}.`, { stash: target.playerId, reserve: back });

@@ -28,13 +28,25 @@
 // before the season body). The planner refiles a claim as a swap on its next
 // run if the add is worth a drop; that drop is then conditional on the claim
 // landing, which is the only kind of drop a claim may cause.
+//
+// A full roster is not yet a cut (2026-10-12). Sixteen active, Smith (Out)
+// and Etienne (IR) on reserve, Dowdle Out on the bench: when Smith's tag
+// lifted this path went straight to the cheapest legal cut, the Jaguars that
+// day and Jake Bates (K2 on the season) once Tuesday's stream had swapped the
+// Jaguars out. Filip's rule: an IR slot is a roster expansion. A bench man
+// who qualifies for IR under the league's flags (waivers.ts stashCandidates:
+// not a starter, not a claim's drop, not never-drop, longest absence first)
+// takes the returning man's reserve seat in the same write, and nobody is
+// cut for the season. The forced cut is only for a roster with nobody to
+// stash.
 
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
-import { staleReserve, reserveWritable, RESERVE_LOCKED_RE, type Settings } from "../sleeper/rules.ts";
+import { staleReserve, reserveWritable, irEligible, RESERVE_LOCKED_RE, type Settings } from "../sleeper/rules.ts";
 import type { RosterView } from "../analysis/roster-view.ts";
 import { activeCapacity, keptStarters } from "../analysis/roster-fit.ts";
 import { loadStartableThisWeek } from "../analysis/week-projections.ts";
+import { stashCandidates } from "../analysis/waivers.ts";
 import { DEFAULT_FAIRNESS, type FairnessConfig } from "../analysis/trade-fair.ts";
 import { DEFAULT_RAILS, type RailConfig, type RailPlayer } from "../analysis/rails.ts";
 import { activeRailRoster, chooseLegalForcedDrops, type LegalDrop } from "../analysis/reconcile-plan.ts";
@@ -59,9 +71,12 @@ export interface ReserveDecision {
    *  release: he is himself the least valuable body, so he is dropped instead.
    *  stuck: the rails allow no cut. */
   action: "activate" | "release" | "stuck";
-  /** The forced drop that makes room, when the active roster is full. For
-   *  "release" this is the IR player himself. */
+  /** The forced drop that makes room, when the active roster is full and
+   *  nobody can be stashed. For "release" this is the IR player himself. */
   drop: LegalDrop | null;
+  /** The active player who takes the reserve seat instead of a cut, when the
+   *  roster is full and he qualifies for IR. He is in `reserveAfter`. */
+  stash: { playerId: string; name: string; injuryStatus: string | null } | null;
   /** The reserve list to write (unused for "release": dropping him clears it). */
   reserveAfter: string[];
   /** Our pending no-drop claims that have no seat once he is active, lowest
@@ -72,9 +87,10 @@ export interface ReserveDecision {
 
 /** One activation per call: the first stale reserve player.
  *
- *  THE RULE (Filip, 2026-09-30): when the roster is full, the player cut is
- *  the one worth least for the rest of the season, and the man coming off IR
- *  is a candidate like anyone else. On 09-30 this path cut Travis Etienne
+ *  THE RULE (Filip, 2026-09-30): when the roster is full and nobody can
+ *  take the reserve seat (2026-10-12, `stash`), the player cut is the one
+ *  worth least for the rest of the season, and the man coming off IR is a
+ *  candidate like anyone else. On 09-30 this path cut Travis Etienne
  *  (RB26 rest-of-season) to make room for Rico Dowdle (RB32) because it only
  *  looked at active players and priced every bench player at zero. `keep`
  *  is this week's starters plus the drop side of any pending claim; those
@@ -104,13 +120,32 @@ export function planReserveActivation(args: {
     // rest of the claims go, cheapest first.
     const cancel = claimsToCancel(held, cap - view.active.length - 1);
     const note = cancel.length ? `; ${cancel.map((c) => `the claim for ${c.names.join(" + ")} no longer has a seat and is cancelled`).join("; ")}` : "";
-    return [{ ...base, action: "activate", drop: null, cancel, reason: `${e.name} is ${status}, not IR-eligible in this league; an active slot is free${note}` }];
+    return [{ ...base, action: "activate", drop: null, stash: null, cancel, reason: `${e.name} is ${status}, not IR-eligible in this league; an active slot is free${note}` }];
   }
   // Physically full: after the move the roster is at the cap, so every held
-  // seat is gone whichever way the cut falls.
+  // seat is gone whichever way the seat is found.
   const cancel = claimsToCancel(held, 0);
   const note = cancel.length ? `; ${cancel.map((c) => `the claim for ${c.names.join(" + ")} has no seat and is cancelled`).join("; ")}` : "";
   const full = activeRailRoster(view, railRoster);
+  // THE SEAT FIRST (Filip, BRIEF: an IR slot is a roster expansion). An
+  // active player who qualifies for IR takes the seat the returning man
+  // leaves, in the same reserve write; nobody is cut. The one stash filter
+  // the waiver run uses: the league's flags, never a current starter, never
+  // a pending claim's drop (on the never-drop rail), longest absence first
+  // (a man the NFL parked holds the seat; a one-week Out flips to
+  // Questionable by Thursday and the seat is needed again). A starter whose
+  // own tag qualifies for IR is not a starter here: he scores nothing, and
+  // the lineup guard cannot bench him while the stale IR man makes every
+  // lineup write illegal (this path runs first), so holding him in the leg
+  // would send the cut path after Bates.
+  const eligible = (st: string | null | undefined): boolean => irEligible(st, settings);
+  const parked = new Set(full.filter((p) => eligible(p.injuryStatus)).map((p) => p.name.toLowerCase()));
+  const playingStarters = (args.keep ?? []).filter((n) => !parked.has(n.toLowerCase()));
+  const stashable = stashCandidates({ roster: full, irEligible: eligible, currentStarters: playingStarters }, { rails })[0];
+  if (stashable?.playerId) {
+    const stash = { playerId: stashable.playerId, name: stashable.name, injuryStatus: stashable.injuryStatus ?? null };
+    return [{ ...base, action: "activate", drop: null, stash, reserveAfter: [...reserveAfter, stash.playerId], cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and ${stash.name} (${stash.injuryStatus ?? "injured"}) qualifies for injured reserve, so he takes the seat and nobody is cut${note}` }];
+  }
   const keep = keptStarters(args.keep ?? [], full, args.canFill ?? (() => false));
   // The IR player as a cut candidate, valued like everyone else.
   const self = railRoster.find((p) => p.playerId === e.playerId);
@@ -120,12 +155,12 @@ export function planReserveActivation(args: {
   const union = [...full.filter((p) => p.playerId !== e.playerId), selfRail];
   const drop = chooseLegalForcedDrops(view, union, 1, cfg, rails, keep, new Set([e.playerId]))[0];
   if (!drop) {
-    return [{ ...base, action: "stuck", drop: null, cancel: [], reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and the rails allow no drop` }];
+    return [{ ...base, action: "stuck", drop: null, stash: null, cancel: [], reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and the rails allow no drop` }];
   }
   if (drop.playerId === e.playerId) {
-    return [{ ...base, action: "release", drop, cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and he is the least valuable body for the rest of the season (${Math.round(drop.cost)} points), so he is released rather than activated${note}` }];
+    return [{ ...base, action: "release", drop, stash: null, cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and he is the least valuable body for the rest of the season (${Math.round(drop.cost)} points), so he is released rather than activated${note}` }];
   }
-  return [{ ...base, action: "activate", drop, cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full, so ${drop.name} goes (${drop.reason})${note}` }];
+  return [{ ...base, action: "activate", drop, stash: null, cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full, nobody qualifies for injured reserve, so ${drop.name} goes (${drop.reason})${note}` }];
 }
 
 const HOUR = 3_600_000;
@@ -277,29 +312,36 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
 
   const intents = deps.intents ?? new DropIntentStore();
   const prefix = `ir-activate:${plan.playerId}:`;
-  if (!plan.drop) {
-    // A seat is free, so no cut: any drop recorded for him on an earlier
-    // look (a seat that was held then) is moot.
-    intents.forget(prefix);
-  } else {
-    // Two looks before the cut: the same decision from fresh data at least
-    // MIN_AGE_MS apart. Nothing about an illegal roster is urgent at this
-    // resolution, and every one of this month's bad drops was a single read.
-    const key = `${prefix}${plan.action}:${plan.drop.playerId}`;
+  // Two looks before a move that costs a player (a cut) or moves one to IR
+  // (a stash): the same decision from fresh data at least MIN_AGE_MS apart.
+  // Nothing about an illegal roster is urgent at this resolution, and every
+  // one of this month's bad drops was a single read. A tag that changes
+  // between looks (the stash listed Questionable, the cut no longer cheapest)
+  // restarts the decision under the same prefix.
+  const twoLooks = async (key: string, would: string, meta: Record<string, unknown>): Promise<boolean> => {
     const restarts = intents.settle(prefix, key, now);
     const gate = decideIntent(intents.get(key), now);
     if (gate.action === "record") {
       intents.put({ key, firstSeen: now, note: plan.reason });
-      logEvent("coach", "ir-activate-intent", `Would ${plan.action === "release" ? "release" : `drop ${plan.drop.name} and activate`} ${plan.name}; confirming on a later look. ${plan.reason}`, { player: plan.playerId, drop: plan.drop.playerId, action: plan.action, restarts });
+      logEvent("coach", "ir-activate-intent", `Would ${would} ${plan.name}; confirming on a later look. ${plan.reason}`, { player: plan.playerId, ...meta, restarts });
       if (restarts >= 3) {
         // The decision keeps changing between looks, so nothing ever confirms
         // and the roster stays illegal. That needs eyes, not more patience.
-        logEvent("coach", "ir-activate-stuck", `${plan.name}: the cut decision has changed ${restarts} times without confirming; the roster stays illegal`, { player: plan.playerId, restarts });
-        if (deferrals.mayAlert(plan.playerId, now)) await sendAlert("IR activation cannot settle", `${plan.name}: the cut decision keeps changing (${restarts} restarts). ${plan.reason}`).catch(() => {});
+        logEvent("coach", "ir-activate-stuck", `${plan.name}: the decision has changed ${restarts} times without confirming; the roster stays illegal`, { player: plan.playerId, restarts });
+        if (deferrals.mayAlert(plan.playerId, now)) await sendAlert("IR activation cannot settle", `${plan.name}: the decision keeps changing (${restarts} restarts). ${plan.reason}`).catch(() => {});
       }
-      return null;
+      return false;
     }
-    if (gate.action === "wait") return null;
+    return gate.action !== "wait";
+  };
+  if (plan.stash) {
+    if (!(await twoLooks(`${prefix}stash:${plan.stash.playerId}`, `move ${plan.stash.name} to injured reserve and activate`, { stash: plan.stash.playerId, action: "stash" }))) return null;
+  } else if (!plan.drop) {
+    // A seat is free, so no cut: any drop or stash recorded for him on an
+    // earlier look (a seat that was held then) is moot.
+    intents.forget(prefix);
+  } else {
+    if (!(await twoLooks(`${prefix}${plan.action}:${plan.drop.playerId}`, plan.action === "release" ? "release" : `drop ${plan.drop.name} and activate`, { drop: plan.drop.playerId, action: plan.action }))) return null;
 
     const via = plan.action === "release" ? "ir-release" : "ir-activate";
     try {
@@ -332,12 +374,21 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
 
   let activated = false;
   try {
+    // One write: the returning man off, the stash (if any) on. Sleeper
+    // validates the list it is handed, so a stash it refuses fails the whole
+    // write and nothing moves; the activation is never made alone on a full
+    // roster, which would leave it over the cap.
     const back = await updateReserve(deps.gql, plan.reserveAfter, config.rosterId, config.leagueId);
     if (back.includes(plan.playerId)) throw new Error(`write echoed ${plan.playerId} still on reserve`);
+    if (plan.stash && !back.includes(plan.stash.playerId)) throw new Error(`write echoed without ${plan.stash.name} on reserve: the roster is over the cap and the over-cap reconciler will cut`);
+    // The write is done: the intent has served, whatever the read-back says.
+    if (plan.stash) intents.forget(prefix);
     const after = await myRosterView();
     if (after.reserveIds.has(plan.playerId)) throw new Error(`read-back still has ${plan.name} on reserve`);
-    logEvent("coach", "ir-activated", `${plan.name} taken off injured reserve. ${plan.reason}.`, {
+    if (plan.stash && !after.reserveIds.has(plan.stash.playerId)) throw new Error(`read-back has ${plan.stash.name} off reserve: the roster is over the cap and the over-cap reconciler will cut`);
+    logEvent("coach", "ir-activated", `${plan.name} taken off injured reserve${plan.stash ? `; ${plan.stash.name} moved to injured reserve in his place` : ""}. ${plan.reason}.`, {
       player: plan.playerId, injuryStatus: plan.injuryStatus, drop: plan.drop ? { playerId: plan.drop.playerId, name: plan.drop.name, cost: plan.drop.cost } : null,
+      stash: plan.stash,
       reserve: after.reserve.map((e) => e.playerId), active: after.active.length,
       cancel: plan.cancel.map((c) => ({ transactionId: c.transactionId, adds: c.adds, value: c.value })),
     });
