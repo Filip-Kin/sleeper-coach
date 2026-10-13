@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { lastWaiverRunAt, droppedAtFromTransactions, onWaiversNow, lastKickoffByTeam, recentTeamKickoffs, type ScheduledGame } from "./waiver-status.ts";
+import { lastWaiverRunAt, droppedAtFromTransactions, onWaiversNow, lastKickoffByTeam, waiverInstantsByTeam, recentTeamKickoffs, type ScheduledGame } from "./waiver-status.ts";
 import { zonedInstant } from "../schedule.ts";
+import { planStream, type StreamPoolPlayer } from "../analysis/streaming.ts";
 
 // R5. Whether a free add is refused depends on the PLAYER, not on the league:
 // dropped inside waiver_clear_days, or his team has kicked off since the last
@@ -102,8 +103,9 @@ describe("kickoffs since the last waiver run: last week's slate counts until Wed
   test("Monday night, before the week rolls: the same answer from weeks 4 and 3", async () => {
     expect(await status("DEN", ET(2026, 10, 5, 22), 4)).toBe(true);
   });
-  test("a team with no game last week is a free agent on Tuesday", async () => {
-    expect(await status("BUF", ET(2026, 10, 6, 9, 45))).toBe(false);
+  test("a team with no game last week (its bye) is on waivers on Tuesday like everyone (2026-10-13)", async () => {
+    // Until 2026-10-13 this read false: see "bye week" below.
+    expect(await status("BUF", ET(2026, 10, 6, 9, 45))).toBe(true);
   });
   test("Wednesday after the run everybody has cleared, until his own kickoff", async () => {
     expect(await status("DEN", ET(2026, 10, 7, 9))).toBe(false);
@@ -123,6 +125,86 @@ describe("kickoffs since the last waiver run: last week's slate counts until Wed
   test("a schedule that cannot be read is an error, never 'everybody is free'", async () => {
     await expect(recentTeamKickoffs(5, ET(2026, 10, 6, 10), async () => { throw new Error("HTTP 502"); })).rejects.toThrow("502");
     await expect(recentTeamKickoffs(5, ET(2026, 10, 6, 10), async (w) => (w === 5 ? WEEK5 : []))).rejects.toThrow("week 4");
+  });
+});
+
+// 2026-10-13, a Tuesday, 15:54 ET. Jake Bates (DET) is on bye in week 6 and
+// the K slot of the week-6 leg is empty. The free-agent job planned Harrison
+// Butker (KC) as the swap for the spare Jacksonville defense, as a FREE ADD;
+// the confirming run asked Sleeper and was refused: "At least one of the
+// players being added in is on waivers." KC had its bye in week 5, Butker
+// had never been dropped, so the kickoff rule found nothing of his since the
+// last run and read him as a free agent. Will Reichard (MIN, played Sunday)
+// read as on waivers the same minute. Real slates from the scores feed as the
+// run read them: 15 games in week 5 (no KC), 14 in week 6 (no MIN).
+describe("bye week: a team with no game is on waivers from that week's first kickoff", () => {
+  const WEEK5: ScheduledGame[] = [
+    { away: "TB", home: "DAL", startTime: ET(2026, 10, 8, 20, 15) },
+    { away: "MIN", home: "NO", startTime: ET(2026, 10, 11, 13) },
+    { away: "NYG", home: "WAS", startTime: ET(2026, 10, 11, 13) },
+    { away: "DEN", home: "LAC", startTime: ET(2026, 10, 11, 16, 5) },
+    { away: "DET", home: "JAX", startTime: ET(2026, 10, 11, 16, 25) },
+    { away: "BUF", home: "LAR", startTime: ET(2026, 10, 12, 20, 15) },
+  ];
+  const WEEK6: ScheduledGame[] = [
+    { away: "SEA", home: "DEN", startTime: ET(2026, 10, 15, 20, 15) },
+    { away: "NYG", home: "BUF", startTime: ET(2026, 10, 18, 13) },
+    { away: "LAC", home: "KC", startTime: ET(2026, 10, 18, 16, 25) },
+    { away: "TB", home: "LAR", startTime: ET(2026, 10, 19, 20, 15) },
+  ];
+  const slate = async (w: number): Promise<ScheduledGame[]> => (w === 5 ? WEEK5 : w === 6 ? WEEK6 : []);
+  const status = async (team: string, now: number): Promise<boolean> =>
+    onWaiversNow({ playerId: "p", team, droppedAt: new Map(), kickoffs: await recentTeamKickoffs(6, now, slate), now, clearDays: 2 });
+  const TUESDAY = ET(2026, 10, 13, 15, 54);
+
+  test("Butker-shaped: KC on bye in week 5, never dropped, is on waivers on Tuesday", async () => {
+    expect(await status("KC", TUESDAY)).toBe(true);
+    expect(await status("MIN", TUESDAY)).toBe(true); // Reichard, played Sunday, as before
+  });
+  test("the instant is the bye week's first kickoff", () => {
+    const m = waiverInstantsByTeam([WEEK6, WEEK5], TUESDAY);
+    expect(m.get("KC")).toBe(ET(2026, 10, 8, 20, 15));
+    expect(m.get("MIN")).toBe(ET(2026, 10, 11, 13)); // his own game, not the week's first
+    expect(m.get("DET")).toBe(ET(2026, 10, 11, 16, 25));
+    // Week 6 has not kicked off on Tuesday: its bye teams get nothing from it yet.
+    expect(m.has("JAX")).toBe(true);
+    expect(m.get("JAX")).toBe(ET(2026, 10, 11, 16, 25));
+  });
+  test("Wednesday after the run he has cleared, and a bye team of THIS week goes on waivers at Thursday's kickoff", async () => {
+    expect(await status("KC", ET(2026, 10, 14, 9))).toBe(false); // the free-add swap lands Wednesday
+    expect(await status("MIN", ET(2026, 10, 14, 9))).toBe(false);
+    expect(await status("MIN", ET(2026, 10, 15, 21))).toBe(true); // MIN on bye in week 6, TNF has kicked off
+    expect(await status("KC", ET(2026, 10, 15, 21))).toBe(false); // KC plays Sunday 16:25
+    expect(await status("KC", ET(2026, 10, 18, 17))).toBe(true);
+  });
+  test("lastKickoffByTeam alone is the defect: on Tuesday KC has no kickoff", () => {
+    const own = lastKickoffByTeam([...WEEK6, ...WEEK5], TUESDAY);
+    expect(own.has("KC")).toBe(false);
+    expect(onWaiversNow({ playerId: "butker", team: "KC", droppedAt: new Map(), kickoffs: own, now: TUESDAY, clearDays: 2 })).toBe(false);
+  });
+  test("a single slate (week 1, no byes) marks nobody absent", () => {
+    const m = waiverInstantsByTeam([WEEK5], ET(2026, 10, 13, 10));
+    expect(m.size).toBe(12);
+    expect(m.get("TB")).toBe(ET(2026, 10, 8, 20, 15));
+  });
+  test("the stream planner then waits for Wednesday instead of asking for a refused add", async () => {
+    const kickoffs = await recentTeamKickoffs(6, TUESDAY, slate);
+    const k = (name: string, playerId: string, team: string, weekPoints: number, value: number): StreamPoolPlayer =>
+      ({ name, playerId, position: "K", weekPoints, value, bye: null, onWaivers: onWaiversNow({ playerId, team, droppedAt: new Map(), kickoffs, now: TUESDAY, clearDays: 2 }) });
+    const pool = [k("Harrison Butker", "4227", "KC", 8.4, 95), k("Will Reichard", "11792", "MIN", 8.1, 92)];
+    const roster = [
+      { name: "Jake Bates", position: "K", points: 90, seasonPoints: 45 },
+      { name: "Seattle Seahawks", position: "DEF", points: 86, seasonPoints: 103 },
+      { name: "Jacksonville Jaguars", position: "DEF", points: 78, seasonPoints: 91 },
+    ] as Parameters<typeof planStream>[0]["roster"];
+    const d = planStream({
+      need: { week: 6, position: "K", coveringFor: ["Jake Bates"] }, week: 6, openBenchSlots: 0, pool, roster,
+      mayLeave: () => true, forcedDrop: () => null,
+      currentStarters: ["Jake Bates", "Jacksonville Jaguars"], kept: ["Jake Bates"], priorityFree: false,
+    });
+    expect(d.how).toBe("wait");
+    expect(d.add).toBeNull();
+    expect(d.reason).toContain("on waivers until the run clears");
   });
 });
 

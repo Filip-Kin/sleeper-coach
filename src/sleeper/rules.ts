@@ -115,8 +115,12 @@ export function lockedAtKickoff(team: string | null | undefined, kickoffs: Map<s
 /** A player dropped in the last `clearDays` is on waivers; and from his team's
  *  kickoff until the next waiver run every player is. Verified 2026-09-22 from
  *  week-2 transactions: free adds of players whose teams had NOT kicked off
- *  went through on Sunday evening while others were refused. The write-time
- *  fallback in waiver-run remains the last word. */
+ *  went through on Sunday evening while others were refused. A team on bye
+ *  has no kickoff of its own and its players are on waivers too (2026-10-13,
+ *  Butker, KC bye in week 5, refused on Tuesday): `teamKickoff` is the instant
+ *  the team's unrostered players went on waivers, which for a bye week is the
+ *  week's first kickoff (act/waiver-status.ts waiverInstantsByTeam). The
+ *  write-time fallback in waiver-run remains the last word. */
 export function playerOnWaivers(args: {
   droppedAt?: number | null; teamKickoff?: number | null; now: number; lastWaiverRunAt: number; clearDays: number;
 }): boolean {
