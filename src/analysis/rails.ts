@@ -31,6 +31,17 @@ export interface RailPlayer {
    *  ours (so a second claim does not count the seat he will take), but not
    *  ours yet: never a drop, never a stash, never offered in a trade. */
   claimAdd?: boolean;
+  /** Starts for us this week and the trade would process before his game,
+   *  with nobody on the roster who can take his slot (analysis/trade-week.ts
+   *  weekLockedIds, the kept-starters rule at trade-processing time). A
+   *  trade is a cut plus an add and gets the cut's test: he is not given
+   *  away mid-week. Set on the trade snapshot (trade-wire.ts markWeekLocked),
+   *  never on a drop path's roster, whose cuts are now and keep their
+   *  starters through `keep`. 2026-10-14: the proposer picked Loveland (the
+   *  only TE playing in week 6) plus JAX (the DEF on the leg) for Tate on
+   *  a Wednesday; the trade would have processed Friday and emptied two
+   *  slots on Sunday for +9.8 season points. */
+  weekLocked?: boolean;
   injuryStatus?: string; // Sleeper injury_status, if any
   returnsBeforePlayoffs?: boolean; // hurt but expected back before week 16
   /** Full-season projection: the talent signal, the tie-break behind `points`. */
@@ -97,6 +108,14 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
     // is: "the drop of our pending waiver claim" tells a manager with better
     // waiver priority that a claim is in and who is about to hit the wire.
     return { allowed: false, reason: `"${player.name}" is committed to a pending roster move and cannot be moved until it processes` };
+  }
+  // A starter this week whose slot nobody else can fill, leaving before his
+  // game: the week's lineup pays for a season-value trade. The same rule the
+  // cut paths apply through keptStarters, at the moment the trade would
+  // process. The reason reaches the rival in a DM: it names the week, not
+  // the slot maths.
+  if (player.weekLocked) {
+    return { allowed: false, reason: `"${player.name}" is in my starting lineup this week and the trade would go through before his game; it is a deal for after this week's games` };
   }
   // A player on injured reserve is never cut or traded away by the robot. He
   // costs no roster slot, so there is nothing to gain by moving him, and the

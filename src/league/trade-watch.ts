@@ -22,7 +22,7 @@ import {
 import { DropRefused } from "./drop-ledger.ts";
 import { snapshotWithPending, offerFromTransaction, evaluateLiveOffer, liveFairness, type LeagueSnapshot } from "../analysis/trade-wire.ts";
 import { evaluateTradeTwoSided, outboundConfig, type FairnessConfig, type TradeVerdictSummary, type Proposal, type TwoSidedEvaluation, type MultiSidedEvaluation } from "../analysis/trade-fair.ts";
-import { pickCounter, recordProposal, reconcileProposals, liveOffers, MAX_OPEN_OFFERS, OFFER_TTL_DAYS, specFor } from "./trade-propose.ts";
+import { pickCounter, recordProposal, reconcileProposals, liveOffers, staleIrHold, MAX_OPEN_OFFERS, OFFER_TTL_DAYS, specFor } from "./trade-propose.ts";
 import { tradeDead, TX_DEAD } from "../sleeper/rules.ts";
 import { sendAlert } from "../alert.ts";
 import type { Database } from "bun:sqlite";
@@ -275,7 +275,11 @@ export async function handlePendingTrades(
       if (db && theirRosterId !== null && !isMultiParty) {
         try {
           const busy = open.some((o) => o.rosterIds.includes(theirRosterId));
-          if (open.length < MAX_OPEN_OFFERS && !busy) {
+          // No counter while a stale IR man makes the roster refuse adds: a
+          // 2-for-1 seat could not be refilled (trade-propose.ts, 2026-10-14).
+          const stale = staleIrHold(snap);
+          if (stale.length) logEvent("coach", "trade-counter-held", `No counter to ${t.transactionId}: ${stale.map((p) => p.name).join(", ")} on injured reserve no longer qualifies and the roster refuses adds`, { transaction_id: t.transactionId, stale: stale.map((p) => p.playerId ?? p.name) });
+          if (open.length < MAX_OPEN_OFFERS && !busy && !stale.length) {
             const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
             const theirRoster = snap.rosterOf.get(theirRosterId) ?? [];
             const cfg = await deps.fairness(snap, theirRosterId);

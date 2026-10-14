@@ -13,8 +13,11 @@
 
 import { config } from "../config.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
-import type { Roster } from "../sleeper/types.ts";
-import { tokenGql, pendingRosterDelta, applyRosterDelta, pendingTrades, type Gql, type PendingTrade } from "../league/api.ts";
+import type { Roster, LeagueSettings, ScoringSettings } from "../sleeper/types.ts";
+import { weekSchedule, type ScheduleGame } from "../sleeper/graphql.ts";
+import { loadWeekProjections, byPlayerId, tableIsUsable, type WeekProjection } from "./week-projections.ts";
+import { weekLockedIds } from "./trade-week.ts";
+import { tokenGql, pendingRosterDelta, applyRosterDelta, pendingTrades, currentStarters, type Gql, type PendingTrade } from "../league/api.ts";
 import { pendingClaimPlayers } from "../act/pending-claims.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadValues, liveStatusFromRosters, scalePts } from "./value.ts";
@@ -41,6 +44,15 @@ export interface LeagueSnapshot {
   week: number;
   /** Active-roster cap, so a trade can be checked for legality before accept. */
   capacity: number;
+  /** What the week lock needs (snapshotWithPending, trade-week.ts): the
+   *  season and scoring for the week table, the settings for
+   *  trade_review_days and the IR flags, and our roster array's starters as
+   *  the fallback when the matchup leg cannot be read. Optional so a
+   *  hand-built snapshot in a test still type-checks. */
+  season?: string;
+  scoring?: ScoringSettings;
+  settings?: LeagueSettings;
+  ourStarters?: string[];
 }
 
 // #region pure pieces
@@ -102,7 +114,59 @@ export function markClaimDrops(snap: LeagueSnapshot, dropIds: readonly string[])
   rosterOf.set(snap.ourRosterId, current.map((p) => (p.playerId && ids.has(p.playerId) ? { ...p, claimDrop: true } : p)));
   return { ...snap, rosterOf };
 }
+
+/** Flag the players of ours a trade may not give away this week (rails.ts
+ *  weekLocked). Pure. They stay on the roster (they are ours and the lineup
+ *  and depth maths count them), but canDrop and giveEligibleForProposal
+ *  refuse them, so the proposer, the counter paths, the evaluation of an
+ *  incoming offer and the DM brief's listed deals all leave them alone. */
+export function markWeekLocked(snap: LeagueSnapshot, lockedIds: ReadonlySet<string>): LeagueSnapshot {
+  if (!lockedIds.size) return snap;
+  const current = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  if (!current.some((p) => p.playerId && lockedIds.has(p.playerId))) return snap;
+  const rosterOf = new Map(snap.rosterOf);
+  rosterOf.set(snap.ourRosterId, current.map((p) => (p.playerId && lockedIds.has(p.playerId) ? { ...p, weekLocked: true } : p)));
+  return { ...snap, rosterOf };
+}
 // #endregion
+
+/** The week lock's inputs from the live feeds, then the pure decision
+ *  (trade-week.ts). The leg is read first and on its own: with the leg
+ *  unknown the roster array's starters stand in, and with the week table or
+ *  the slate unknown every starter on it is locked, never none. */
+export async function liveWeekLockedIds(gql: Gql, snap: LeagueSnapshot, week: number, now = Date.now()): Promise<Set<string>> {
+  const roster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  let starterIds = await currentStarters(gql, week, snap.ourStarters ?? [], snap.ourRosterId).catch((e) => {
+    console.log(`[trade] week ${week} matchup leg could not be read (${e instanceof Error ? e.message : String(e)}); the roster array's starters stand in`);
+    return snap.ourStarters ?? [];
+  });
+  // A fresh leg with every slot empty (the guard has not set the week yet)
+  // names nobody; the roster array's starters stand in for it.
+  if (!starterIds.some((id) => id && id !== "0")) starterIds = snap.ourStarters ?? [];
+  // The review period unknown is not zero: at zero days a Thursday defense
+  // could still cover a Sunday one and the lock would lift wrongly. Unknown
+  // takes the no-table branch and locks every starter on the leg.
+  const reviewDays = snap.settings?.trade_review_days ?? null;
+  let table: Map<string, WeekProjection> | null = null;
+  let games: ScheduleGame[] | null = null;
+  if (reviewDays === null) {
+    console.log(`[trade] league settings carry no trade_review_days; every starter on the leg is locked from a trade`);
+  } else if (snap.season && snap.scoring) {
+    try {
+      const [rows, slate] = await Promise.all([loadWeekProjections(snap.season, week, snap.scoring), weekSchedule(snap.season, week)]);
+      // No numbers, no decision: an all-zero table (week-projections.ts
+      // tableIsUsable) would read as "nobody plays" and lock nobody.
+      if (!tableIsUsable(rows)) throw new Error(`week ${week} table is not usable (${rows.length} rows, too few with points)`);
+      table = byPlayerId(rows);
+      games = slate;
+    } catch (e) {
+      console.log(`[trade] no usable week ${week} table or schedule (${e instanceof Error ? e.message : String(e)}); every starter on the leg is locked from a trade`);
+    }
+  } else {
+    console.log(`[trade] snapshot carries no season or scoring; every starter on the leg is locked from a trade`);
+  }
+  return weekLockedIds({ roster, starterIds, table, games, now, reviewDays: reviewDays ?? 0 });
+}
 
 // One fetch, reused for every offer in a poll cycle.
 //
@@ -151,7 +215,11 @@ export async function snapshot(): Promise<LeagueSnapshot> {
     }
     if (r.owner_id) ownerIdOf.set(r.roster_id, String(r.owner_id));
   }
-  return { playerById, rosterOf, ourRosterId: config.rosterId, idByName, ownerIdOf, week, capacity: activeCapacity(league.roster_positions) };
+  const ours = rosters.find((r) => r.roster_id === config.rosterId);
+  return {
+    playerById, rosterOf, ourRosterId: config.rosterId, idByName, ownerIdOf, week, capacity: activeCapacity(league.roster_positions),
+    season: state.season || config.season, scoring: league.scoring_settings, settings: league.settings, ourStarters: ours?.starters ?? [],
+  };
 }
 
 /** snapshot() reflects the CURRENT roster. This applies trades we have agreed
@@ -168,7 +236,12 @@ export async function snapshotWithPending(gql: Gql = tokenGql(), leg?: number, b
   // lose on priority, so nothing arrives; the drops are committed and are
   // flagged so no trade path offers or gives one away (markClaimDrops).
   const claims = await pendingClaimPlayers(gql, week, snap.ourRosterId).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
-  return markClaimDrops(applyPending(snap, delta), claims.drops);
+  const effective = markClaimDrops(applyPending(snap, delta), claims.drops);
+  // This week's starters a trade may not give away (trade-week.ts): on the
+  // leg, playing, nobody to take the slot, and the trade processing before
+  // the game. Read over the effective roster, so a man already leaving in a
+  // pending trade is not counted as a starter of ours.
+  return markWeekLocked(effective, await liveWeekLockedIds(gql, effective, week));
 }
 
 /** The snapshot a counter-offer is picked from. One per poll; the DM watcher

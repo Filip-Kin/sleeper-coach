@@ -48,6 +48,10 @@ export interface LeagueSettings {
   reserve_allow_cov?: number;
   reserve_allow_na?: number;
   reserve_allow_dnr?: number;
+  // Days an accepted trade sits in review before it processes (2 in our
+  // league, 2026-10-14). 0 = at once. The week lock on a trade's give side
+  // (analysis/trade-week.ts) asks whether that moment is before the man's game.
+  trade_review_days?: number;
 }
 
 export interface League {

@@ -423,6 +423,22 @@ test("an ask with an offer already out points at it and sends nothing", async ()
   expect(out.line).toContain("already have one out");
 });
 
+test("while a stale IR man makes the roster refuse adds, an ask gets no offer and the reply says why (2026-10-14)", async () => {
+  const db = new Database(":memory:");
+  let proposed = 0;
+  const base = fakeBrief().snap;
+  const ours = [...(base.rosterOf.get(base.ourRosterId) ?? []), { name: "DeVonta Smith", position: "WR", points: 145, playerId: "7525", onIr: true, injuryStatus: "Questionable" }];
+  const snap = { ...base, rosterOf: new Map([...base.rosterOf, [base.ourRosterId, ours]]), settings: { reserve_allow_out: 1, reserve_allow_sus: 1, trade_deadline: 11 } as never };
+  const out = await counterOnRequest({
+    db, now: NOW, theirRosterId: 1, snap, open: [], sched: {},
+    propose: async () => { proposed++; return { transactionId: "tx1", status: "proposed" }; },
+  });
+  expect(proposed).toBe(0);
+  expect(out.justSent).toBeNull();
+  expect(out.line).toContain("DeVonta Smith");
+  expect(out.line).toContain("cannot take an add");
+});
+
 // --- chat requests ----------------------------------------------------------
 
 import { acceptLeagueChatRequests } from "./dm-watch.ts";

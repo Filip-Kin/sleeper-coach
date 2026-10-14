@@ -39,7 +39,7 @@ import { proposeTrades, giveEligibleForProposal, byeAwareLineupTotal, depthInsur
 import { gateOutgoing, offerKey, IntentStore, DEFAULT_GATE, type GateOptions } from "../analysis/trade-intent.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
 import { shortlist, pickOne, type PickCandidate, type PickResult } from "./trade-pick.ts";
-import { pastTradeDeadline, tradeDead } from "../sleeper/rules.ts";
+import { pastTradeDeadline, tradeDead, irEligible } from "../sleeper/rules.ts";
 import { STATE_DIR } from "../paths.ts";
 import { sleeper } from "../sleeper/client.ts";
 import type { RosterSettings, LeagueSettings } from "../sleeper/types.ts";
@@ -91,6 +91,19 @@ const REAL_IO: ProposerIo = {
   },
   pick: (cands, ourRoster) => pickOne(cands, ourRoster),
 };
+
+/** Our players on injured reserve whom the league's IR flags no longer admit
+ *  (sleeper/rules.ts staleReserve, over the trade snapshot's roster). */
+export function staleIrPlayers(ourRoster: readonly TradePlayer[], settings: LeagueSettings): TradePlayer[] {
+  return ourRoster.filter((p) => p.onIr && !irEligible(p.injuryStatus, settings));
+}
+/** The same hold for the counter paths (trade-watch, dm-watch), off the
+ *  snapshot's own settings. A snapshot without settings (a test's) holds
+ *  nothing. */
+export function staleIrHold(snap: LeagueSnapshot): TradePlayer[] {
+  if (!snap.settings) return [];
+  return staleIrPlayers(snap.rosterOf.get(snap.ourRosterId) ?? [], snap.settings);
+}
 
 /** Identity of a swap for the cooldown: manager plus the PLAYER IDS on each
  *  side, order-independent. Ids, not names: two rostered players can share a
@@ -226,6 +239,19 @@ export async function runProposer(state: ProposerState, gql: Gql = tokenGql()): 
   // leaving is never offered (T2).
   const snap = await io.snapshot(gql, week);
   const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  // A man on IR who no longer qualifies makes the roster illegal, and Sleeper
+  // refuses every add until he is moved; the reserve reconciler owns that
+  // move and its cut waits for his final injury report (reserve-hold.ts). A
+  // seat a 2-for-1 opens could not be refilled, so no offer goes out while
+  // it lasts; the job is not failed, it has nothing to send (2026-10-14).
+  const stale = staleIrPlayers(ourRoster, league.settings);
+  if (stale.length) {
+    const who = stale.map((p) => `${p.name} (${p.injuryStatus ?? "healthy"})`).join(", ");
+    logEvent("coach", "trade-propose-held", `No trade offer this run: ${who} on injured reserve no longer qualifies, so Sleeper refuses every add until he is moved; the reserve reconciler owns that move`, {
+      week, stale: stale.map((p) => p.playerId ?? p.name),
+    });
+    return { sent: null, considered: 0, outcome: "nothing", reason: `held: ${who} on injured reserve no longer qualifies and the roster refuses adds` };
+  }
   const rivals: RivalRoster[] = [];
   for (const [rosterId, roster] of snap.rosterOf) {
     if (rosterId === snap.ourRosterId) continue;

@@ -668,6 +668,13 @@ export function giveEligibleForProposal(
   if (present.claimDrop) {
     return { ok: false, reason: `"${present.name}" is committed to a pending roster move and cannot be moved until it processes` };
   }
+  // Starts for us this week with nobody to take his slot, and the trade
+  // would process before his game (rails.ts weekLocked, set by the trade
+  // snapshot). A proposal never costs the week's lineup for season points;
+  // he comes back on the table when the week flips or his game is played.
+  if (present.weekLocked) {
+    return { ok: false, reason: `"${present.name}" starts for us this week and a trade would process before his game; not offered until the week flips` };
+  }
   if (present.returnsBeforePlayoffs) {
     return { ok: false, reason: `"${present.name}" is an injured stash due back before the playoffs; his depressed projection would undervalue him in a trade` };
   }

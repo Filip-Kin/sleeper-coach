@@ -167,3 +167,49 @@ test("an accepted trade is never treated as a lowball, whatever the numbers", ()
   const ev = evLike({ verdict: "accept", ourGain: -48.3 });
   expect(isBlatantLowball({ receive: [], give: ["X"] }, ev)).toBe(false);
 });
+
+// 2026-10-14: a stale IR man (DeVonta Smith, Questionable on reserve since the
+// Wednesday report reset) makes the roster illegal and Sleeper refuses every
+// add until he is moved; the reserve reconciler's cut waits for his final
+// injury report. A 2-for-1 offer accepted meanwhile would open a seat nobody
+// could fill, so the proposer sends nothing while it lasts and says why.
+import { runProposer, staleIrPlayers, ensureTable } from "./trade-propose.ts";
+import type { LeagueSnapshot } from "../analysis/trade-wire.ts";
+import type { TradePlayer } from "../analysis/trade.ts";
+
+const S = { reserve_slots: 2, reserve_allow_out: 1, reserve_allow_sus: 1, reserve_allow_cov: 1, reserve_allow_doubtful: 0, reserve_allow_na: 0, reserve_allow_dnr: 0, trade_deadline: 11, waiver_type: 0, trade_review_days: 2 } as never;
+const TP = (name: string, position: string, points: number, x: Partial<TradePlayer> = {}): TradePlayer => ({ name, position, points, playerId: name, ...x });
+function held(smithStatus: string): Promise<{ outcome: string; reason: string; picked: boolean }> {
+  const ours = [TP("Dak Prescott", "QB", 200), TP("Colston Loveland", "TE", 112), TP("Jakobi Meyers", "WR", 107), TP("DeVonta Smith", "WR", 145, { onIr: true, injuryStatus: smithStatus })];
+  const theirs = [TP("Carnell Tate", "WR", 156), TP("Caleb Williams", "QB", 205)];
+  const snap: LeagueSnapshot = { playerById: new Map(), rosterOf: new Map([[1, ours], [2, theirs]]), ourRosterId: 1, idByName: new Map(), ownerIdOf: new Map(), week: 6, capacity: 16 };
+  const d = new Database(":memory:");
+  ensureTable(d);
+  let picked = false;
+  return runProposer({ db: d, now: Date.UTC(2026, 9, 14, 14), dry: true, io: {
+    nflState: async () => ({ week: 6 }),
+    league: async () => ({ settings: S }),
+    outstandingOffers: async () => [],
+    snapshot: async () => snap,
+    scheduleContext: async () => ({ remainingWeeks: 10, headToHeadRemaining: 1, upcomingWeeks: [6, 7, 8, 9] }),
+    proposeTrade: async () => { throw new Error("never"); },
+    pitch: async () => {},
+    pick: async () => { picked = true; return { chosen: null, why: "none worth it" } as never; },
+  } }, async () => ({})).then((r) => ({ outcome: r.outcome, reason: r.reason, picked }));
+}
+
+test("staleIrPlayers names the man on reserve the league's IR flags no longer admit", () => {
+  expect(staleIrPlayers([TP("A", "WR", 1, { onIr: true, injuryStatus: "Questionable" }), TP("B", "WR", 1, { onIr: true, injuryStatus: "Out" }), TP("C", "WR", 1, { injuryStatus: "Questionable" })], S).map((p) => p.name)).toEqual(["A"]);
+});
+
+test("the proposer sends nothing while a stale IR man makes the roster illegal for adds, and says so", async () => {
+  const r = await held("Questionable");
+  expect(r.outcome).toBe("nothing");
+  expect(r.reason).toMatch(/held: DeVonta Smith \(Questionable\) on injured reserve no longer qualifies/);
+  expect(r.picked).toBe(false);
+});
+
+test("with the IR man still qualifying the proposer runs as before", async () => {
+  const r = await held("Out");
+  expect(r.reason).not.toMatch(/held/);
+});

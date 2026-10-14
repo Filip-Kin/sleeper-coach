@@ -49,7 +49,7 @@ import {
   listDms, threadMessages, sendDm, pendingChatRequests, acceptChatRequest, proposeTrade, outstandingOffers,
   type Gql, type DmMessage, type DmThread, type ChatRequest, type PendingTrade, type ProposalSpec,
 } from "./api.ts";
-import { pickCounter, recordProposal, MAX_OPEN_OFFERS, OFFER_TTL_DAYS, specFor, liveOffers} from "./trade-propose.ts";
+import { pickCounter, recordProposal, staleIrHold, MAX_OPEN_OFFERS, OFFER_TTL_DAYS, specFor, liveOffers} from "./trade-propose.ts";
 import { buildDmBrief, counterpartOpener, type DmBrief, type Counterpart } from "./dm-brief.ts";
 import { checkFacts, safeReply, type FactContext, type FactPlayer, type Violation } from "./dm-facts.ts";
 import { scheduleContext, type LeagueSnapshot } from "../analysis/trade-wire.ts";
@@ -287,6 +287,10 @@ export async function counterOnRequest(a: CounterArgs): Promise<CounterOutcome> 
   }
   if (a.open.length >= MAX_OPEN_OFFERS) {
     return none("They asked for an offer, but you have as many offers out as you allow yourself right now. Say you will come back to them.");
+  }
+  const stale = staleIrHold(a.snap);
+  if (stale.length) {
+    return none(`They asked for an offer, but your roster cannot take an add right now (${stale.map((p) => p.name).join(", ")} on injured reserve no longer qualifies), so nothing goes out until that is settled. Say you will come back to them after the weekend.`);
   }
   const ours = a.snap.rosterOf.get(a.snap.ourRosterId) ?? [];
   const theirs = a.snap.rosterOf.get(a.theirRosterId) ?? [];
