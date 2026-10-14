@@ -75,6 +75,17 @@ describe("roster-legal", () => {
     expect(c.ok).toBe(false);
     expect(c.detail).toContain("no longer IR-eligible: P p16");
   });
+  test("a stale IR the reconciler holds for his final injury report (2026-10-14) is said, not paged, until the hold ends", () => {
+    const r = roster({ n: 17, reserve: ["p16"], injuries: { p16: "Questionable" } });
+    const held = byName(evaluateInvariants(input({ reserveHold: { playerId: "p16", name: "P p16", until: NOW + 3_600_000 } }, r)))["roster-legal"]!;
+    expect(held.ok).toBe(true);
+    expect(held.detail).toContain("P p16 stale on IR, cut held for his final injury report until");
+    const past = byName(evaluateInvariants(input({ reserveHold: { playerId: "p16", name: "P p16", until: NOW - 1 } }, r)))["roster-legal"]!;
+    expect(past.ok).toBe(false);
+    expect(past.detail).toContain("no longer IR-eligible: P p16");
+    const other = byName(evaluateInvariants(input({ reserveHold: { playerId: "p9", name: "P p9", until: NOW + 3_600_000 } }, r)))["roster-legal"]!;
+    expect(other.ok).toBe(false);
+  });
 });
 
 describe("starter-on-reserve", () => {

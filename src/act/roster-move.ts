@@ -27,7 +27,8 @@
 
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
-import { leagueRosters } from "../sleeper/graphql.ts";
+import { leagueRosters, weekSchedule } from "../sleeper/graphql.ts";
+import { forcedCutNotBefore, fmtZoned } from "./reserve-hold.ts";
 import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, currentStarters, cancelWaiverClaim } from "../league/api.ts";
 import { loadValues, liveStatusFromRosters, toRail, cutOrder, notPlaying, LAST_WEEK, type PlayerValue } from "../analysis/value.ts";
 import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
@@ -244,6 +245,21 @@ switch (cmd) {
         if (stashable.length && !OVERRIDE) { console.error(`\na cut is not needed: ${seatBy}. --override to cut ${drop!.name} anyway.`); process.exit(2); }
         if (stashable.length) console.error(`override given: ${OVERRIDE}`);
         checkCut(drop!);
+        // The engine's hold (reserve-hold.ts, 2026-10-14): a forced cut is
+        // not made before the man's final injury report. A hand cut ahead
+        // of it needs the reason in writing.
+        const slate = await weekSchedule(state.season || config.season, week).catch(() => null);
+        const team = view.reserve.find((e) => e.playerId === target.playerId)?.team ?? null;
+        const hold = slate ? forcedCutNotBefore(team, slate) : null;
+        if (!slate) {
+          console.error(`\nthis week's schedule could not be read, so when his final injury report is due is unknown; the engine waits for a read that has it.`);
+          if (!OVERRIDE) { console.error("refusing without --override \"<reason>\""); process.exit(2); }
+          console.error(`override given: ${OVERRIDE}`);
+        } else if (hold && Date.now() < hold.until) {
+          console.error(`\nthe cut for his seat waits for his final injury report: not before ${fmtZoned(hold.until)} (Out again on it means IR-eligible and nobody cut).`);
+          if (!OVERRIDE) { console.error("refusing without --override \"<reason>\""); process.exit(2); }
+          console.error(`override given: ${OVERRIDE}`);
+        }
       }
     } else if (drop || stash) { console.error(`a seat is free (${view.active.length} active${pending.slotsNeeded ? `, ${pending.slotsNeeded} held by pending claims` : ""}); no --drop or --stash for an activation`); process.exit(2); }
     for (const c of cancel) console.log(`the pending claim for ${c.names.join(" + ")} (${Math.round(c.value)} ROS) has no seat once he is active: cancelled`);

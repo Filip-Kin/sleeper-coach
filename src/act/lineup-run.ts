@@ -29,6 +29,7 @@ import { startingSlots, availabilityOf } from "../analysis/lineup.ts";
 import { assertWritesAllowed, freezeState, failureExitCode } from "../killswitch.ts";
 import { tokenGql, updateStarters, currentStarters } from "../league/api.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
+import { staleReserve } from "../sleeper/rules.ts";
 import { overlayRosterStatus, lockedPlayerIds, cachedTeamKickoffs, planLineup, liveQuestionable } from "./lineup-guard.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert, sendAlertOnce } from "../alert.ts";
@@ -197,6 +198,17 @@ async function main(): Promise<void> {
   if (!plan.changed) {
     console.log(`\nWeek ${week} lineup already correct; no write.`);
     logEvent("coach", "lineup-unchanged", `Week ${week} lineup already correct, no write.`, { week, leagueId });
+    return;
+  }
+
+  // Sleeper refuses every lineup write while a man on IR no longer qualifies
+  // (2026-10-14): held and said, not tried, failed and paged. The reserve
+  // reconciler owns the move; its forced cut waits for his final report.
+  const staleIr = staleReserve(buildRosterView(mine), league.settings);
+  if (staleIr.length) {
+    const who = staleIr.map((e) => `${e.name} (${e.injuryStatus ?? "healthy"})`).join(", ");
+    console.log(`\nWeek ${week} lineup held: ${who} on injured reserve no longer qualifies; Sleeper refuses the write until he is moved.`);
+    logEvent("coach", "lineup-held", `Week ${week} lineup not written: ${who} on injured reserve no longer qualifies, so Sleeper refuses the write until he is moved; the reserve reconciler owns that move.`, { week, leagueId, stale: staleIr.map((e) => e.playerId), ids: plan.ids, swaps: plan.swaps });
     return;
   }
 

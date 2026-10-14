@@ -25,6 +25,7 @@ import { loadWeekProjections, byPlayerId } from "../analysis/week-projections.ts
 import { loadPlayers } from "../data/players.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters } from "../sleeper/graphql.ts";
+import { staleReserve, type Settings } from "../sleeper/rules.ts";
 import type { PlayersMap, Roster, ScoringSettings, SleeperPlayer } from "../sleeper/types.ts";
 import { tokenGql, updateStarters, currentStarters } from "../league/api.ts";
 import { freezeState } from "../killswitch.ts";
@@ -353,11 +354,11 @@ export async function cachedTeamKickoffs(currentWeek?: number): Promise<Map<stri
 }
 
 // League slots and scoring change once a season; cache them for an hour.
-let leagueCache: { at: number; slots: string[]; scoring: ScoringSettings } | null = null;
-async function leagueShape(): Promise<{ slots: string[]; scoring: ScoringSettings }> {
+let leagueCache: { at: number; slots: string[]; scoring: ScoringSettings; settings: Settings } | null = null;
+async function leagueShape(): Promise<{ slots: string[]; scoring: ScoringSettings; settings: Settings }> {
   if (leagueCache && Date.now() - leagueCache.at < 60 * 60_000) return leagueCache;
   const league = await sleeper.league(config.leagueId);
-  leagueCache = { at: Date.now(), slots: startingSlots(league.roster_positions), scoring: league.scoring_settings };
+  leagueCache = { at: Date.now(), slots: startingSlots(league.roster_positions), scoring: league.scoring_settings, settings: league.settings };
   return leagueCache;
 }
 
@@ -402,7 +403,7 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   const mine = rosters.find((r) => r.roster_id === config.rosterId);
   if (!mine?.players?.length) throw new Error(`lineup-guard: roster ${config.rosterId} missing or empty`);
 
-  const { slots, scoring } = await leagueShape();
+  const { slots, scoring, settings } = await leagueShape();
   const [dump, weekProj, kickoffs] = await Promise.all([
     loadPlayers(), // cached; only names and positions come from it now
     loadWeekProjections(state.season || config.season, week, scoring),
@@ -424,7 +425,8 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     }
     return null;
   }
-  const candidates = buildRosterWeek([...buildRosterView(mine).activeIds], overlayRosterStatus(dump, mine), byPlayerId(weekProj), week);
+  const view = buildRosterView(mine);
+  const candidates = buildRosterWeek([...view.activeIds], overlayRosterStatus(dump, mine), byPlayerId(weekProj), week);
   const locked = lockedPlayerIds(candidates, kickoffs, now);
   for (const [id, until] of pinned) {
     if (until > now) locked.add(id);
@@ -447,6 +449,22 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   const key = plan.ids.join(",");
   const summary = plan.swaps.map((s) => `${s.slot}: ${s.out} -> ${s.in} (${s.why})`).join("; ");
   if (!failures.shouldAttempt(key, now)) return plan;
+
+  // Sleeper refuses every lineup write while a man on IR no longer
+  // qualifies (2026-09-23; 2026-10-14). Not tried and failed (a failure is
+  // paged and backs off): held, said once an hour, while the reserve
+  // reconciler owns the move. Its forced cut waits for the man's final
+  // injury report (reserve-hold.ts); the next poll after it re-plans.
+  const staleIr = staleReserve(view, settings);
+  if (staleIr.length) {
+    if (now - lastHeldNotice > NOTICE_MS) {
+      lastHeldNotice = now;
+      const who = staleIr.map((e) => `${e.name} (${e.injuryStatus ?? "healthy"})`).join(", ");
+      console.log(`[lineup-guard] week ${week} held: ${who} on IR no longer qualifies; Sleeper refuses the write until he is moved: ${summary}`);
+      logEvent("coach", "lineup-held", `Lineup change wanted but ${who} on injured reserve no longer qualifies, so Sleeper refuses the write until he is moved; the reserve reconciler owns that move: ${summary}`, { week, stale: staleIr.map((e) => e.playerId), ids: plan.ids, swaps: plan.swaps });
+    }
+    return plan;
+  }
 
   const froze = freezeState();
   if (froze.frozen) {

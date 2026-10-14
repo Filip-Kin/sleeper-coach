@@ -39,6 +39,24 @@
 // takes the returning man's reserve seat in the same write, and nobody is
 // cut for the season. The forced cut is only for a roster with nobody to
 // stash.
+//
+// A cut waits for the final injury report (2026-10-14). Wednesday 03:07 ET
+// the week's report reset flipped Smith (hamstring, no practice) AND Dowdle
+// Out -> Questionable in the same minute, so nobody qualified for the seat
+// and this path recorded "drop Dowdle (77) and activate Smith" for its
+// second look. A Wednesday Questionable is the reset, not news: a man who
+// was Out all last week is Out again on Friday's final report more often
+// than not, and then he is IR-eligible and nobody is cut at all. Nothing
+// that needs the roster legal before then is worth a season body (Sleeper
+// refuses lineup writes and adds meanwhile; the lineup guard, the lineup
+// job and the waiver run hold with a reason instead of failing). So the
+// forced cut is not made before his final injury report (reserve-hold.ts
+// forcedCutNotBefore: 18:00 ET two days before his team's kickoff, never
+// before Wednesday 18:00 ET of the NFL week). The stash and the free seat
+// are never held. No game for his team this week: no hold. Schedule
+// unreadable: wait an hour and read again. The roster-legal invariant reads
+// the same hold (currentReserveHold) and does not page for a stale IR the
+// coach is holding by rule.
 
 import { config } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
@@ -52,15 +70,19 @@ import { DEFAULT_RAILS, type RailConfig, type RailPlayer } from "../analysis/rai
 import { activeRailRoster, chooseLegalForcedDrops, type LegalDrop } from "../analysis/reconcile-plan.ts";
 import { snapshot, scheduleContext } from "../analysis/trade-wire.ts";
 import { dropPlayers, updateReserve, myRosterView, currentStarters, cancelWaiverClaim, type Gql } from "../league/api.ts";
+import { weekSchedule } from "../sleeper/graphql.ts";
+import { forcedCutNotBefore, fmtZoned } from "./reserve-hold.ts";
 import { railsWithPendingDrops, pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
 export { claimsToCancel, type HeldClaim } from "./pending-claims.ts";
 import { DropIntentStore, decideIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
-import { weekGames } from "../blog/auto.ts";
 import { freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 import { KICKOFF_CACHE } from "../paths.ts";
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 
 // #region pure
 export interface ReserveDecision {
@@ -69,11 +91,16 @@ export interface ReserveDecision {
   injuryStatus: string | null;
   /** activate: take him off IR (with `drop` first when the roster is full).
    *  release: he is himself the least valuable body, so he is dropped instead.
-   *  stuck: the rails allow no cut. */
-  action: "activate" | "release" | "stuck";
+   *  stuck: the rails allow no cut.
+   *  hold: the cut (`drop`) is right but not yet due: it waits for his
+   *  final injury report (`holdUntil`); nothing is written. */
+  action: "activate" | "release" | "stuck" | "hold";
   /** The forced drop that makes room, when the active roster is full and
-   *  nobody can be stashed. For "release" this is the IR player himself. */
+   *  nobody can be stashed. For "release" this is the IR player himself.
+   *  For "hold" the cut that would be made once the hold ends. */
   drop: LegalDrop | null;
+  /** For "hold": the instant from which the cut may be made. */
+  holdUntil?: number;
   /** The active player who takes the reserve seat instead of a cut, when the
    *  roster is full and he qualifies for IR. He is in `reserveAfter`. */
   stash: { playerId: string; name: string; injuryStatus: string | null } | null;
@@ -105,6 +132,10 @@ export interface ReserveDecision {
 export function planReserveActivation(args: {
   view: RosterView; settings: Settings; cap: number; railRoster: RailPlayer[]; cfg: FairnessConfig; rails?: RailConfig;
   keep?: string[]; heldClaims?: HeldClaim[]; canFill?: (body: RailPlayer, starter: RailPlayer) => boolean;
+  /** A forced cut is not made before this instant (reserve-hold.ts
+   *  forcedCutNotBefore: the man's final injury report). Null or absent: no
+   *  hold. `holdWhy` names a hold that is not the report (schedule unread). */
+  cutNotBefore?: number | null; now?: number; holdWhy?: string;
 }): ReserveDecision[] {
   const { view, settings, cap, railRoster, cfg } = args;
   const rails = args.rails ?? DEFAULT_RAILS;
@@ -157,14 +188,22 @@ export function planReserveActivation(args: {
   if (!drop) {
     return [{ ...base, action: "stuck", drop: null, stash: null, cancel: [], reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and the rails allow no drop` }];
   }
+  // THE CUT WAITS FOR HIS FINAL INJURY REPORT (2026-10-14, reserve-hold.ts).
+  // The cut is right and not yet due: his tag is this week's report reset,
+  // and a man Out again on the final report is IR-eligible with nobody cut.
+  const now = args.now ?? Date.now();
+  if (args.cutNotBefore != null && now < args.cutNotBefore) {
+    const cutLine = drop.playerId === e.playerId
+      ? `he is himself the least valuable body (${Math.round(drop.cost)} points) and would be released`
+      : `${drop.name} would go (${drop.reason})`;
+    return [{ ...base, action: "hold", drop, stash: null, holdUntil: args.cutNotBefore, cancel: [], reason: `${e.name} is ${status}, not IR-eligible; the active roster is full, nobody qualifies for injured reserve and ${cutLine}; a cut is for the season and his tag is this week's report, so the cut waits for his final injury report: not before ${fmtZoned(args.cutNotBefore)}${args.holdWhy ? ` (${args.holdWhy})` : ""}` }];
+  }
   if (drop.playerId === e.playerId) {
     return [{ ...base, action: "release", drop, stash: null, cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full and he is the least valuable body for the rest of the season (${Math.round(drop.cost)} points), so he is released rather than activated${note}` }];
   }
   return [{ ...base, action: "activate", drop, stash: null, cancel, reason: `${e.name} is ${status}, not IR-eligible; the active roster is full, nobody qualifies for injured reserve, so ${drop.name} goes (${drop.reason})${note}` }];
 }
 
-const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
 /** How long after the week's last kickoff the reserve lock is assumed lifted. */
 const GAME_MS = 4 * HOUR;
 
@@ -201,6 +240,12 @@ export class ReserveDeferrals {
 // #region io
 const deferrals = new ReserveDeferrals();
 let heldLogged = 0;
+/** The stale IR man whose cut the coach is holding for his final injury
+ *  report, while the hold runs. The roster-legal invariant reads it. */
+let reserveHold: { playerId: string; name: string; until: number; drop: string | null } | null = null;
+export function currentReserveHold(now = Date.now()): { playerId: string; name: string; until: number; drop: string | null } | null {
+  return reserveHold && reserveHold.until > now ? reserveHold : null;
+}
 
 async function cachedKickoffTimes(): Promise<number[]> {
   try {
@@ -247,7 +292,7 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   const view = deps.view ?? (await myRosterView());
   const stale = staleReserve(view, league.settings);
   const first = stale[0];
-  if (!first) return null;
+  if (!first) { reserveHold = null; return null; }
   if (deferrals.deferred(first.playerId, now)) return null;
 
   const froze = freezeState();
@@ -265,7 +310,10 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   // failed read is not a lock: proceed and let the write decide.
   const state = await sleeper.nflState();
   const week = Math.max(1, state.week || 1);
-  const games = await weekGames(week).catch(() => []);
+  // One read of the week's slate: the lock (any game in progress) and the
+  // hold (his team's kickoff) come from the same list.
+  const schedule = await weekSchedule(state.season || config.season, week).catch(() => null);
+  const games = schedule ?? [];
   if (games.length && !reserveWritable(games)) {
     deferrals.deferLocked(first.playerId, now, games.map((g) => g.startTime));
     logEvent("coach", "ir-activate-deferred", `${first.name} needs to come off IR; Sleeper locks reserve until the week's games finish. Waiting.`, { player: first.playerId, week });
@@ -298,8 +346,29 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   const startable = await loadStartableThisWeek(state.season || config.season, week, league.scoring_settings, now);
   const pendingDrops = new Set<string>(pending.drops);
   const canFill = (body: RailPlayer, starter: RailPlayer): boolean => startable(body, starter) && !pendingDrops.has(body.playerId ?? "");
-  const plan = planReserveActivation({ view, settings: league.settings, cap, railRoster, cfg, rails, keep, heldClaims, canFill })[0];
+  // The hold: his final injury report (reserve-hold.ts). With the slate
+  // unreadable the report's time is unknown, so a cut waits an hour for a
+  // read that has it; the stash and the free seat go regardless.
+  const hold = schedule ? forcedCutNotBefore(first.team, schedule) : null;
+  const cutNotBefore = schedule ? hold?.until ?? null : now + HOUR;
+  const holdWhy = schedule ? undefined : "this week's schedule could not be read, so when his final report is due is unknown";
+  const plan = planReserveActivation({ view, settings: league.settings, cap, railRoster, cfg, rails, keep, heldClaims, canFill, cutNotBefore, now, holdWhy })[0];
   if (!plan) return null;
+
+  const intents = deps.intents ?? new DropIntentStore();
+  const prefix = `ir-activate:${plan.playerId}:`;
+  if (plan.action === "hold") {
+    const until = plan.holdUntil ?? now + HOUR;
+    reserveHold = { playerId: plan.playerId, name: plan.name, until, drop: plan.drop?.playerId ?? null };
+    // A held cut has no live intent: the two looks start when the hold ends.
+    intents.forget(prefix);
+    logEvent("coach", "ir-activate-held", `${plan.name} stays on injured reserve for now: ${plan.reason}`, { player: plan.playerId, until, drop: plan.drop?.playerId ?? null, action: "hold" });
+    // Look again within the hour (a tag can change: Out again means no cut
+    // at all, a bench man Out means a stash), and at the hold's end.
+    deferrals.deferFor(plan.playerId, now, Math.max(60_000, Math.min(HOUR, until - now)));
+    return plan;
+  }
+  reserveHold = null;
 
   if (plan.action === "stuck") {
     logEvent("coach", "ir-activate-stuck", plan.reason, { player: plan.playerId });
@@ -310,8 +379,6 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
     return plan;
   }
 
-  const intents = deps.intents ?? new DropIntentStore();
-  const prefix = `ir-activate:${plan.playerId}:`;
   // Two looks before a move that costs a player (a cut) or moves one to IR
   // (a stash): the same decision from fresh data at least MIN_AGE_MS apart.
   // Nothing about an illegal roster is urgent at this resolution, and every

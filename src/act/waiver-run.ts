@@ -44,7 +44,7 @@ import { byeWeek } from "../data/byes.ts";
 import { assertWritesAllowed, freezeState, failureExitCode } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
-import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE, reserveWritable } from "../sleeper/rules.ts";
+import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE, reserveWritable, staleReserve } from "../sleeper/rules.ts";
 import { overlayRosterStatus } from "./lineup-guard.ts";
 import { pendingClaimPlayers, withoutPendingAdds, railsWithPendingDrops } from "./pending-claims.ts";
 import { droppedAtFromTransactions, onWaiversNow, recentTeamKickoffs } from "./waiver-status.ts";
@@ -113,6 +113,13 @@ async function main(): Promise<void> {
   // onReserve separately. reconcileRoster got this wrong on 2026-09-19 and cut
   // Nico Collins straight off IR.
   const view = buildRosterView(mine);
+  // A man on IR who no longer qualifies makes the roster illegal, and
+  // Sleeper refuses every add until he is moved ("Your roster is either
+  // invalid or will be invalid after this move", 2026-09-19). The reserve
+  // reconciler owns that move, and its forced cut waits for the man's final
+  // injury report (reserve-hold.ts). This run plans and reports as usual
+  // and writes nothing while it lasts.
+  const staleIr = staleReserve(view, league.settings);
   // The analysis roster (drop table, lineup deltas) is the ACTIVE set. A man on
   // IR cannot be started and must never be a drop candidate.
   const myPlayerIds = applyRosterDelta([...view.activeIds], delta);
@@ -479,6 +486,16 @@ async function main(): Promise<void> {
 
   if (!live) {
     console.log("\n(shadow — pass --live to perform the free-agent adds and submit the single best claim)");
+    return;
+  }
+  if (staleIr.length) {
+    const who = staleIr.map((e) => `${e.name} (${e.injuryStatus ?? "healthy"})`).join(", ");
+    console.log(`\n  held: ${who} on injured reserve no longer qualifies; Sleeper refuses every add until he is moved, and the reserve reconciler owns that move (a cut waits for his final injury report).`);
+    logEvent("coach", "waiver-held", `Week ${week} waiver moves held: ${who} on injured reserve no longer qualifies, so Sleeper refuses every add until he is moved; the reserve reconciler owns that move and its cut waits for his final injury report.`, {
+      week, leagueId, stale: staleIr.map((e) => e.playerId),
+      stream: stream ? { add: stream.add, drop: stream.drop, forWeek: stream.forWeek } : null,
+      freeAdds: freeAdds.map((m) => ({ add: m.add, drop: m.drop })), claim: claim ? { add: claim.add, drop: claim.drop } : null,
+    });
     return;
   }
 

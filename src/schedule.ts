@@ -20,10 +20,10 @@
 // Each job declares how late it may still usefully run, and a missed occurrence
 // beyond that is skipped with a log line rather than fired.
 
-const ZONE = process.env.SCHEDULE_TZ ?? "America/New_York";
+export const ZONE = process.env.SCHEDULE_TZ ?? "America/New_York";
 
 // The ET wall-clock parts of an instant.
-function partsInZone(at: number, zone = ZONE): { y: number; m: number; d: number; hh: number; mm: number; dow: number } {
+export function partsInZone(at: number, zone = ZONE): { y: number; m: number; d: number; hh: number; mm: number; dow: number } {
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: zone, hour12: false,
     year: "numeric", month: "2-digit", day: "2-digit",

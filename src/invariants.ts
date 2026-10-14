@@ -35,6 +35,8 @@ import type { Database } from "bun:sqlite";
 import type { League, NflState, Roster } from "./sleeper/types.ts";
 import { buildRosterView, type RosterView } from "./analysis/roster-view.ts";
 import { rosterLegal } from "./sleeper/rules.ts";
+import { currentReserveHold } from "./act/reserve-reconcile.ts";
+import { fmtZoned } from "./act/reserve-hold.ts";
 import { sleeper } from "./sleeper/client.ts";
 import { leagueRosters } from "./sleeper/graphql.ts";
 import { config } from "./config.ts";
@@ -100,6 +102,10 @@ export interface InvariantInput {
   /** The breaker's own marker, from breakerState() (DROP_FREEZE only, never
    *  the human FREEZE). Absent means not set. */
   dropFreeze?: { frozen: boolean; reason: string };
+  /** A stale IR man whose forced cut the reconciler is holding for his
+   *  final injury report (reserve-reconcile.ts currentReserveHold). A held
+   *  stale IR is a chosen state, not a fault, while the hold runs. */
+  reserveHold?: { playerId: string; name: string; until: number } | null;
   alertsLastHour: number;
   now?: number;
   jobs?: Job[];
@@ -122,11 +128,18 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
   // roster-legal
   {
     const l = rosterLegal(input.view, capacity, input.league.settings);
+    // A stale IR the reconciler holds by rule (his cut waits for his final
+    // injury report, 2026-10-14) is handled, not a fault: said in the
+    // detail, never paged. The hold has an end; past it the fault is real.
+    const held = input.reserveHold && input.reserveHold.until > now ? input.reserveHold : null;
+    const unheld = l.staleIr.filter((n) => n !== held?.name);
+    const ok = l.ok || (!l.overBy && !l.reserveNotOwned.length && unheld.length === 0);
     const bits: string[] = [];
     if (l.overBy) bits.push(`${l.overBy} over the ${capacity}-man cap`);
-    if (l.staleIr.length) bits.push(`no longer IR-eligible: ${l.staleIr.join(", ")}`);
+    if (unheld.length) bits.push(`no longer IR-eligible: ${unheld.join(", ")}`);
     if (l.reserveNotOwned.length) bits.push(`on reserve but not owned: ${l.reserveNotOwned.join(", ")}`);
-    out.push({ name: "roster-legal", ok: l.ok, action: "alert", detail: l.ok ? `${input.view.active.length}/${capacity} active, IR clean` : bits.join("; ") });
+    const heldNote = held && l.staleIr.includes(held.name) ? `${held.name} stale on IR, cut held for his final injury report until ${fmtZoned(held.until)}` : "";
+    out.push({ name: "roster-legal", ok, action: "alert", detail: ok ? `${input.view.active.length}/${capacity} active, ${heldNote || "IR clean"}` : [...bits, heldNote].filter(Boolean).join("; ") });
   }
 
   // starter-on-reserve
@@ -352,6 +365,7 @@ export async function collectInvariantInput(db: Database, gql: Gql, leg: number,
     proposalsDb, scheduledRuns, kickoffs,
     dropHistory: dropHistory(),
     dropFreeze: breakerState(),
+    reserveHold: currentReserveHold(now),
     alertsLastHour: alertsLastHour(db, now),
     now,
   };
