@@ -48,6 +48,16 @@ describe("canaryVerdict", () => {
   test("roster: REST source, read failure and illegality fail", () => {
     expect(canaryVerdict(healthy({ rosterHasPlayerMap: false })).failures[0]).toContain("no player_map");
     expect(canaryVerdict(healthy({ legality: null })).failures[0]).toContain("roster: read failed");
+    // 2026-10-14: a deploy during the reconciler's hold on a stale IR man's
+    // cut (his final injury report) must not freeze on him: frozen, the
+    // reconciler cannot cut, and the canary re-checks every poll.
+    const stale = { ok: false, overBy: 0, staleIr: ["DeVonta Smith"], reserveNotOwned: [] };
+    const held = canaryVerdict(healthy({ legality: stale, staleHeld: [{ name: "DeVonta Smith", until: NOW + 3_600_000 }] }));
+    expect(held.ok).toBe(true);
+    expect(held.warnings[0]).toContain("DeVonta Smith stale on IR, cut held for his final injury report until");
+    expect(canaryVerdict(healthy({ legality: stale, staleHeld: [{ name: "DeVonta Smith", until: NOW - 1 }] })).failures[0]).toContain("stale IR: DeVonta Smith");
+    expect(canaryVerdict(healthy({ legality: stale, staleHeld: [{ name: "Rico Dowdle", until: NOW + 3_600_000 }] })).ok).toBe(false);
+    expect(canaryVerdict(healthy({ legality: { ...stale, overBy: 1 }, staleHeld: [{ name: "DeVonta Smith", until: NOW + 3_600_000 }] })).failures[0]).toContain("1 over cap");
     const v = canaryVerdict(healthy({ legality: { ok: false, overBy: 1, staleIr: ["Nico Collins"], reserveNotOwned: [] } }));
     expect(v.failures[0]).toContain("1 over cap");
     expect(v.failures[0]).toContain("Nico Collins");

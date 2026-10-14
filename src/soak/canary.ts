@@ -22,7 +22,8 @@ import { config, isStagingTarget, REAL_LEAGUE_ID } from "../config.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters, weekSchedule } from "../sleeper/graphql.ts";
 import { buildRosterView, RosterSourceError } from "../analysis/roster-view.ts";
-import { rosterLegal, type Legality } from "../sleeper/rules.ts";
+import { rosterLegal, staleReserve, type Legality } from "../sleeper/rules.ts";
+import { forcedCutNotBefore, fmtZoned } from "../act/reserve-hold.ts";
 import { activeCapacity } from "../analysis/roster-fit.ts";
 import { probeToken } from "../league/api.ts";
 import { assessToken, type TokenProbe } from "../league/token.ts";
@@ -70,6 +71,13 @@ export interface CanaryObservations {
    *  unreadable feed reads as the full window, which can only delay this
    *  check, never fail it wrongly. */
   kickoffs?: number[];
+  /** Stale IR men whose forced cut the coach holds for their final injury
+   *  report (act/reserve-hold.ts, 2026-10-14), with the hold's end. A deploy
+   *  during such a hold must not freeze on the stale IR: the reconciler
+   *  cannot cut while frozen, and the canary re-checks every poll, so the
+   *  two would hold each other until the man's tag changed. Held is a chosen
+   *  state; past `until` it is the fault it was. */
+  staleHeld?: { name: string; until: number }[];
 }
 
 export interface CanaryVerdict {
@@ -94,11 +102,14 @@ export function canaryVerdict(o: CanaryObservations): CanaryVerdict {
   if (!o.rosterHasPlayerMap) failures.push("roster: no player_map (REST source; IR cannot be told from active)");
   else if (o.legality === null) failures.push("roster: read failed");
   else if (!o.legality.ok) {
+    const held = (o.staleHeld ?? []).filter((h) => h.until > o.now);
+    const unheld = o.legality.staleIr.filter((n) => !held.some((h) => h.name === n));
     const bits: string[] = [];
     if (o.legality.overBy) bits.push(`${o.legality.overBy} over cap`);
-    if (o.legality.staleIr.length) bits.push(`stale IR: ${o.legality.staleIr.join(", ")}`);
+    if (unheld.length) bits.push(`stale IR: ${unheld.join(", ")}`);
     if (o.legality.reserveNotOwned.length) bits.push(`reserve not owned: ${o.legality.reserveNotOwned.join(", ")}`);
-    failures.push(`roster: ${bits.join("; ")}`);
+    if (bits.length) failures.push(`roster: ${bits.join("; ")}`);
+    for (const h of held) if (o.legality.staleIr.includes(h.name)) warnings.push(`roster: ${h.name} stale on IR, cut held for his final injury report until ${fmtZoned(h.until)}`);
   }
 
   if (o.matchupWeek !== null) {
@@ -206,11 +217,16 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
 
   let rosterHasPlayerMap = false;
   let legality: Legality | null = null;
+  let staleMen: { name: string; team: string | null }[] = [];
   try {
     const mine = (await leagueRosters(config.leagueId)).find((r) => r.roster_id === config.rosterId);
     if (mine) {
       rosterHasPlayerMap = !!mine.player_map;
-      if (rosterHasPlayerMap && settings) legality = rosterLegal(buildRosterView(mine), activeCapacity(rosterPositions), settings);
+      if (rosterHasPlayerMap && settings) {
+        const view = buildRosterView(mine);
+        legality = rosterLegal(view, activeCapacity(rosterPositions), settings);
+        staleMen = staleReserve(view, settings).map((e) => ({ name: e.name, team: e.team }));
+      }
     }
   } catch (err) {
     if (!(err instanceof RosterSourceError)) console.error(`[canary] roster read failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -220,11 +236,18 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
   let matchupPoints: number | null = null;
   const kickoffCache = await readKickoffCache();
   let kickoffs: number[] = [];
+  const staleHeld: { name: string; until: number }[] = [];
   try {
     const state = await sleeper.nflState();
     if (state.season_type === "regular" && state.week > 0) {
       try {
-        kickoffs = (await weekSchedule(state.season, state.week)).map((g) => g.startTime);
+        const slate = await weekSchedule(state.season, state.week);
+        kickoffs = slate.map((g) => g.startTime);
+        // The reconciler's hold on a stale IR man's cut (reserve-hold.ts).
+        for (const m of staleMen) {
+          const h = forcedCutNotBefore(m.team, slate);
+          if (h) staleHeld.push({ name: m.name, until: h.until });
+        }
       } catch (err) {
         console.error(`[canary] week ${state.week} kickoffs unreadable (${err instanceof Error ? err.message : String(err)}); the schedule check reads the full window`);
       }
@@ -241,7 +264,7 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
     scheduledRuns: await readScheduledRuns(),
     activityAppendable: activityAppendable(),
     haConfigured: !!process.env.HA_NOTIFY_URL && !!process.env.HA_TOKEN,
-    now, kickoffs,
+    now, kickoffs, staleHeld,
   };
 }
 // #endregion
