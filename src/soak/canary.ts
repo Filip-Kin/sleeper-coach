@@ -24,6 +24,8 @@ import { leagueRosters, weekSchedule } from "../sleeper/graphql.ts";
 import { buildRosterView, RosterSourceError } from "../analysis/roster-view.ts";
 import { rosterLegal, staleReserve, type Legality } from "../sleeper/rules.ts";
 import { forcedCutNotBefore, fmtZoned } from "../act/reserve-hold.ts";
+import { currentReserveIntents } from "../act/reserve-reconcile.ts";
+import { MAX_AGE_MS as INTENT_MAX_AGE_MS } from "../act/drop-intent.ts";
 import { activeCapacity } from "../analysis/roster-fit.ts";
 import { probeToken } from "../league/api.ts";
 import { assessToken, type TokenProbe } from "../league/token.ts";
@@ -76,8 +78,12 @@ export interface CanaryObservations {
    *  during such a hold must not freeze on the stale IR: the reconciler
    *  cannot cut while frozen, and the canary re-checks every poll, so the
    *  two would hold each other until the man's tag changed. Held is a chosen
-   *  state; past `until` it is the fault it was. */
-  staleHeld?: { name: string; until: number }[];
+   *  state; past `until` it is the fault it was. Also a stale man whose
+   *  activation is recorded for its confirming look (reserve-reconcile.ts
+   *  currentReserveIntents, 2026-10-15): the intent lives on disk across
+   *  the boot, and a freeze would stop the look that writes it. `why`
+   *  names that case; absent, it is the report hold. */
+  staleHeld?: { name: string; until: number; why?: string }[];
 }
 
 export interface CanaryVerdict {
@@ -109,7 +115,7 @@ export function canaryVerdict(o: CanaryObservations): CanaryVerdict {
     if (unheld.length) bits.push(`stale IR: ${unheld.join(", ")}`);
     if (o.legality.reserveNotOwned.length) bits.push(`reserve not owned: ${o.legality.reserveNotOwned.join(", ")}`);
     if (bits.length) failures.push(`roster: ${bits.join("; ")}`);
-    for (const h of held) if (o.legality.staleIr.includes(h.name)) warnings.push(`roster: ${h.name} stale on IR, cut held for his final injury report until ${fmtZoned(h.until)}`);
+    for (const h of held) if (o.legality.staleIr.includes(h.name)) warnings.push(`roster: ${h.name} stale on IR, ${h.why ?? `cut held for his final injury report until ${fmtZoned(h.until)}`}`);
   }
 
   if (o.matchupWeek !== null) {
@@ -217,7 +223,7 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
 
   let rosterHasPlayerMap = false;
   let legality: Legality | null = null;
-  let staleMen: { name: string; team: string | null }[] = [];
+  let staleMen: { playerId: string; name: string; team: string | null }[] = [];
   try {
     const mine = (await leagueRosters(config.leagueId)).find((r) => r.roster_id === config.rosterId);
     if (mine) {
@@ -225,7 +231,7 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
       if (rosterHasPlayerMap && settings) {
         const view = buildRosterView(mine);
         legality = rosterLegal(view, activeCapacity(rosterPositions), settings);
-        staleMen = staleReserve(view, settings).map((e) => ({ name: e.name, team: e.team }));
+        staleMen = staleReserve(view, settings).map((e) => ({ playerId: e.playerId, name: e.name, team: e.team }));
       }
     }
   } catch (err) {
@@ -236,7 +242,13 @@ export async function observe(now = Date.now()): Promise<CanaryObservations> {
   let matchupPoints: number | null = null;
   const kickoffCache = await readKickoffCache();
   let kickoffs: number[] = [];
-  const staleHeld: { name: string; until: number }[] = [];
+  const staleHeld: { name: string; until: number; why?: string }[] = [];
+  // The reconciler's recorded activation of a stale man, waiting for its
+  // second look (on disk, so it survives this boot).
+  for (const i of currentReserveIntents(now)) {
+    const m = staleMen.find((x) => x.playerId === i.playerId);
+    if (m) staleHeld.push({ name: m.name, until: i.firstSeen + INTENT_MAX_AGE_MS, why: `his activation recorded ${fmtZoned(i.firstSeen)} and confirming on a second look` });
+  }
   try {
     const state = await sleeper.nflState();
     if (state.season_type === "regular" && state.week > 0) {

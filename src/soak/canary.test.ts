@@ -58,6 +58,10 @@ describe("canaryVerdict", () => {
     expect(canaryVerdict(healthy({ legality: stale, staleHeld: [{ name: "DeVonta Smith", until: NOW - 1 }] })).failures[0]).toContain("stale IR: DeVonta Smith");
     expect(canaryVerdict(healthy({ legality: stale, staleHeld: [{ name: "Rico Dowdle", until: NOW + 3_600_000 }] })).ok).toBe(false);
     expect(canaryVerdict(healthy({ legality: { ...stale, overBy: 1 }, staleHeld: [{ name: "DeVonta Smith", until: NOW + 3_600_000 }] })).failures[0]).toContain("1 over cap");
+    // 2026-10-15: a stash recorded for its second look, a boot in between.
+    const intent = canaryVerdict(healthy({ legality: stale, staleHeld: [{ name: "DeVonta Smith", until: NOW + 6 * 3_600_000, why: "his activation recorded Thu Oct 15 13:20 ET and confirming on a second look" }] }));
+    expect(intent.ok).toBe(true);
+    expect(intent.warnings[0]).toContain("DeVonta Smith stale on IR, his activation recorded");
     const v = canaryVerdict(healthy({ legality: { ok: false, overBy: 1, staleIr: ["Nico Collins"], reserveNotOwned: [] } }));
     expect(v.failures[0]).toContain("1 over cap");
     expect(v.failures[0]).toContain("Nico Collins");
