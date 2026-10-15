@@ -490,8 +490,8 @@ async function main(): Promise<void> {
   }
   if (staleIr.length) {
     const who = staleIr.map((e) => `${e.name} (${e.injuryStatus ?? "healthy"})`).join(", ");
-    console.log(`\n  held: ${who} on injured reserve no longer qualifies; Sleeper refuses every add until he is moved, and the reserve reconciler owns that move (a cut waits for his final injury report).`);
-    logEvent("coach", "waiver-held", `Week ${week} waiver moves held: ${who} on injured reserve no longer qualifies, so Sleeper refuses every add until he is moved; the reserve reconciler owns that move and its cut waits for his final injury report.`, {
+    console.log(`\n  held: ${who} on injured reserve no longer qualifies; Sleeper refuses every add until he is moved, and the reserve reconciler owns that move (a stash or a free seat at its second look; a cut waits for his final injury report).`);
+    logEvent("coach", "waiver-held", `Week ${week} waiver moves held: ${who} on injured reserve no longer qualifies, so Sleeper refuses every add until he is moved; the reserve reconciler owns that move (a stash or a free seat at its second look; a cut waits for his final injury report).`, {
       week, leagueId, stale: staleIr.map((e) => e.playerId),
       stream: stream ? { add: stream.add, drop: stream.drop, forWeek: stream.forWeek } : null,
       freeAdds: freeAdds.map((m) => ({ add: m.add, drop: m.drop })), claim: claim ? { add: claim.add, drop: claim.drop } : null,

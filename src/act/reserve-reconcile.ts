@@ -246,6 +246,22 @@ let reserveHold: { playerId: string; name: string; until: number; drop: string |
 export function currentReserveHold(now = Date.now()): { playerId: string; name: string; until: number; drop: string | null } | null {
   return reserveHold && reserveHold.until > now ? reserveHold : null;
 }
+/** The IR activations recorded for a second look and not yet confirmed
+ *  (drop-intent.ts: two looks MIN_AGE_MS apart, forgotten after MAX_AGE_MS).
+ *  The roster-legal invariant reads it: a stale IR man whose move is between
+ *  its two looks is handled, not a fault. 2026-10-15 13:20 ET Hurts flipped
+ *  Out, the hold on Smith's cut gave way to "move Hurts to injured reserve
+ *  and activate Smith" (nobody cut), and the invariant paged on Smith at
+ *  13:28 with the confirming look 22 minutes away: the hold had cleared, and
+ *  the intent was invisible to it. Read from the store on disk, so a
+ *  restart between the looks changes nothing. */
+export const RESERVE_INTENT_PREFIX = "ir-activate:";
+export interface ReserveIntent { key: string; playerId: string; firstSeen: number; note: string }
+export function currentReserveIntents(now = Date.now(), store: DropIntentStore = new DropIntentStore()): ReserveIntent[] {
+  return store.all()
+    .filter((i) => i.key.startsWith(RESERVE_INTENT_PREFIX) && decideIntent(i, now).action !== "record")
+    .map((i) => ({ key: i.key, playerId: i.key.slice(RESERVE_INTENT_PREFIX.length).split(":")[0] ?? "", firstSeen: i.firstSeen, note: i.note }));
+}
 
 async function cachedKickoffTimes(): Promise<number[]> {
   try {
@@ -356,7 +372,7 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   if (!plan) return null;
 
   const intents = deps.intents ?? new DropIntentStore();
-  const prefix = `ir-activate:${plan.playerId}:`;
+  const prefix = `${RESERVE_INTENT_PREFIX}${plan.playerId}:`;
   if (plan.action === "hold") {
     const until = plan.holdUntil ?? now + HOUR;
     reserveHold = { playerId: plan.playerId, name: plan.name, until, drop: plan.drop?.playerId ?? null };

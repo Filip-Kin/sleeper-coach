@@ -86,6 +86,21 @@ describe("roster-legal", () => {
     const other = byName(evaluateInvariants(input({ reserveHold: { playerId: "p9", name: "P p9", until: NOW + 3_600_000 } }, r)))["roster-legal"]!;
     expect(other.ok).toBe(false);
   });
+  test("a stale IR whose activation is recorded for a second look (2026-10-15) is said, not paged, while the intent lives", () => {
+    const r = roster({ n: 17, reserve: ["p16"], injuries: { p16: "Questionable", p13: "Out" } });
+    const open = byName(evaluateInvariants(input({ reserveIntents: [{ playerId: "p16", firstSeen: NOW - 8 * 60_000 }] }, r)))["roster-legal"]!;
+    expect(open.ok).toBe(true);
+    expect(open.detail).toContain("P p16 stale on IR, his activation recorded");
+    expect(open.detail).toContain("confirming on a second look");
+    // Past the store's life the intent is forgotten and the fault is real.
+    const old = byName(evaluateInvariants(input({ reserveIntents: [{ playerId: "p16", firstSeen: NOW - 6 * 3_600_000 - 1 }] }, r)))["roster-legal"]!;
+    expect(old.ok).toBe(false);
+    expect(old.detail).toContain("no longer IR-eligible: P p16");
+    // An intent about another man says nothing about this one.
+    const other = byName(evaluateInvariants(input({ reserveIntents: [{ playerId: "p9", firstSeen: NOW - 8 * 60_000 }] }, r)))["roster-legal"]!;
+    expect(other.ok).toBe(false);
+    expect(other.detail).toContain("no longer IR-eligible: P p16");
+  });
 });
 
 describe("starter-on-reserve", () => {

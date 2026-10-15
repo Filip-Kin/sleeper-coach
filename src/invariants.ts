@@ -35,8 +35,9 @@ import type { Database } from "bun:sqlite";
 import type { League, NflState, Roster } from "./sleeper/types.ts";
 import { buildRosterView, type RosterView } from "./analysis/roster-view.ts";
 import { rosterLegal } from "./sleeper/rules.ts";
-import { currentReserveHold } from "./act/reserve-reconcile.ts";
+import { currentReserveHold, currentReserveIntents } from "./act/reserve-reconcile.ts";
 import { fmtZoned } from "./act/reserve-hold.ts";
+import { MAX_AGE_MS as INTENT_MAX_AGE_MS } from "./act/drop-intent.ts";
 import { sleeper } from "./sleeper/client.ts";
 import { leagueRosters } from "./sleeper/graphql.ts";
 import { config } from "./config.ts";
@@ -106,6 +107,13 @@ export interface InvariantInput {
    *  final injury report (reserve-reconcile.ts currentReserveHold). A held
    *  stale IR is a chosen state, not a fault, while the hold runs. */
   reserveHold?: { playerId: string; name: string; until: number } | null;
+  /** IR activations the reconciler has recorded and not yet confirmed
+   *  (reserve-reconcile.ts currentReserveIntents: two looks MIN_AGE_MS
+   *  apart). A stale IR man whose move is between its looks is a chosen
+   *  state too, for as long as the intent lives (drop-intent.ts MAX_AGE_MS);
+   *  2026-10-15 the invariant paged on Smith eight minutes into the stash
+   *  intent for Hurts because it only knew the hold. */
+  reserveIntents?: { playerId: string; firstSeen: number }[];
   alertsLastHour: number;
   now?: number;
   jobs?: Job[];
@@ -132,14 +140,25 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
     // injury report, 2026-10-14) is handled, not a fault: said in the
     // detail, never paged. The hold has an end; past it the fault is real.
     const held = input.reserveHold && input.reserveHold.until > now ? input.reserveHold : null;
-    const unheld = l.staleIr.filter((n) => n !== held?.name);
+    // Likewise a stale IR whose activation is recorded and waiting for its
+    // confirming look (2026-10-15): the move is chosen, the write is minutes
+    // away. An intent past its life is forgotten by the store, so the fault
+    // is real again.
+    const intents = (input.reserveIntents ?? [])
+      .filter((i) => now - i.firstSeen <= INTENT_MAX_AGE_MS)
+      .map((i) => ({ ...i, name: nameOf(input.view, i.playerId) }))
+      .filter((i) => l.staleIr.includes(i.name));
+    const pending = new Set(intents.map((i) => i.name));
+    const unheld = l.staleIr.filter((n) => n !== held?.name && !pending.has(n));
     const ok = l.ok || (!l.overBy && !l.reserveNotOwned.length && unheld.length === 0);
     const bits: string[] = [];
     if (l.overBy) bits.push(`${l.overBy} over the ${capacity}-man cap`);
     if (unheld.length) bits.push(`no longer IR-eligible: ${unheld.join(", ")}`);
     if (l.reserveNotOwned.length) bits.push(`on reserve but not owned: ${l.reserveNotOwned.join(", ")}`);
     const heldNote = held && l.staleIr.includes(held.name) ? `${held.name} stale on IR, cut held for his final injury report until ${fmtZoned(held.until)}` : "";
-    out.push({ name: "roster-legal", ok, action: "alert", detail: ok ? `${input.view.active.length}/${capacity} active, ${heldNote || "IR clean"}` : [...bits, heldNote].filter(Boolean).join("; ") });
+    const intentNote = intents.filter((i) => i.name !== held?.name).map((i) => `${i.name} stale on IR, his activation recorded ${fmtZoned(i.firstSeen)} and confirming on a second look`).join("; ");
+    const notes = [heldNote, intentNote].filter(Boolean).join("; ");
+    out.push({ name: "roster-legal", ok, action: "alert", detail: ok ? `${input.view.active.length}/${capacity} active, ${notes || "IR clean"}` : [...bits, notes].filter(Boolean).join("; ") });
   }
 
   // starter-on-reserve
@@ -366,6 +385,7 @@ export async function collectInvariantInput(db: Database, gql: Gql, leg: number,
     dropHistory: dropHistory(),
     dropFreeze: breakerState(),
     reserveHold: currentReserveHold(now),
+    reserveIntents: currentReserveIntents(now),
     alertsLastHour: alertsLastHour(db, now),
     now,
   };
