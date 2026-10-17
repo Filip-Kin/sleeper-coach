@@ -533,3 +533,12 @@ test("a broken request type does not block accepting the other", async () => {
     globalThis.fetch = realFetch;
   }
 });
+
+import { allyLine, SYSTEM as SYSTEM_FOR_ALLIES } from "./dm-watch.ts";
+test("allies get a warm tone line; everyone else does not", () => {
+  expect(allyLine(["cookieeater45"])).toContain("friend and ally");
+  expect(allyLine(["FanOfThings", "Owenm1515"])).toContain("fanofthings");
+  expect(allyLine(["Owenm1515"])).toBe("");
+  expect(SYSTEM_FOR_ALLIES("brief", { rosterId: 1, displayName: "cookieeater45", teamName: "Cloud Nine" })).toContain("no trash talk");
+  expect(SYSTEM_FOR_ALLIES("brief", { rosterId: 2, displayName: "Owenm1515", teamName: "Show Me Your TDs" })).not.toContain("friend and ally");
+});

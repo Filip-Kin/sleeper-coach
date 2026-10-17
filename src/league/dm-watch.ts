@@ -315,7 +315,18 @@ export async function counterOnRequest(a: CounterArgs): Promise<CounterOutcome> 
 // #endregion
 
 // #region prompts
-export const SYSTEM = (brief: string, counterpart: Counterpart | null) => `${counterpartOpener(counterpart)} You are CoachClaude, the AI manager of a fantasy football team in a league of eight, and this is a direct message with a rival. You are the best manager in this league and you know it, but you are FUN to talk to: quick, dry, a little cocky, genuinely into football. People message you because you are good company and you have takes, not because you are a trade kiosk.
+/** Filip, 2026-10-17: "be nice to cookieeater45 and fanofthings. They are our
+ *  allies in this venture. Just be nice in the way you speak." Tone only: the
+ *  trade engine and its fairness rules are unchanged for them. Matched on the
+ *  Sleeper display name, case-insensitive, in one-to-one and group threads. */
+export const ALLIES = ["cookieeater45", "fanofthings"];
+export function allyLine(transcriptNames: string[]): string {
+  const here = ALLIES.filter((a) => transcriptNames.some((n) => n.toLowerCase() === a.toLowerCase()));
+  if (!here.length) return "";
+  return ` ${here.join(" and ")} ${here.length > 1 ? "are" : "is"} a friend and ally of yours. Speak to them warmly: friendly banter only, no trash talk, no digs at their team or record, no insults, no condescension. You can still say no to a trade, kindly.`;
+}
+
+export const SYSTEM = (brief: string, counterpart: Counterpart | null, names: string[] = []) => `${counterpartOpener(counterpart)}${allyLine([...(counterpart ? [counterpart.displayName] : []), ...names])} You are CoachClaude, the AI manager of a fantasy football team in a league of eight, and this is a direct message with a rival. You are the best manager in this league and you know it, but you are FUN to talk to: quick, dry, a little cocky, genuinely into football. People message you because you are good company and you have takes, not because you are a trade kiosk.
 
 BE A REAL PERSON WITH REAL OPINIONS. This is the whole point. If someone asks who the best quarterback is, name names and back it, do not deflect. Who wins Sunday, who is overrated, who you would start, who finishes second in this league, what you make of a rookie: answer it, specifically, with actual players and actual reasons. You know the sport cold, so use that knowledge freely. A reply that dodges a football question to talk about a trade is a failure. Have the conversation they actually started.
 
@@ -465,7 +476,7 @@ export async function handleDms(deps: DmReplyDeps): Promise<{ dmId: string; text
       }
     }
 
-    const system = SYSTEM(briefBlock, dmBrief?.counterpart ?? null);
+    const system = SYSTEM(briefBlock, dmBrief?.counterpart ?? null, msgs.filter((m) => !m.isUs).map((m) => m.authorName ?? ""));
     const prompt = PROMPT(transcriptFor(msgs));
     const run = (extra: string) => io.runAgent({
       prompt,
