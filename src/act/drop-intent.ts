@@ -21,13 +21,31 @@ export const MAX_AGE_MS = 6 * 3_600_000;
 /** Bookkeeping rows in the store: how often a decision under a prefix restarted. */
 const RESTART_KEY = "__restarts__:";
 
-export interface DropIntent { key: string; firstSeen: number; note: string }
+export interface DropIntent {
+  key: string;
+  firstSeen: number;
+  note: string;
+  /** Set when the breaker's cooldown deferred the write after both looks
+   *  agreed: the decision stands and is retried at this instant, not looked
+   *  at a third time. A cooldown is a hold, not a changed decision. On
+   *  2026-10-16 the Strange add passed its second look at 12:53, was
+   *  deferred until 13:23, and was forgotten: no record, so the confirm
+   *  loop never ran an adds-capable job, and roster 6 added him at 15:54. */
+  retryAt?: number;
+}
 export type IntentDecision = { action: "record" } | { action: "wait"; readyAt: number } | { action: "go"; firstSeen: number };
+
+/** When a recorded intent may be written: its second look, or the breaker's
+ *  retry instant if that is later. */
+export function intentDueAt(prev: DropIntent, minAgeMs = MIN_AGE_MS): number {
+  return Math.max(prev.firstSeen + minAgeMs, prev.retryAt ?? 0);
+}
 
 /** Pure: what to do with a decision `key` seen now, given what was recorded. */
 export function decideIntent(prev: DropIntent | null, now: number, minAgeMs = MIN_AGE_MS, maxAgeMs = MAX_AGE_MS): IntentDecision {
   if (!prev || now - prev.firstSeen > maxAgeMs) return { action: "record" };
-  if (now - prev.firstSeen < minAgeMs) return { action: "wait", readyAt: prev.firstSeen + minAgeMs };
+  const readyAt = intentDueAt(prev, minAgeMs);
+  if (now < readyAt) return { action: "wait", readyAt };
   return { action: "go", firstSeen: prev.firstSeen };
 }
 
@@ -45,7 +63,9 @@ export function intentsToConfirm(
 ): DropIntent[] {
   const due = intents.filter((i) => decideIntent(i, now, minAgeMs, maxAgeMs).action === "go");
   if (!due.length) return [];
-  if (now - lastConfirm < throttleMs && due.every((i) => i.firstSeen + minAgeMs <= lastConfirm)) return [];
+  // A deferred intent comes due at its retry instant, so one the breaker
+  // held past the last run goes at once like any new decision.
+  if (now - lastConfirm < throttleMs && due.every((i) => intentDueAt(i, minAgeMs) <= lastConfirm)) return [];
   return due;
 }
 
@@ -61,6 +81,14 @@ export class DropIntentStore {
   get(key: string): DropIntent | null { return this.read()[key] ?? null; }
   put(intent: DropIntent): void { const all = this.read(); all[intent.key] = intent; this.write(all); }
   delete(key: string): void { const all = this.read(); delete all[key]; this.write(all); }
+  /** The breaker's cooldown refused a write whose two looks agreed: keep the
+   *  decision as it was recorded (`intent` is the record the confirming run
+   *  took, first look and all) and hold it until `retryAt`. The next
+   *  confirming run after that instant re-plans from fresh data and writes
+   *  if it reaches the same move; no third look, no new 30-minute wait. */
+  defer(intent: DropIntent, retryAt: number): void {
+    this.put({ ...(this.get(intent.key) ?? intent), retryAt });
+  }
   /** Forget intents older than maxAgeMs, and every intent under `prefix` other
    *  than `keep` (the decision changed, so the old one no longer counts).
    *  Returns how many times the decision under `prefix` has restarted within

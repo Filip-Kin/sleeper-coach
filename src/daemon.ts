@@ -570,7 +570,8 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     const prefix = "reconcile:";
     const key = `${prefix}${drops.map((d) => d.playerId).sort().join("+")}`;
     const restarts = intents.settle(prefix, key, Date.now());
-    const gate = decideIntent(intents.get(key), Date.now());
+    const prev = intents.get(key);
+    const gate = decideIntent(prev, Date.now());
     if (gate.action === "record") {
       intents.put({ key, firstSeen: Date.now(), note: drops.map((d) => d.name).join(", ") });
       logEvent("coach", "roster-reconcile-intent", `Over cap by ${over}; would drop ${drops.map((d) => d.name).join(", ")}; confirming on a later look`, { over, drops: drops.map((d) => d.name), restarts });
@@ -582,6 +583,8 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
       return;
     }
     if (gate.action === "wait") return;
+    // "go" means a record exists; kept so a cooldown refusal can put it back.
+    const taken = prev ?? { key, firstSeen: Date.now(), note: drops.map((d) => d.name).join(", ") };
     intents.delete(key);
     logEvent("coach", "roster-reconcile", `Over cap by ${over}; dropping ${drops.map((d) => d.name).join(", ")}`, {
       over, drops: drops.map((d) => ({ name: d.name, playerId: d.playerId, cost: d.cost })),
@@ -607,8 +610,11 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (e instanceof DropRefused) {
-        // The breaker decided. Not a failure: the next poll after the cooldown tries again.
-        logEvent("coach", "drop-deferred", `Over-cap drop of ${drops.map((d) => d.name).join(", ")} deferred by the breaker: ${e.verdict.reason}`, { drops: drops.map((d) => d.name) });
+        // The breaker decided. Not a failure: the record goes back with its
+        // retry instant (a cooldown is a hold, not a changed decision) and
+        // the first poll after it writes the same cut; no third look.
+        if (!e.verdict.freeze && e.verdict.retryAt) intents.defer(taken, e.verdict.retryAt);
+        logEvent("coach", "drop-deferred", `Over-cap drop of ${drops.map((d) => d.name).join(", ")} deferred by the breaker: ${e.verdict.reason}`, { drops: drops.map((d) => d.name), retryAt: e.verdict.retryAt ?? null });
         return;
       }
       logEvent("coach", "roster-drop-failed", `Could not drop to get under the cap: ${msg}`, { drops: drops.map((d) => d.name) });

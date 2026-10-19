@@ -31,7 +31,7 @@ import { chooseLegalForcedDrops } from "../analysis/reconcile-plan.ts";
 import { keptStarters } from "../analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
 import { loadValues, liveStatusFromRosters, toRail, weeksLeft } from "../analysis/value.ts";
-import { DropIntentStore, decideIntent } from "./drop-intent.ts";
+import { DropIntentStore, decideIntent, type DropIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
 import { loadWeekProjections, byPlayerId, startableThisWeek, weekPointsThisWeek } from "../analysis/week-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
@@ -522,13 +522,16 @@ async function main(): Promise<void> {
   // runs each job twice for this.) Filip, 2026-09-30: no rushing.
   const intents = new DropIntentStore();
   const nowMs2 = Date.now();
+  // The records this run took at "go", by key: a breaker cooldown on the
+  // write puts the record back as it was (deferred below).
+  const taken = new Map<string, DropIntent>();
   const confirmed = (kind: string, add: string, cost: string | null): boolean => {
     if (!cost) return true;
     const prefix = `waiver:${kind}:${add}:`;
     const key = `${prefix}${cost}`;
     intents.settle(prefix, key, nowMs2);
     const gate = decideIntent(intents.get(key), nowMs2);
-    if (gate.action === "go") { intents.delete(key); return true; }
+    if (gate.action === "go") { taken.set(key, intents.get(key)!); intents.delete(key); return true; }
     if (gate.action === "record") {
       intents.put({ key, firstSeen: nowMs2, note: `${kind} ${add} costing ${cost}` });
       console.log(`  ${kind} ${add} (costs ${cost}): recorded, confirming on the next run`);
@@ -537,6 +540,20 @@ async function main(): Promise<void> {
       console.log(`  ${kind} ${add} (costs ${cost}): waiting for the confirmation window`);
     }
     return false;
+  };
+  // The breaker's cooldown is a hold, not a changed decision: the two looks
+  // stand and the record goes back with its retry instant, so the daemon's
+  // confirm loop runs this move again (adds-capable, from the recorded kind)
+  // at that instant instead of at the next day's slot. On 2026-10-16 the
+  // Strange add was confirmed at 12:53, deferred until 13:23 and forgotten;
+  // every later run was claims-only and roster 6 added him at 15:54. The
+  // daily-limit refusal (freeze) is a human matter and keeps no record.
+  const deferred = (kind: string, add: string, cost: string | null, err: DropRefused): number | null => {
+    const retryAt = err.verdict.retryAt;
+    if (!cost || err.verdict.freeze || !retryAt) return null;
+    const key = `waiver:${kind}:${add}:${cost}`;
+    intents.defer(taken.get(key) ?? { key, firstSeen: nowMs2, note: `${kind} ${add} costing ${cost}` }, retryAt);
+    return retryAt;
   };
 
   // Streaming first: it covers a slot that would otherwise score zero, which is
@@ -568,7 +585,8 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof DropRefused) {
-        logEvent("coach", "waiver-stream-deferred", `Stream ${stream.add} deferred by the breaker: ${err.verdict.reason}`, { week, add: stream.add });
+        const retryAt = deferred("stream", stream.add, stream.drop, err);
+        logEvent("coach", "waiver-stream-deferred", `Stream ${stream.add} deferred by the breaker: ${err.verdict.reason}`, { week, add: stream.add, drop: stream.drop, retryAt });
       } else {
         logEvent("coach", "waiver-stream-failed", `Stream ${stream.add} failed: ${msg}`, { week, add: stream.add });
         if (live) await sendAlert("Stream pickup failed", `Week ${stream.forWeek}: ${stream.add} — ${msg}`);
@@ -739,9 +757,11 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof DropRefused) {
-        // The breaker decided; the next confirming run after the cooldown tries again.
+        // The breaker decided; the record goes back with its retry instant
+        // and the confirming run after the cooldown tries again.
+        const retryAt = deferred("add", m.add, moveCost(m), err);
         console.log(`  ${m.add}: drop deferred by the breaker (${err.verdict.reason})`);
-        logEvent("coach", "waiver-add-deferred", `Free-agent add ${m.add} deferred by the breaker: ${err.verdict.reason}`, { week, leagueId, add: m.add });
+        logEvent("coach", "waiver-add-deferred", `Free-agent add ${m.add} deferred by the breaker: ${err.verdict.reason}`, { week, leagueId, add: m.add, drop: m.drop, retryAt });
         break;
       }
       logEvent("coach", "waiver-add-failed", `Free-agent add ${m.add} failed: ${msg}`, { week, leagueId, add: m.add });
@@ -787,7 +807,8 @@ async function main(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof DropRefused) {
-        logEvent("coach", "waiver-claim-deferred", `Waiver claim ${cur.add} deferred by the breaker: ${err.verdict.reason}`, { week, leagueId, add: cur.add });
+        const retryAt = deferred("claim", cur.add, moveCost(cur), err);
+        logEvent("coach", "waiver-claim-deferred", `Waiver claim ${cur.add} deferred by the breaker: ${err.verdict.reason}`, { week, leagueId, add: cur.add, drop: cur.drop, retryAt });
         return;
       }
       logEvent("coach", "waiver-claim-failed", `Waiver claim ${cur.add} failed: ${msg}`, { week, leagueId, add: cur.add });

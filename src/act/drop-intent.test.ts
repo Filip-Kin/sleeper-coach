@@ -84,3 +84,57 @@ describe("the confirming run's throttle holds a failing write, never a new decis
     expect(intentsToConfirm([old, fresh], now, 0, THROTTLE)).toEqual([old, fresh]);
   });
 });
+
+describe("a breaker cooldown is a hold, not a changed decision (2026-10-16 Strange)", () => {
+  // Replay, ET: 12:23:06 the confirming run streamed Fairbairn for Bates and
+  // re-recorded "add Strange costing Loveland"; 12:53:40 the next confirm said
+  // go, deleted the record, and the breaker refused the drop (Bates cut 31
+  // min ago) until 13:23:06. Nothing was re-recorded, so the confirm loop
+  // never ran an adds-capable job again; roster 6 added Strange at 15:54.
+  const KEY = "waiver:add:Brenton Strange:Colston Loveland";
+  const FIRST = 1792167786469; // 2026-10-16T16:23:06.469Z
+  const GO = 1792169620661; // 2026-10-16T16:53:40.661Z
+  const RETRY = 1792171386569; // 2026-10-16T17:23:06.569Z
+  const THROTTLE = 20 * 60_000;
+  const store = () => new DropIntentStore(`/tmp/sleeper-coach-test/intents-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+  const taken = { key: KEY, firstSeen: FIRST, note: "add Brenton Strange costing Colston Loveland" };
+
+  test("defer puts the record back with its first look and the retry instant", () => {
+    const s = store();
+    s.put(taken);
+    expect(decideIntent(s.get(KEY), GO).action).toBe("go");
+    s.delete(KEY); // the confirming run took it
+    s.defer(taken, RETRY);
+    expect(s.get(KEY)).toEqual({ ...taken, retryAt: RETRY });
+    // settle under the same decision keeps it, retryAt and all
+    s.settle("waiver:add:Brenton Strange:", KEY, GO + 60_000);
+    expect(s.get(KEY)?.retryAt).toBe(RETRY);
+    // a landed move clears it like any other record
+    s.settle("waiver:", "", GO + 60_000);
+    expect(s.get(KEY)).toBeNull();
+  });
+  test("a deferred intent waits for the retry instant, then goes with no third look", () => {
+    const d = { ...taken, retryAt: RETRY };
+    expect(decideIntent(d, GO + 1000)).toEqual({ action: "wait", readyAt: RETRY });
+    expect(decideIntent(d, RETRY - 1)).toEqual({ action: "wait", readyAt: RETRY });
+    expect(decideIntent(d, RETRY)).toEqual({ action: "go", firstSeen: FIRST });
+    // past the maximum age it is forgotten like any record
+    expect(decideIntent(d, FIRST + MAX_AGE_MS + 1).action).toBe("record");
+  });
+  test("the confirm loop takes it at the retry instant, even after a claim confirmed in between", () => {
+    const d = { ...taken, retryAt: RETRY };
+    expect(intentsToConfirm([d], RETRY - 60_000, GO, THROTTLE)).toEqual([]);
+    expect(intentsToConfirm([d], RETRY + 90_000, GO, THROTTLE)).toEqual([d]);
+    // A claim confirmed at 13:10 (lastConfirm inside the throttle): the add
+    // came due after it, at 13:23, so it goes at once.
+    const claimConfirm = RETRY - 13 * 60_000;
+    expect(intentsToConfirm([d], RETRY + 90_000, claimConfirm, THROTTLE)).toEqual([d]);
+    // The daemon derives the job's flag from the key: an add alone is adds-only.
+    expect(d.key.split(":")[1]).toBe("add");
+  });
+  test("a retry instant earlier than the second look changes nothing", () => {
+    const early = { key: "reconcile:a", firstSeen: 0, note: "", retryAt: MIN_AGE_MS - 1 };
+    expect(decideIntent(early, MIN_AGE_MS - 1).action).toBe("wait");
+    expect(decideIntent(early, MIN_AGE_MS).action).toBe("go");
+  });
+});
