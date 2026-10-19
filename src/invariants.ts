@@ -36,6 +36,7 @@ import type { League, NflState, Roster } from "./sleeper/types.ts";
 import { buildRosterView, type RosterView } from "./analysis/roster-view.ts";
 import { rosterLegal } from "./sleeper/rules.ts";
 import { currentReserveHold, currentReserveIntents } from "./act/reserve-reconcile.ts";
+import { lastGuardLook, type GuardLook } from "./act/lineup-guard.ts";
 import { fmtZoned } from "./act/reserve-hold.ts";
 import { MAX_AGE_MS as INTENT_MAX_AGE_MS } from "./act/drop-intent.ts";
 import { sleeper } from "./sleeper/client.ts";
@@ -114,12 +115,25 @@ export interface InvariantInput {
    *  2026-10-15 the invariant paged on Smith eight minutes into the stash
    *  intent for Hurts because it only knew the hold. */
   reserveIntents?: { playerId: string; firstSeen: number }[];
+  /** The roster the lineup guard last planned over (lineup-guard.ts
+   *  lastGuardLook). A bench man who was not active at that look, a
+   *  starter who was not on reserve at it, or a slot that was filled at it
+   *  (its starter dropped since) changed after the guard read the roster:
+   *  the slot is the guard's next write (the next poll), not a fault. 2026-10-16 12:23: the stream add of Fairbairn landed between
+   *  the guard's read and the empty-slot check in the same poll, and the
+   *  page woke an incident session for a hole the guard filled 91 s later.
+   *  A look older than GUARD_LOOK_MAX_AGE_MS is no look: the guard is not
+   *  running, so the hole is nobody's and the page stands. */
+  guardLook?: GuardLook | null;
   alertsLastHour: number;
   now?: number;
   jobs?: Job[];
 }
 
 export const ALERT_STORM_LIMIT = 10;
+/** A guard look older than this is treated as none: ten minutes is six
+ *  polls, far more than the guard needs to write after a roster change. */
+export const GUARD_LOOK_MAX_AGE_MS = 10 * 60_000;
 export const DEDUPE_MS = 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -161,12 +175,22 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
     out.push({ name: "roster-legal", ok, action: "alert", detail: ok ? `${input.view.active.length}/${capacity} active, ${notes || "IR clean"}` : [...bits, notes].filter(Boolean).join("; ") });
   }
 
+  // The lineup guard's last look, if recent. A roster change it has not
+  // seen yet is its next write, not a fault (see InvariantInput.guardLook).
+  const look = input.guardLook && now - input.guardLook.at <= GUARD_LOOK_MAX_AGE_MS ? input.guardLook : null;
+  const lookNote = look ? `since the lineup guard's look at ${fmtZoned(look.at)}; its next pass writes the lineup` : "";
+
   // starter-on-reserve
   {
     const bad = starters.filter((s) => input.view.reserveIds.has(s));
+    // A starter moved to reserve after the guard's look (a stash in the
+    // same poll) is benched by its next write.
+    const fresh = look ? bad.filter((id) => !look.reserveIds.includes(id)) : [];
+    const real = bad.filter((id) => !fresh.includes(id));
     out.push({
-      name: "starter-on-reserve", ok: bad.length === 0, action: "alert",
-      detail: bad.length ? `starting from IR: ${bad.map((id) => nameOf(input.view, id)).join(", ")}` : "no IR player in the starters",
+      name: "starter-on-reserve", ok: real.length === 0, action: "alert",
+      detail: real.length ? `starting from IR: ${real.map((id) => nameOf(input.view, id)).join(", ")}`
+        : fresh.length ? `${fresh.map((id) => nameOf(input.view, id)).join(", ")} moved to reserve ${lookNote}` : "no IR player in the starters",
     });
   }
 
@@ -179,18 +203,27 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
     const week = input.state.week;
     const bench = input.view.active.filter((e) => !starterSet.has(e.playerId) && startable(e, week));
     const holes: string[] = [];
+    const pending: string[] = [];
     if (ours) {
       slots.forEach((slot, i) => {
         const cur = starters[i] ?? "0";
         if (cur !== "0") return;
         const elig = SLOT_ELIGIBILITY[slot];
         const fit = bench.filter((e) => elig?.has(e.position));
-        if (fit.length) holes.push(`${slot} empty with ${fit.map((e) => e.name).join("/")} on the bench`);
+        if (!fit.length) return;
+        // The slot is the guard's next write when it was filled at the
+        // guard's look (its starter was dropped since, for a newcomer or
+        // a streamer) or every man who could fill it arrived after the
+        // look. A hole the guard saw, with a filler it saw, is real.
+        if (look && (look.starters[i] ?? "0") !== "0") { pending.push(`${slot} emptied ${lookNote}`); return; }
+        const seen = look ? fit.filter((e) => look.activeIds.includes(e.playerId)) : fit;
+        if (seen.length) holes.push(`${slot} empty with ${seen.map((e) => e.name).join("/")} on the bench`);
+        else pending.push(`${slot} empty, ${fit.map((e) => e.name).join("/")} active ${lookNote}`);
       });
     }
     out.push({
       name: "empty-slot", ok: holes.length === 0, action: "alert",
-      detail: holes.length ? holes.join("; ") : ours ? "every slot that can be filled is filled" : "our roster not in the live read",
+      detail: holes.length ? holes.join("; ") : pending.length ? pending.join("; ") : ours ? "every slot that can be filled is filled" : "our roster not in the live read",
     });
   }
 
@@ -386,6 +419,7 @@ export async function collectInvariantInput(db: Database, gql: Gql, leg: number,
     dropFreeze: breakerState(),
     reserveHold: currentReserveHold(now),
     reserveIntents: currentReserveIntents(now),
+    guardLook: lastGuardLook(),
     alertsLastHour: alertsLastHour(db, now),
     now,
   };

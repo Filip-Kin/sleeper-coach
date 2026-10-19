@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { evaluateInvariants, runInvariants, alertDue, lastInvariantAlert, markInvariantAlert, type InvariantInput, type InvariantCheck } from "./invariants.ts";
+import { evaluateInvariants, runInvariants, alertDue, lastInvariantAlert, markInvariantAlert, GUARD_LOOK_MAX_AGE_MS, type InvariantInput, type InvariantCheck } from "./invariants.ts";
 import { breakerState } from "./killswitch.ts";
 import { buildRosterView } from "./analysis/roster-view.ts";
 import type { League, Roster } from "./sleeper/types.ts";
@@ -355,5 +355,63 @@ describe("runInvariants: dedupe and freeze", () => {
     const r4 = await runInvariants(input({ db }), deps);
     expect(r4.ok).toBe(true);
     expect(r4.alerted).toEqual([]);
+  });
+});
+
+describe("a roster change the lineup guard has not seen is its next write, not a page (2026-10-16 12:23)", () => {
+  // Replay: 12:23:06 the stream add landed Fairbairn (K) on the bench with
+  // Bates gone and K on the leg "0"; 12:23:07 the invariant pass read that
+  // roster and paged; 12:24:38 the guard's next pass filled K. The guard's
+  // read in the 12:23 poll predated the add.
+  const K_HOLE = ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "0", "p9"]; // p8 is the K on the bench
+  const activeExcept = (r: Roster, ...ids: string[]) => (r.players ?? []).filter((id) => !(r.reserve ?? []).includes(id) && !ids.includes(id));
+  test("the only filler arrived after the guard's look: ok, with the reason", () => {
+    const r = roster();
+    r.starters = K_HOLE;
+    const look = { at: NOW - 2000, activeIds: activeExcept(r, "p8"), reserveIds: [], starters: K_HOLE };
+    const c = byName(evaluateInvariants(input({ guardLook: look }, r)))["empty-slot"]!;
+    expect(c.ok).toBe(true);
+    expect(c.detail).toContain("K empty, P p8 active since the lineup guard's look");
+  });
+  test("a filler the guard saw and left on the bench is a real hole", () => {
+    const r = roster();
+    r.starters = K_HOLE;
+    const look = { at: NOW - 2000, activeIds: activeExcept(r), reserveIds: [], starters: K_HOLE };
+    expect(byName(evaluateInvariants(input({ guardLook: look }, r)))["empty-slot"]!.ok).toBe(false);
+  });
+  test("a slot filled at the look whose starter was dropped since is the guard's next write", () => {
+    // Reviewer case: "drop the starting K for a newcomer" with the spare K
+    // already on the bench at the look: the filler was seen, the hole was not.
+    const r = roster();
+    r.starters = K_HOLE;
+    const look = { at: NOW - 2000, activeIds: activeExcept(r), reserveIds: [], starters: ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p15", "p9"] };
+    const c = byName(evaluateInvariants(input({ guardLook: look }, r)))["empty-slot"]!;
+    expect(c.ok).toBe(true);
+    expect(c.detail).toContain("K emptied since the lineup guard's look");
+  });
+  test("a look older than ten minutes is no look: the page stands", () => {
+    const r = roster();
+    r.starters = K_HOLE;
+    const look = { at: NOW - GUARD_LOOK_MAX_AGE_MS - 1, activeIds: activeExcept(r, "p8"), reserveIds: [], starters: K_HOLE };
+    expect(byName(evaluateInvariants(input({ guardLook: look }, r)))["empty-slot"]!.ok).toBe(false);
+    expect(byName(evaluateInvariants(input({ guardLook: null }, r)))["empty-slot"]!.ok).toBe(false);
+  });
+  test("two fillers, one seen: the hole is real and names the seen one", () => {
+    const r = roster();
+    r.starters = ["0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"]; // QB hole; p0 and p13 are QBs
+    const look = { at: NOW - 2000, activeIds: activeExcept(r, "p13"), reserveIds: [], starters: r.starters };
+    const c = byName(evaluateInvariants(input({ guardLook: look }, r)))["empty-slot"]!;
+    expect(c.ok).toBe(false);
+    expect(c.detail).toBe("QB empty with P p0 on the bench");
+  });
+  test("a starter stashed to reserve after the guard's look is its next write; one it saw is a page", () => {
+    const r = roster({ n: 17, reserve: ["p16"], injuries: { p16: "Out" } });
+    r.starters = ["p16", ...r.starters!.slice(1)];
+    const unseen = { at: NOW - 2000, activeIds: activeExcept(r), reserveIds: [], starters: r.starters! };
+    const seen = { at: NOW - 2000, activeIds: activeExcept(r), reserveIds: ["p16"], starters: r.starters! };
+    const a = byName(evaluateInvariants(input({ guardLook: unseen }, r)))["starter-on-reserve"]!;
+    expect(a.ok).toBe(true);
+    expect(a.detail).toContain("P p16 moved to reserve since the lineup guard's look");
+    expect(byName(evaluateInvariants(input({ guardLook: seen }, r)))["starter-on-reserve"]!.ok).toBe(false);
   });
 });

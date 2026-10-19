@@ -374,6 +374,16 @@ const pinned = new Map<string, number>();
 let emptyProjectionLogged = 0;
 let holdLogged = 0;
 
+/** The roster the guard last planned over: who was active and who was on
+ *  reserve when it looked, and the starters on the leg. The invariants read
+ *  this so a roster change after the look (a stream add, an activation, a
+ *  starter dropped for a newcomer) is the guard's next write and not a
+ *  page: on 2026-10-16 12:23 the add of Fairbairn landed one second before
+ *  the empty-slot check and 91 s before the guard filled K. */
+export interface GuardLook { at: number; activeIds: string[]; reserveIds: string[]; starters: string[] }
+let guardLook: GuardLook | null = null;
+export function lastGuardLook(): GuardLook | null { return guardLook; }
+
 export interface GuardDeps {
   /** Can a write go out right now? The daemon answers from its token check. */
   tokenReady: () => Promise<boolean>;
@@ -387,6 +397,7 @@ export interface GuardDeps {
 export function resetGuardStateForTests(): void {
   if (process.env.NODE_ENV !== "test") throw new Error("resetGuardStateForTests is for tests only");
   pinned.clear();
+  guardLook = null;
   lastHeldNotice = 0;
   emptyProjectionLogged = 0;
   holdLogged = 0;
@@ -437,6 +448,7 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
   // matchupLegStarters) and did on 2026-09-23.
   const onSite = await currentStarters(tokenGql(), week, mine.starters ?? []);
   const plan = planLineup(onSite, candidates, slots, locked, SWAP_MARGIN, { kickoffs, now, questionable: liveQuestionable(mine) });
+  guardLook = { at: now, activeIds: [...view.activeIds], reserveIds: [...view.reserveIds], starters: [...onSite] };
   if (plan.hold) {
     if (now - holdLogged > NOTICE_MS) {
       holdLogged = now;
