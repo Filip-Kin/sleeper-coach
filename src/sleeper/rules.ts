@@ -124,10 +124,26 @@ export function lockedAtKickoff(team: string | null | undefined, kickoffs: Map<s
 export function playerOnWaivers(args: {
   droppedAt?: number | null; teamKickoff?: number | null; now: number; lastWaiverRunAt: number; clearDays: number;
 }): boolean {
-  const { droppedAt, teamKickoff, now, lastWaiverRunAt, clearDays } = args;
-  if (typeof droppedAt === "number" && now - droppedAt < clearDays * 86_400_000) return true;
-  if (typeof teamKickoff === "number" && teamKickoff <= now && teamKickoff > lastWaiverRunAt) return true;
-  return false;
+  return waiverState(args) !== "free";
+}
+/** free:    addable now at no cost.
+ *  waivers: a claim lands at the next processing (dropped inside clearDays,
+ *           or his team has kicked off since the last run).
+ *  locked:  neither addable nor claimable until the weekly clear. A team on
+ *           bye has no kickoff, and Sleeper holds its unrostered men from the
+ *           week's first kickoff: a free add is refused ("on waivers",
+ *           Butker, Tue 2026-10-13) and so is a claim ("The time to claim
+ *           this player has passed", Reichard, Fri 2026-10-16 through Sun
+ *           10-18, six times). On Wednesday after the clear he is a free
+ *           agent. A dropped man is claimable whatever his team is doing. */
+export type WaiverState = "free" | "waivers" | "locked";
+export function waiverState(args: {
+  droppedAt?: number | null; teamKickoff?: number | null; teamOnBye?: boolean; now: number; lastWaiverRunAt: number; clearDays: number;
+}): WaiverState {
+  const { droppedAt, teamKickoff, teamOnBye, now, lastWaiverRunAt, clearDays } = args;
+  if (typeof droppedAt === "number" && now - droppedAt < clearDays * 86_400_000) return "waivers";
+  if (typeof teamKickoff === "number" && teamKickoff <= now && teamKickoff > lastWaiverRunAt) return teamOnBye ? "locked" : "waivers";
+  return "free";
 }
 // #endregion
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { lastWaiverRunAt, droppedAtFromTransactions, onWaiversNow, lastKickoffByTeam, waiverInstantsByTeam, recentTeamKickoffs, type ScheduledGame } from "./waiver-status.ts";
+import { lastWaiverRunAt, nextWaiverRunAt, droppedAtFromTransactions, onWaiversNow, waiverStateNow, lastKickoffByTeam, waiverInstantsByTeam, byeTeamsNow, recentTeamKickoffs, recentWaiverInstants, type ScheduledGame } from "./waiver-status.ts";
 import { zonedInstant } from "../schedule.ts";
 import { planStream, type StreamPoolPlayer } from "../analysis/streaming.ts";
 
@@ -214,7 +214,7 @@ describe("the waiver run is wired to the two-week schedule", () => {
   // on the source, as chokepoint.test.ts does for the write paths.
   const src = readFileSync(new URL("./waiver-run.ts", import.meta.url), "utf8");
   test("kickoffs come from recentTeamKickoffs on the NFL week as it is now", () => {
-    expect(src).toContain("recentTeamKickoffs(state.week || week, nowMs, (w) => weekSchedule(season, w))");
+    expect(src).toContain("recentWaiverInstants(state.week || week, nowMs, (w) => weekSchedule(season, w))");
     expect(src).not.toContain("cachedTeamKickoffs");
   });
   test("a failed read of the drops is not swallowed into 'nobody was dropped'", () => {
@@ -248,5 +248,76 @@ describe("edges of the two-week rule", () => {
     const asked: number[] = [];
     await recentTeamKickoffs(20, ET(2027, 1, 19, 10), async (w) => { asked.push(w); return [game("DEN", "KC", ET(2027, 1, 10, 13))]; });
     expect(asked).toEqual([18, 17]);
+  });
+});
+
+describe("a bye team's man is locked: neither addable nor claimable until the clear (Reichard, 2026-10-16)", () => {
+  // The slates above: MIN plays Sunday of week 5 and has no game in week 6
+  // (its bye); KC has no game in week 5 and plays Sunday 16:25 of week 6.
+  const WEEK5: ScheduledGame[] = [
+    { away: "TB", home: "DAL", startTime: ET(2026, 10, 8, 20, 15) },
+    { away: "MIN", home: "NO", startTime: ET(2026, 10, 11, 13) },
+    { away: "DET", home: "JAX", startTime: ET(2026, 10, 11, 16, 25) },
+    { away: "BUF", home: "LAR", startTime: ET(2026, 10, 12, 20, 15) },
+  ];
+  const WEEK6: ScheduledGame[] = [
+    { away: "SEA", home: "DEN", startTime: ET(2026, 10, 15, 20, 15) },
+    { away: "NYG", home: "BUF", startTime: ET(2026, 10, 18, 13) },
+    { away: "LAC", home: "KC", startTime: ET(2026, 10, 18, 16, 25) },
+    { away: "TB", home: "LAR", startTime: ET(2026, 10, 19, 20, 15) },
+  ];
+  const slate = async (w: number): Promise<ScheduledGame[]> => (w === 5 ? WEEK5 : w === 6 ? WEEK6 : []);
+  const state = async (team: string, now: number, extra: { dropped?: number; lockedUntil?: number } = {}) => {
+    const { kickoffs, onBye } = await recentWaiverInstants(6, now, slate);
+    return waiverStateNow({ playerId: "p", team, droppedAt: new Map(extra.dropped ? [["p", extra.dropped]] : []), kickoffs, onBye, now, clearDays: 2, lockedUntil: extra.lockedUntil ?? null });
+  };
+  const FRI = ET(2026, 10, 16, 14, 2); // the first refused claim
+  const SUN = ET(2026, 10, 18, 12, 26); // the sixth
+  const WED = ET(2026, 10, 21, 9); // after the clear
+
+  test("byeTeamsNow: the latest slate that has kicked off decides", () => {
+    expect([...byeTeamsNow([WEEK6, WEEK5], ET(2026, 10, 13, 15, 54))].sort()).toEqual(["DEN", "KC", "LAC", "NYG", "SEA"]); // Tuesday: week 5's byes
+    expect([...byeTeamsNow([WEEK6, WEEK5], FRI)].sort()).toEqual(["DAL", "DET", "JAX", "MIN", "NO"]); // Friday: week 6's
+    expect(byeTeamsNow([WEEK6, WEEK5], ET(2026, 10, 15, 19)).has("MIN")).toBe(false); // before TNF week 6 has not kicked off
+  });
+  test("Reichard-shaped: MIN on bye in week 6 is locked from Thursday's kickoff through Sunday, free on Wednesday", async () => {
+    expect(await state("MIN", FRI)).toBe("locked");
+    expect(await state("MIN", SUN)).toBe("locked");
+    expect(await state("MIN", WED)).toBe("free");
+    expect(await state("MIN", ET(2026, 10, 15, 19))).toBe("free"); // Thursday before kickoff
+  });
+  test("a team that played is on waivers (claimable), one that has not kicked off is free", async () => {
+    expect(await state("SEA", FRI)).toBe("waivers");
+    expect(await state("KC", FRI)).toBe("free");
+    expect(await state("KC", ET(2026, 10, 18, 17))).toBe("waivers"); // after his 16:25 kickoff
+  });
+  test("a dropped man is claimable whatever his team is doing; the boolean view is unchanged", async () => {
+    expect(await state("MIN", FRI, { dropped: FRI - 3_600_000 })).toBe("waivers");
+    const { kickoffs } = await recentWaiverInstants(6, FRI, slate);
+    expect(onWaiversNow({ playerId: "p", team: "MIN", droppedAt: new Map(), kickoffs, now: FRI, clearDays: 2 })).toBe(true);
+  });
+  test("Sleeper's own refusal locks him until the clear whatever the schedule says", async () => {
+    expect(await state("KC", FRI, { lockedUntil: nextWaiverRunAt(FRI) })).toBe("locked");
+    expect(await state("KC", WED, { lockedUntil: nextWaiverRunAt(FRI) })).toBe("free");
+  });
+  test("nextWaiverRunAt is the Wednesday 03:00 ET after now", () => {
+    expect(nextWaiverRunAt(FRI)).toBe(ET(2026, 10, 21, 3));
+    expect(nextWaiverRunAt(ET(2026, 10, 13, 15, 54))).toBe(ET(2026, 10, 14, 3));
+    expect(nextWaiverRunAt(ET(2026, 10, 14, 4))).toBe(ET(2026, 10, 21, 3));
+  });
+  test("replay on the real schedules (incidents/schedule-2026-week6.json, kickoffs-2026-week5.json): CIN, DET, MIA, MIN locked on Friday", () => {
+    const week6 = (JSON.parse(readFileSync(new URL("../analysis/incidents/schedule-2026-week6.json", import.meta.url), "utf8")) as { games: ScheduledGame[] }).games;
+    const week5 = (JSON.parse(readFileSync(new URL("../analysis/incidents/kickoffs-2026-week5.json", import.meta.url), "utf8")) as { games: { startTime: number; label: string }[] }).games
+      .map((g) => ({ away: g.label.split("@")[0]!, home: g.label.split("@")[1]!, startTime: g.startTime }));
+    const slates = [week6, week5];
+    const byes = byeTeamsNow(slates, FRI);
+    expect([...byes].sort()).toEqual(["CIN", "DET", "MIA", "MIN"]);
+    const kickoffs = waiverInstantsByTeam(slates, FRI);
+    const at = (team: string, now: number) => waiverStateNow({ playerId: "p", team, droppedAt: new Map(), kickoffs: waiverInstantsByTeam(slates, now), onBye: byeTeamsNow(slates, now), now, clearDays: 2 });
+    expect(kickoffs.get("MIN")).toBe(ET(2026, 10, 15, 20, 15));
+    expect(at("MIN", FRI)).toBe("locked");
+    expect(at("MIN", SUN)).toBe("locked");
+    expect(at("MIN", WED)).toBe("free");
+    expect(at("HOU", FRI)).toBe("free"); // Fairbairn's team plays Sunday
   });
 });

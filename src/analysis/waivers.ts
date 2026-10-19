@@ -105,6 +105,11 @@ export const DEFAULT_WAIVERS: WaiverConfig = {
 // costless free-agent add.
 export interface AvailablePlayer extends RailPlayer {
   onWaivers: boolean;
+  /** Neither addable nor claimable until the weekly clear (sleeper/rules.ts
+   *  waiverState "locked": his team's bye, or Sleeper refused the claim as
+   *  past its time). The plan names him as a wait and writes nothing; the
+   *  Wednesday free-agent run plans him afresh as a free agent. */
+  locked?: boolean;
   rosteredPct?: number; // Sleeper rostered %, a scarcity signal for ranking
 }
 
@@ -636,8 +641,14 @@ export function planOne(
   crowdedByes: Set<number> = new Set(),
 ): WaiverMove {
   const base = { add: incoming.name, position: incoming.position, onWaivers: incoming.onWaivers };
-  const skip = (reason: string): WaiverMove =>
-    ({ ...base, kind: "skip", drop: null, dropPath: "none", irStash: null, rental: false, weekGainPts: 0, gainPts: 0, benchGainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, depthPts: 0, score: 0, reason });
+  const note = (kind: "skip" | "wait", reason: string): WaiverMove =>
+    ({ ...base, kind, drop: null, dropPath: "none", irStash: null, rental: false, weekGainPts: 0, gainPts: 0, benchGainPts: 0, startsForUs: false, priorityWorthy: false, byeCredit: 0, depthPts: 0, score: 0, reason });
+  const skip = (reason: string): WaiverMove => note("skip", reason);
+  // Locked: Sleeper takes neither an add nor a claim for him until the
+  // weekly clear (a bye team's man from the week's first kickoff; Reichard,
+  // 2026-10-16, six refused claims). Nothing to file; the Wednesday run
+  // sees him as a free agent and plans him on his merits then.
+  if (incoming.locked) return note("wait", "neither addable nor claimable until Wednesday's waiver clear (his team's bye week, or Sleeper refused the claim as past its time); the Wednesday free-agent run plans him afresh");
 
   const paths = evalPaths(incoming, state, cfg);
   if (!paths.length) return skip("no legal path: nothing on the roster may be dropped and no slot is open");

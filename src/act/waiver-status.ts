@@ -21,7 +21,7 @@
 // fallback only exists in a combined run. recentTeamKickoffs reads both
 // weeks from the schedule itself.
 
-import { playerOnWaivers, legsToScan } from "../sleeper/rules.ts";
+import { playerOnWaivers, waiverState, legsToScan, type WaiverState } from "../sleeper/rules.ts";
 import { lastOccurrence, type Job } from "../schedule.ts";
 
 /** Sleeper processes this league's waivers Wednesday around 03:00 ET. The most
@@ -29,6 +29,11 @@ import { lastOccurrence, type Job } from "../schedule.ts";
 const WAIVER_RUN: Job = { name: "waiver-clear", dow: 3, hour: 3, minute: 0, maxLateMs: 0, why: "Sleeper's weekly waiver processing" };
 export function lastWaiverRunAt(now: number, zone = "America/New_York"): number {
   return lastOccurrence(WAIVER_RUN, now, zone) ?? now - 7 * 86_400_000;
+}
+/** The next processing after `now`: when a locked man is a free agent again. */
+export function nextWaiverRunAt(now: number, zone = "America/New_York"): number {
+  const next = lastOccurrence(WAIVER_RUN, now + 7 * 86_400_000, zone) ?? now + 7 * 86_400_000;
+  return next > now ? next : next + 7 * 86_400_000;
 }
 
 /** player_id -> when he was last dropped, from the REST transactions of the
@@ -86,13 +91,20 @@ export const LAST_SCHEDULE_WEEK = 18;
 export async function recentTeamKickoffs(
   week: number, now: number, fetchWeek: (week: number) => Promise<ScheduledGame[]>,
 ): Promise<Map<string, number>> {
+  return (await recentWaiverInstants(week, now, fetchWeek)).kickoffs;
+}
+/** The kickoff instants and, beside them, the teams whose instant is a bye
+ *  (byeTeamsNow): their men are locked, not claimable, until the clear. */
+export async function recentWaiverInstants(
+  week: number, now: number, fetchWeek: (week: number) => Promise<ScheduledGame[]>,
+): Promise<{ kickoffs: Map<string, number>; onBye: Set<string> }> {
   const slates: ScheduledGame[][] = [];
   for (const w of legsToScan(Math.min(week, LAST_SCHEDULE_WEEK))) {
     const slate = await fetchWeek(w);
     if (!slate.length) throw new Error(`no games in the schedule for week ${w}; waiver status unknown`);
     slates.push(slate);
   }
-  return waiverInstantsByTeam(slates, now);
+  return { kickoffs: waiverInstantsByTeam(slates, now), onBye: byeTeamsNow(slates, now) };
 }
 
 /** Team -> the latest instant its unrostered players went on waivers, at or
@@ -109,9 +121,11 @@ export async function recentTeamKickoffs(
  *  the exact instant inside the bye week it starts is not documented and
  *  has only been seen from the Tuesday after, so the earliest candidate,
  *  the week's first kickoff, is taken: the worst a too-early "on waivers"
- *  costs is a free add of a bye-week player delayed to Wednesday (a claim is
- *  filed on Tuesday only, when he is on waivers either way), while a
- *  too-late one is this incident again.
+ *  costs is a free add of a bye-week player delayed to Wednesday, while a
+ *  too-late one is this incident again. And a bye team's man is not a
+ *  claim either: Sleeper refused one as past its time six times over
+ *  2026-10-16..18 (Reichard, MIN). He is LOCKED (rules.ts waiverState) until
+ *  the clear, Tuesday's claim run included; byeTeamsNow names the teams.
  *
  *  The set of teams is the union over the slates: every team plays in at
  *  least one of two consecutive weeks (byes are never consecutive), so a team
@@ -138,6 +152,32 @@ export function waiverInstantsByTeam(slates: ScheduledGame[][], now: number): Ma
   return out;
 }
 
+/** The teams on bye in the NFL week that has kicked off most recently: those
+ *  in the slates' union with no game in the latest slate whose first kickoff
+ *  is at or before `now`. Their unrostered men are locked (rules.ts
+ *  waiverState) from that kickoff until the clear; on a Tuesday the week
+ *  that has kicked off is last week's, so last week's byes are the locked
+ *  ones (Butker, 2026-10-13). Pure. */
+export function byeTeamsNow(slates: ScheduledGame[][], now: number): Set<string> {
+  const teams = new Set<string>();
+  for (const slate of slates) for (const g of slate) for (const team of [g.away, g.home]) if (team) teams.add(team);
+  let latest: { first: number; playing: Set<string> } | null = null;
+  for (const slate of slates) {
+    const playing = new Set<string>();
+    let first = Infinity;
+    for (const g of slate) {
+      for (const team of [g.away, g.home]) if (team) playing.add(team);
+      const t = Number(g.startTime);
+      if (Number.isFinite(t) && t > 0 && t < first) first = t;
+    }
+    if (!Number.isFinite(first) || first > now) continue;
+    if (!latest || first > latest.first) latest = { first, playing };
+  }
+  const out = new Set<string>();
+  if (latest) for (const team of teams) if (!latest.playing.has(team)) out.add(team);
+  return out;
+}
+
 export function onWaiversNow(args: {
   playerId: string; team: string | null | undefined;
   droppedAt: Map<string, number>; kickoffs: Map<string, number>; now: number; clearDays: number;
@@ -146,6 +186,25 @@ export function onWaiversNow(args: {
   return playerOnWaivers({
     droppedAt: droppedAt.get(playerId) ?? null,
     teamKickoff: team ? kickoffs.get(team) ?? null : null,
+    now,
+    lastWaiverRunAt: lastWaiverRunAt(now),
+    clearDays,
+  });
+}
+/** This player's state now (rules.ts waiverState), with Sleeper's own
+ *  answer on top: a claim it refused as past its time (league/claim-lock.ts)
+ *  locks him until the clear whatever the schedule says. */
+export function waiverStateNow(args: {
+  playerId: string; team: string | null | undefined;
+  droppedAt: Map<string, number>; kickoffs: Map<string, number>; onBye: Set<string>; now: number; clearDays: number;
+  lockedUntil?: number | null;
+}): WaiverState {
+  const { playerId, team, droppedAt, kickoffs, onBye, now, clearDays, lockedUntil } = args;
+  if (typeof lockedUntil === "number" && lockedUntil > now) return "locked";
+  return waiverState({
+    droppedAt: droppedAt.get(playerId) ?? null,
+    teamKickoff: team ? kickoffs.get(team) ?? null : null,
+    teamOnBye: !!team && onBye.has(team),
     now,
     lastWaiverRunAt: lastWaiverRunAt(now),
     clearDays,

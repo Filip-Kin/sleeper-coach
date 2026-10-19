@@ -106,6 +106,9 @@ export const SWAP_POSITIONS: ReadonlySet<string> = new Set(["K", "DEF"]);
 export interface StreamPoolPlayer extends StreamCandidate {
   playerId: string;
   onWaivers: boolean;
+  /** Neither addable nor claimable until the clear (waivers.ts
+   *  AvailablePlayer.locked): not a streamer this run. */
+  locked?: boolean;
   value: number;
 }
 
@@ -165,7 +168,7 @@ export function planStream(args: {
   const kept = new Set((args.kept ?? leg).map(lower));
   const out = (how: StreamHow, add: StreamPoolPlayer | null, drop: string | null, reason: string): StreamDecision =>
     ({ need, how, add: add?.name ?? null, drop, onWaivers: add?.onWaivers ?? false, points: add?.weekPoints ?? 0, reason });
-  const plays = pool.filter((p) => p.position === need.position && p.bye !== need.week && p.weekPoints > 0);
+  const plays = pool.filter((p) => p.position === need.position && p.bye !== need.week && p.weekPoints > 0 && !p.locked);
   // Best for the need week: the one-week fill (pickStreamer's order).
   const byWeek = plays.slice().sort((a, b) => b.weekPoints - a.weekPoints);
   const best = byWeek[0];

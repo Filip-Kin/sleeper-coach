@@ -47,7 +47,8 @@ import { sendAlert } from "../alert.ts";
 import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE, reserveWritable, staleReserve } from "../sleeper/rules.ts";
 import { overlayRosterStatus } from "./lineup-guard.ts";
 import { pendingClaimPlayers, withoutPendingAdds, railsWithPendingDrops } from "./pending-claims.ts";
-import { droppedAtFromTransactions, onWaiversNow, recentTeamKickoffs } from "./waiver-status.ts";
+import { droppedAtFromTransactions, waiverStateNow, recentWaiverInstants, nextWaiverRunAt } from "./waiver-status.ts";
+import { claimLockedUntil, lockClaim, CLAIM_LOCKED_RE } from "../league/claim-lock.ts";
 import { fileClaim, moveCost } from "./claim-exec.ts";
 import { weekGames } from "../blog/auto.ts";
 
@@ -221,9 +222,13 @@ async function main(): Promise<void> {
   // schedule (waiver-status.ts): on a Tuesday it is last week's games that
   // hold a player on waivers. Never the --week planning override, and not
   // the pick'em cache, which knows one week.
-  const kickoffs = await recentTeamKickoffs(state.week || week, nowMs, (w) => weekSchedule(season, w));
-  const isOnWaivers = (id: string, team: string | null | undefined): boolean =>
-    onWaiversNow({ playerId: id, team, droppedAt, kickoffs, now: nowMs, clearDays });
+  const { kickoffs, onBye } = await recentWaiverInstants(state.week || week, nowMs, (w) => weekSchedule(season, w));
+  // free, waivers (a claim), or locked (neither, until the clear: a bye
+  // team's man, or one Sleeper refused as past his claim time).
+  const stateOf = (id: string, team: string | null | undefined) =>
+    waiverStateNow({ playerId: id, team, droppedAt, kickoffs, onBye, now: nowMs, clearDays, lockedUntil: claimLockedUntil(id, nowMs) });
+  const isOnWaivers = (id: string, team: string | null | undefined): boolean => stateOf(id, team) !== "free";
+  const isLocked = (id: string, team: string | null | undefined): boolean => stateOf(id, team) === "locked";
 
   // Name -> player_id, for both the available pool and our own roster. The
   // analysis reasons in names, but every write needs an id: the GraphQL roster
@@ -234,6 +239,7 @@ async function main(): Promise<void> {
   const available: AvailablePlayer[] = availableRos.map((p) => ({
     ...toRail(p),
     onWaivers: isOnWaivers(p.playerId, p.team),
+    locked: isLocked(p.playerId, p.team),
     bye: byeWeek(p.team) ?? undefined, // so a candidate on a crowded bye is debited
   }));
 
@@ -375,7 +381,7 @@ async function main(): Promise<void> {
     const table = byPlayerId(await loadWeekProjections(season, need.week, league.scoring_settings).catch(() => []));
     const pool: StreamPoolPlayer[] = streamBase
       .filter((p) => p.position === need.position)
-      .map((p) => ({ ...p, weekPoints: table.get(p.playerId)?.points ?? 0, onWaivers: isOnWaivers(p.playerId, p.team) }));
+      .map((p) => ({ ...p, weekPoints: table.get(p.playerId)?.points ?? 0, onWaivers: isOnWaivers(p.playerId, p.team), locked: isLocked(p.playerId, p.team) }));
     // Kicker and defense: the covered player is swapped in his bye week
     // (streaming.ts planStream). A scarce position: the cheapest legal cut,
     // never the player being covered for (he returns) nor a kept starter (a
@@ -556,6 +562,20 @@ async function main(): Promise<void> {
     return retryAt;
   };
 
+  // Sleeper's "The time to claim this player has passed": he is locked
+  // until the clear, like a bye team's man (rules.ts waiverState). Its
+  // answer, not a failed job: no alert, exit 0, and the lock keeps every
+  // run until Wednesday (react, confirm, Tuesday's submit) from filing him
+  // again. Reichard, 2026-10-16: six refusals in three days.
+  const claimLocked = (kind: string, add: string, msg: string): boolean => {
+    if (!CLAIM_LOCKED_RE.test(msg)) return false;
+    const until = nextWaiverRunAt(nowMs2);
+    lockClaim(resolve(add), until, msg, nowMs2);
+    console.log(`  ${kind} ${add}: Sleeper refused the claim as past its time; locked until the clear at ${new Date(until).toISOString()}`);
+    logEvent("coach", "waiver-claim-locked", `${kind} ${add}: Sleeper refused the claim as past its time; he is neither addable nor claimable until the clear at ${new Date(until).toISOString()}. The Wednesday run plans him afresh.`, { week, leagueId, kind, add, until, error: msg });
+    return true;
+  };
+
   // Streaming first: it covers a slot that would otherwise score zero, which is
   // worth more than any marginal ROS upgrade. A stream claim takes the single
   // per-cycle claim; a stream free-add costs no priority.
@@ -587,6 +607,8 @@ async function main(): Promise<void> {
       if (err instanceof DropRefused) {
         const retryAt = deferred("stream", stream.add, stream.drop, err);
         logEvent("coach", "waiver-stream-deferred", `Stream ${stream.add} deferred by the breaker: ${err.verdict.reason}`, { week, add: stream.add, drop: stream.drop, retryAt });
+      } else if (claimLocked("stream", stream.add, msg)) {
+        // Locked until the clear; the next run streams the next free body or waits.
       } else {
         logEvent("coach", "waiver-stream-failed", `Stream ${stream.add} failed: ${msg}`, { week, add: stream.add });
         if (live) await sendAlert("Stream pickup failed", `Week ${stream.forWeek}: ${stream.add} — ${msg}`);
@@ -764,6 +786,12 @@ async function main(): Promise<void> {
         logEvent("coach", "waiver-add-deferred", `Free-agent add ${m.add} deferred by the breaker: ${err.verdict.reason}`, { week, leagueId, add: m.add, drop: m.drop, retryAt });
         break;
       }
+      if (claimLocked("add", m.add, msg)) {
+        // The on-waivers fallback filed a claim and Sleeper will not take
+        // one for him: locked until the clear, nothing more this run.
+        await undoStash(`${m.add} is locked until the waiver clear and was not added`);
+        break;
+      }
       logEvent("coach", "waiver-add-failed", `Free-agent add ${m.add} failed: ${msg}`, { week, leagueId, add: m.add });
       await undoStash(`the add of ${m.add} failed`);
       if (live) await sendAlert("Free-agent add failed", `Week ${week}: ${m.add} — ${msg}`);
@@ -811,6 +839,7 @@ async function main(): Promise<void> {
         logEvent("coach", "waiver-claim-deferred", `Waiver claim ${cur.add} deferred by the breaker: ${err.verdict.reason}`, { week, leagueId, add: cur.add, drop: cur.drop, retryAt });
         return;
       }
+      if (claimLocked("claim", cur.add, msg)) break; // fileClaim already undid any stash
       logEvent("coach", "waiver-claim-failed", `Waiver claim ${cur.add} failed: ${msg}`, { week, leagueId, add: cur.add });
       if (live) await sendAlert("Waiver claim failed", `Week ${week}: ${cur.add} — ${msg}`);
       throw err;
