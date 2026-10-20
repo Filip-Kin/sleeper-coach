@@ -128,3 +128,48 @@ describe("a skill position is scarce: it is covered by a cut, not a swap", () =>
     expect(d.how).toBe("stuck");
   });
 });
+
+// A stream for a LATER week that can only go by a claim yields the cycle's
+// single claim to this week's move (2026-10-20: the week-8 Butker claim
+// would have taken the one claim ahead of the Nix rental, for no gain). It
+// takes a free body if one plays, or waits for the free-agent run after
+// the clear; in the need week itself it claims, since an empty slot
+// outranks any upgrade.
+describe("a later week's stream claim yields to this week's claim", () => {
+  const K7: StreamNeed = { week: 7, position: "K", coveringFor: ["Jake Bates"] };
+  test("priority free, claim spoken for, every kicker on waivers: wait, not a claim", () => {
+    const d = planStream({ need: K7, week: 6, openBenchSlots: 0, pool: pool("K", 7, true), roster, mayLeave: () => true, forcedDrop: never, priorityFree: true, claimTaken: true });
+    expect(d.how).toBe("wait");
+    expect(d.add).toBeNull();
+    expect(d.reason).toContain("this week's claim");
+  });
+  test("the same with an open bench slot: the open-slot add waits too", () => {
+    const d = planStream({ need: K7, week: 6, openBenchSlots: 1, pool: pool("K", 7, true), roster, mayLeave: () => true, forcedDrop: never, priorityFree: true, claimTaken: true });
+    expect(d.how).toBe("wait");
+  });
+  test("a free kicker who plays is taken over a better one on waivers", () => {
+    const all = pool("K", 7, true);
+    const free = all.filter((p) => p.bye !== 7 && p.weekPoints > 0).sort((a, b) => a.value - b.value)[0]!;
+    const mixed = all.map((p) => (p.name === free.name ? { ...p, onWaivers: false } : p));
+    const d = planStream({ need: K7, week: 6, openBenchSlots: 1, pool: mixed, roster, mayLeave: () => true, forcedDrop: never, priorityFree: true, claimTaken: true });
+    expect(d).toMatchObject({ how: "open-slot", add: free.name, onWaivers: false });
+  });
+  test("nothing else wants the claim: the later week's stream claims as before", () => {
+    const d = planStream({ need: K7, week: 6, openBenchSlots: 1, pool: pool("K", 7, true), roster, mayLeave: () => true, forcedDrop: never, priorityFree: true, claimTaken: false });
+    expect(d.how).toBe("open-slot");
+    expect(d.onWaivers).toBe(true);
+  });
+  test("in the need week the claim goes, spoken for or not", () => {
+    const d = planStream({ need: K7, week: 7, openBenchSlots: 1, pool: pool("K", 7, true), roster, mayLeave: () => true, forcedDrop: never, priorityFree: true, claimTaken: true });
+    expect(d.how).toBe("open-slot");
+    expect(d.onWaivers).toBe(true);
+  });
+  test("a scarce position's cut for a later week yields the same way", () => {
+    const need: StreamNeed = { week: 6, position: "TE", coveringFor: ["Sam LaPorta"] };
+    const thin = roster.filter((p) => p.position !== "TE" || p.name === "Sam LaPorta");
+    const d = planStream({ need, week: 5, openBenchSlots: 0, pool: pool("TE", 6, true), roster: thin, mayLeave: () => true, forcedDrop: () => "Rico Dowdle", claimTaken: true });
+    expect(d.how).toBe("wait");
+    const now = planStream({ need, week: 6, openBenchSlots: 0, pool: pool("TE", 6, true), roster: thin, mayLeave: () => true, forcedDrop: () => "Rico Dowdle", claimTaken: true });
+    expect(now.how).toBe("cut");
+  });
+});

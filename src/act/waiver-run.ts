@@ -396,11 +396,16 @@ async function main(): Promise<void> {
       streamNotes.push({ need, how: "wait", add: null, drop: null, onWaivers: false, points: 0, reason: `this week's schedule could not be read, so whether a starting ${need.position} or DEF is the spare is unknown; the swap waits for a run that has it` });
       continue;
     }
+    // The cycle's single claim is the planner's when it has one (a rental
+    // or a lineup gain for THIS week): a stream for a later week does not
+    // claim over it (streaming.ts planStream claimTaken). The claim is read
+    // from the plan, not from whether this run files claims: an adds-only
+    // run reports the wait the claim run will see.
     const d = planStream({
       need, week, openBenchSlots: rosterState.openBenchSlots, pool, roster,
       mayLeave: (n) => canDrop(n, roster, leaveRails).allowed,
       forcedDrop: () => chooseLegalForcedDrops(view, roster, 1, streamCfg, rails, [...need.coveringFor, ...kept])[0]?.name ?? null,
-      currentStarters, kept, priorityFree,
+      currentStarters, kept, priorityFree, claimTaken: !!claim,
     });
     if (!d.add || d.how === "wait" || d.how === "stuck") { streamNotes.push(d); continue; }
     stream = { add: d.add, drop: d.drop, position: need.position, forWeek: need.week, onWaivers: d.onWaivers, points: d.points, coveringFor: need.coveringFor, how: d.how };
@@ -578,7 +583,10 @@ async function main(): Promise<void> {
 
   // Streaming first: it covers a slot that would otherwise score zero, which is
   // worth more than any marginal ROS upgrade. A stream claim takes the single
-  // per-cycle claim; a stream free-add costs no priority.
+  // per-cycle claim; a stream free-add costs no priority. A stream claim for
+  // a LATER week never reaches here while the planner has a claim: planStream
+  // (claimTaken) made it a wait, so no stream intent is recorded for it and
+  // the confirm loop has nothing to fire; the claim loop below gets the claim.
   let claimUsed = false;
   // Only a run that can perform the stream may confirm it. confirmed()
   // consumes the recorded intent when it says go, so a claims-only run

@@ -147,7 +147,15 @@ export interface StreamDecision {
  *  the Jaguars, 86, on the week-6 leg over Seattle, 97, with Bates on bye;
  *  the old read swapped Bates, K2 at 98, and kept the rental, on bye the
  *  week after). `priorityFree`: we are last in the waiver order, so a claim
- *  costs nothing. */
+ *  costs nothing. `claimTaken`: the cycle's single claim is spoken for by a
+ *  this-week move (the planner's best claim, a rental or a lineup gain). A
+ *  stream for a LATER week does not claim over it: it takes a body who is
+ *  free now, or waits for the free-agent run after the clear, when every
+ *  kicker and defense is free again. In the need week itself it claims
+ *  regardless: an empty slot outranks any upgrade. (2026-10-20: the week-8
+ *  Butker claim would have been filed ahead of the week-7 Nix rental for
+ *  the same seat, marking the one claim used, for nothing: four kickers
+ *  who play week 8 were free the next morning.) */
 export function planStream(args: {
   need: StreamNeed;
   week: number;
@@ -159,6 +167,7 @@ export function planStream(args: {
   currentStarters?: string[];
   kept?: string[];
   priorityFree?: boolean;
+  claimTaken?: boolean;
 }): StreamDecision {
   const { need, week, openBenchSlots, pool, roster, mayLeave, forcedDrop } = args;
   const priorityFree = !!args.priorityFree;
@@ -168,11 +177,18 @@ export function planStream(args: {
   const kept = new Set((args.kept ?? leg).map(lower));
   const out = (how: StreamHow, add: StreamPoolPlayer | null, drop: string | null, reason: string): StreamDecision =>
     ({ need, how, add: add?.name ?? null, drop, onWaivers: add?.onWaivers ?? false, points: add?.weekPoints ?? 0, reason });
-  const plays = pool.filter((p) => p.position === need.position && p.bye !== need.week && p.weekPoints > 0 && !p.locked);
+  const anyPlays = pool.filter((p) => p.position === need.position && p.bye !== need.week && p.weekPoints > 0 && !p.locked);
+  if (!anyPlays.length) return out("stuck", null, null, `week ${need.week} would start nobody at ${need.position} and no free ${need.position} plays that week`);
+  // A later week's need with the claim spoken for: only a body who is free
+  // now is a candidate at all, whatever the branch below.
+  const yields = need.week > week && !!args.claimTaken;
+  const plays = yields ? anyPlays.filter((p) => !p.onWaivers) : anyPlays;
   // Best for the need week: the one-week fill (pickStreamer's order).
   const byWeek = plays.slice().sort((a, b) => b.weekPoints - a.weekPoints);
   const best = byWeek[0];
-  if (!best) return out("stuck", null, null, `week ${need.week} would start nobody at ${need.position} and no free ${need.position} plays that week`);
+  if (!best) return out("wait", null, null, priorityFree
+    ? `every ${need.position} who plays week ${need.week} is on waivers and this week's claim is spoken for; a ${need.position} for week ${need.week} is a free add at the free-agent run after the clear`
+    : `every ${need.position} who plays week ${need.week} is on waivers until the run clears; a ${need.position} is not worth a claim`);
 
   if (openBenchSlots > 0) {
     // A kicker or a defense is never worth waiver priority, open slot or
