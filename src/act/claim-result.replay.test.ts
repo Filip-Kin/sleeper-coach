@@ -19,7 +19,7 @@ const legs = (...ls: number[]): WaiverTxn[] => ls.flatMap((l) => fx.legs[String(
 const never = () => false;
 
 describe("claimResults on the 2026-10-22 capture", () => {
-  test("legs 7 and 6 (the poll of 2026-10-22): the Nix claim landed, and the 10-16 Reichard claim before it", () => {
+  test("legs 7 and 6 (the poll of 2026-10-22): the Nix claim landed, and the 10-16 Mahomes-for-Dowdle claim before it", () => {
     const r = claimResults(legs(7, 6), ME, never);
     expect(r.map((x) => [x.transactionId, x.landed, x.add, x.drop])).toEqual([
       ["1416519976465997824", true, "4046", "7021"],
@@ -62,7 +62,7 @@ describe("claimResults on the 2026-10-22 capture", () => {
 });
 
 describe("logClaimResults", () => {
-  const names: Record<string, string> = { "11563": "Bo Nix", JAX: "Jacksonville Jaguars", CIN: "Cincinnati Bengals", "4046": "Will Reichard", "7021": "Eddy Pineiro" };
+  const names: Record<string, string> = { "11563": "Bo Nix", JAX: "Jacksonville Jaguars", CIN: "Cincinnati Bengals", "4046": "Patrick Mahomes", "7021": "Rico Dowdle" };
   const managers = new Map(fx.rosters.map((r) => [r.roster_id, fx.users.find((u) => u.user_id === r.owner_id)?.display_name ?? ""]));
   const harness = (txns: WaiverTxn[], opts: { brokenNames?: boolean } = {}) => {
     const seen = new Map<string, string>();
