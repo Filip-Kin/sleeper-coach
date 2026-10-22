@@ -27,6 +27,9 @@ import { pendingClaimPlayers, railsWithPendingDrops } from "./act/pending-claims
 import { RunLedger } from "./act/run-ledger.ts";
 import { runJobProcess, runJobWithRetry, JOB_TIMEOUT_MS } from "./act/spawn-job.ts";
 import { reactToDropsCore } from "./act/drop-react.ts";
+import { logClaimResults } from "./act/claim-result.ts";
+import { legsToScan } from "./sleeper/rules.ts";
+import { loadPlayers } from "./data/players.ts";
 import { maybePublishWeekly } from "./blog/auto.ts";
 import { allPosts } from "./blog/store.ts";
 import { handlePendingTrades } from "./league/trade-watch.ts";
@@ -453,6 +456,44 @@ async function reactToDrops(week: number): Promise<void> {
 }
 // #endregion
 
+// #region claim results
+/** A waiver claim of ours that Sleeper has resolved (landed or lost) is a
+ *  roster change we never wrote, so it is logged here from the REST
+ *  transaction list, once per transaction (`claim:<id>` in seen_transactions).
+ *  Public reads, no token. See act/claim-result.ts. */
+async function noteClaimResults(round: number): Promise<void> {
+  const txns: Parameters<typeof logClaimResults>[0]["txns"] = [];
+  for (const leg of legsToScan(round)) {
+    try {
+      txns.push(...((await sleeper.transactions(config.leagueId, leg)) as typeof txns));
+    } catch {
+      return; // next poll reads again
+    }
+  }
+  const rosters = async () => sleeper.rosters(config.leagueId);
+  await logClaimResults({
+    txns, rosterId: config.rosterId, alreadySeen: alreadyHandled, markSeen, log: (type, summary, detail) => logEvent("coach", type, summary, detail),
+    nameOf: async (id) => {
+      const p = (await loadPlayers())[id];
+      if (!p) throw new Error(`no player ${id}`);
+      return p.full_name ?? `${p.first_name} ${p.last_name}`;
+    },
+    managerOf: async (rid) => {
+      const owner = (await rosters()).find((r) => r.roster_id === rid)?.owner_id;
+      const name = owner ? (await sleeper.leagueUsers(config.leagueId)).find((u) => u.user_id === owner)?.display_name : undefined;
+      if (!name) throw new Error(`no manager for roster ${rid}`);
+      return name;
+    },
+    waiverPosition: async () => {
+      const all = await rosters();
+      const mine = all.find((r) => r.roster_id === config.rosterId);
+      const pos = (mine?.settings as { waiver_position?: number } | undefined)?.waiver_position;
+      return typeof pos === "number" ? { position: pos, of: all.length } : null;
+    },
+  });
+}
+// #endregion
+
 // #region veto review of other managers' trades
 const vetoSeen = new Set<string>();
 async function reviewOthersTrades(leg: number): Promise<void> {
@@ -718,6 +759,12 @@ async function pollOnce(): Promise<void> {
   // reads are public; the write waits for the token. See act/reserve-reconcile.ts.
   const fixReserve = () => reconcileReserve({ gql: leagueGql(), tokenReady }).then(() => undefined);
   await fixReserve().catch((e) => console.error(`[reserve] ${e instanceof Error ? e.message : String(e)}`));
+
+  // A claim of ours Sleeper resolved since the last poll is a roster change
+  // we never wrote: log it (landed or lost) before the guard plans over the
+  // new roster. Public reads, a coach.db row and an activity line; it gates
+  // nothing and runs under a freeze too, since the change already happened.
+  await noteClaimResults(round).catch((e) => console.error(`[claims] ${e instanceof Error ? e.message : String(e)}`));
 
   // Is the lineup on the site still the optimal one? A starter ruled Out since
   // the last lock, or a player back from Out, is fixed here, every poll, not at
