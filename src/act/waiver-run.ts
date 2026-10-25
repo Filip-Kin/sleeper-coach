@@ -362,7 +362,7 @@ async function main(): Promise<void> {
   // rest-of-season number put a kicker on his own bye at the top of the list.
   const streamBase = unrostered.map((p) => ({ playerId: p.playerId, name: p.name, position: p.position, team: p.team, bye: byeWeek(p.team), value: p.value }));
   const needs = streamNeeds(roster, week, DEFAULT_WAIVERS.byeLookaheadWeeks ?? 3);
-  let stream: { add: string; drop: string | null; position: string; forWeek: number; onWaivers: boolean; points: number; coveringFor: string[]; how: StreamDecision["how"] } | null = null;
+  let stream: { add: string; drop: string | null; position: string; forWeek: number; onWaivers: boolean; points: number; coveringFor: string[]; how: StreamDecision["how"]; reason: string } | null = null;
   // Needs the run is not acting on: a swap that is not due yet, or a slot
   // with no legal way to fill it. Reported, never passed over in silence:
   // before 2026-09-30 a need with no legal cut printed "no upcoming empty
@@ -408,7 +408,9 @@ async function main(): Promise<void> {
       currentStarters, kept, priorityFree, claimTaken: !!claim,
     });
     if (!d.add || d.how === "wait" || d.how === "stuck") { streamNotes.push(d); continue; }
-    stream = { add: d.add, drop: d.drop, position: need.position, forWeek: need.week, onWaivers: d.onWaivers, points: d.points, coveringFor: need.coveringFor, how: d.how };
+    // The reason travels with the pick: it names the ranking and, for a
+    // cut, the season value given up (streaming.ts), for the review.
+    stream = { add: d.add, drop: d.drop, position: need.position, forWeek: need.week, onWaivers: d.onWaivers, points: d.points, coveringFor: need.coveringFor, how: d.how, reason: d.reason };
     break; // earliest actionable need only
   }
 
@@ -454,7 +456,7 @@ async function main(): Promise<void> {
   const topCandidate = available[0];
   console.log(`    best available overall: ${topCandidate ? `${topCandidate.name} (${topCandidate.position}, ${topCandidate.points} ROS, VOR ${Math.round(vorOf.get(idByName.get(topCandidate.name) ?? "") ?? 0)})` : "none"}`);
   if (stream) {
-    console.log(`    STREAM: week ${stream.forWeek} would leave ${stream.position} empty (${stream.coveringFor.join(", ")} out); grab ${stream.add} now${stream.drop ? `, drop ${stream.drop}` : ""} [${stream.how}, ${stream.onWaivers ? "claim" : "free add"}]`);
+    console.log(`    STREAM: week ${stream.forWeek} would leave ${stream.position} empty (${stream.coveringFor.join(", ")} out); grab ${stream.add} now${stream.drop ? `, drop ${stream.drop}` : ""} [${stream.how}, ${stream.onWaivers ? "claim" : "free add"}]: ${stream.reason}`);
   }
   for (const n of streamNotes) console.log(`    stream ${n.how === "stuck" ? "STUCK" : "waiting"} (week ${n.need.week} ${n.need.position}): ${n.reason}`);
   if (!stream && !streamNotes.length) console.log("    no upcoming empty starting slot to stream for.");
@@ -466,7 +468,7 @@ async function main(): Promise<void> {
     priorityFree,
     byeCrunch: byeCrunch.map((b) => ({ week: b.week, starters: b.count, names: b.names })),
     irOpportunities: irOpps.map((o) => ({ name: o.name, status: o.injuryStatus, isStash: o.isStash })),
-    stream: stream ? { add: stream.add, drop: stream.drop, position: stream.position, forWeek: stream.forWeek, how: stream.how, via: stream.onWaivers ? "claim" : "free-add" } : null,
+    stream: stream ? { add: stream.add, drop: stream.drop, position: stream.position, forWeek: stream.forWeek, how: stream.how, via: stream.onWaivers ? "claim" : "free-add", reason: stream.reason } : null,
     streamNotes: streamNotes.map((n) => ({ week: n.need.week, position: n.need.position, how: n.how, reason: n.reason })),
   });
   // A starting slot that will be empty with no legal way to fill it is for
@@ -603,11 +605,11 @@ async function main(): Promise<void> {
         const res = await submitWaiverClaim(gql, resolve(stream.add), stream.drop ? resolve(stream.drop) : null);
         claimUsed = true;
         console.log(`  streamed (claim) ${stream.add} for week ${stream.forWeek}${stream.drop ? ` (dropping ${stream.drop})` : ""} [${res.status}]`);
-        logEvent("coach", "waiver-stream", `Claimed ${stream.add} to cover week ${stream.forWeek} ${stream.position}${stream.drop ? `, dropping ${stream.drop}` : ""}.`, { week, forWeek: stream.forWeek, add: stream.add, drop: stream.drop, position: stream.position, via: "claim", transaction_id: res.transactionId, status: res.status });
+        logEvent("coach", "waiver-stream", `Claimed ${stream.add} to cover week ${stream.forWeek} ${stream.position}${stream.drop ? `, dropping ${stream.drop}` : ""}.`, { week, forWeek: stream.forWeek, add: stream.add, drop: stream.drop, position: stream.position, via: "claim", reason: stream.reason, transaction_id: res.transactionId, status: res.status });
       } else if (!stream.onWaivers && doAdds) {
         const res = await addFreeAgent(gql, resolve(stream.add), stream.drop ? resolve(stream.drop) : null);
         console.log(`  streamed (free add) ${stream.add} for week ${stream.forWeek}${stream.drop ? ` (dropping ${stream.drop})` : ""} [${res.status}]`);
-        logEvent("coach", "waiver-stream", `Added ${stream.add} to cover week ${stream.forWeek} ${stream.position}${stream.drop ? `, dropping ${stream.drop}` : ""}.`, { week, forWeek: stream.forWeek, add: stream.add, drop: stream.drop, position: stream.position, via: "free-add", transaction_id: res.transactionId, status: res.status });
+        logEvent("coach", "waiver-stream", `Added ${stream.add} to cover week ${stream.forWeek} ${stream.position}${stream.drop ? `, dropping ${stream.drop}` : ""}.`, { week, forWeek: stream.forWeek, add: stream.add, drop: stream.drop, position: stream.position, via: "free-add", reason: stream.reason, transaction_id: res.transactionId, status: res.status });
       }
       intents.settle("waiver:", "", nowMs2);
     } catch (err) {

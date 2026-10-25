@@ -113,6 +113,30 @@ describe("a skill position is scarce: it is covered by a cut, not a swap", () =>
     expect(d.drop).toBe("Rico Dowdle");
     expect(d.add).not.toBeNull();
   });
+  test("the filler stays, so he is picked on the one value: the lower week projection with the higher rest-of-season value", () => {
+    // 2026-10-24: Godwin (104 ROS, 11.4 wk 7) was taken over Robinson (113.5
+    // ROS, 10.3) for the week-7 WR hole; the season replay is
+    // stream-cut-value.replay.test.ts.
+    const two: StreamPoolPlayer[] = [
+      { playerId: "a", name: "Week Man", position: "TE", bye: 9, weekPoints: 11.4, onWaivers: false, value: 104 },
+      { playerId: "b", name: "Season Man", position: "TE", bye: 9, weekPoints: 10.3, onWaivers: false, value: 113.5 },
+    ];
+    const cut = planStream({ need, week: 5, openBenchSlots: 0, pool: two, roster: thin, mayLeave: () => true, forcedDrop: () => "Rico Dowdle" });
+    expect(cut).toMatchObject({ how: "cut", add: "Season Man", drop: "Rico Dowdle", points: 10.3 });
+    const open = planStream({ need, week: 5, openBenchSlots: 1, pool: two, roster: thin, mayLeave: () => true, forcedDrop: () => null });
+    expect(open).toMatchObject({ how: "open-slot", add: "Season Man", drop: null });
+    // Equal on the one value: the week decides.
+    const tie = two.map((p) => ({ ...p, value: 110 }));
+    expect(planStream({ need, week: 5, openBenchSlots: 0, pool: tie, roster: thin, mayLeave: () => true, forcedDrop: () => "Rico Dowdle" }).add).toBe("Week Man");
+  });
+  test("a kicker is still picked on the need week: he is swapped back out the week after", () => {
+    const two: StreamPoolPlayer[] = [
+      { playerId: "a", name: "Week Kicker", position: "K", bye: 9, weekPoints: 9.5, onWaivers: false, value: 80 },
+      { playerId: "b", name: "Season Kicker", position: "K", bye: 9, weekPoints: 8.0, onWaivers: false, value: 95 },
+    ];
+    const open = planStream({ need: K6, week: 5, openBenchSlots: 1, pool: two, roster, mayLeave: () => true, forcedDrop: never });
+    expect(open).toMatchObject({ how: "open-slot", add: "Week Kicker" });
+  });
   test("no legal cut is reported as stuck, never passed over in silence", () => {
     const d = planStream({ need, week: 5, openBenchSlots: 0, pool: pool("TE", 6), roster: thin, mayLeave: () => true, forcedDrop: () => null });
     expect(d.how).toBe("stuck");

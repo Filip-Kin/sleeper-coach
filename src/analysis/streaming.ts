@@ -189,6 +189,18 @@ export function planStream(args: {
   if (!best) return out("wait", null, null, priorityFree
     ? `every ${need.position} who plays week ${need.week} is on waivers and this week's claim is spoken for; a ${need.position} for week ${need.week} is a free add at the free-agent run after the clear`
     : `every ${need.position} who plays week ${need.week} is on waivers until the run clears; a ${need.position} is not worth a claim`);
+  // Who fills the slot. A kicker or a defense is swapped back out the week
+  // after, so he is the need week's best (byWeek). A skill-position body
+  // STAYS: a drop is for the season, and a streamed skill player is kept
+  // or cut later by the ONE value like any other man (Nix, QB3, 10-21).
+  // So he is the best rest-of-season value among the men who play the
+  // need week, the week's points only the tie-break. 2026-10-24: the
+  // week-7 WR hole (Evans and Smith Out, Diggs and Meyers on bye) took
+  // Godwin (104 ROS, 11.4 that week) over Robinson (113.5 ROS, 10.3) on
+  // week points, 0.9 a week for the season given away for 1.1 points once,
+  // and the add bar (1.0/wk) then kept the planner from undoing it.
+  const byValue = plays.slice().sort((a, b) => b.value - a.value || b.weekPoints - a.weekPoints);
+  const filler = SWAP_POSITIONS.has(need.position) ? best : (byValue[0] ?? best);
 
   if (openBenchSlots > 0) {
     // A kicker or a defense is never worth waiver priority, open slot or
@@ -198,9 +210,9 @@ export function planStream(args: {
     // 2026-10-06 this branch took the best by projection whatever his
     // status, and the claim job would have filed for him with no second
     // look, using up the run's one claim.
-    const pick = SWAP_POSITIONS.has(need.position) && !priorityFree ? byWeek.find((p) => !p.onWaivers) : best;
+    const pick = SWAP_POSITIONS.has(need.position) && !priorityFree ? byWeek.find((p) => !p.onWaivers) : filler;
     if (!pick) return out("wait", null, null, `every ${need.position} who plays week ${need.week} is on waivers until the run clears; a ${need.position} is not worth a claim`);
-    return out("open-slot", pick, null, `into an open bench slot, covering ${need.coveringFor.join(", ")} in week ${need.week}`);
+    return out("open-slot", pick, null, `into an open bench slot, covering ${need.coveringFor.join(", ")} in week ${need.week}${SWAP_POSITIONS.has(need.position) ? "" : `; ${pick.name} is the best rest-of-season ${need.position} who plays it (${pick.value} ROS, ${pick.weekPoints} in week ${need.week})`}`);
   }
 
   if (SWAP_POSITIONS.has(need.position)) {
@@ -249,6 +261,20 @@ export function planStream(args: {
 
   const drop = forcedDrop();
   if (!drop) return out("stuck", null, null, `week ${need.week} would start nobody at ${need.position} (${need.coveringFor.join(", ") || "nobody rostered"} out) and the rails allow no cut to make room`);
-  return out("cut", best, drop, `covering ${need.coveringFor.join(", ")} in week ${need.week}; ${drop} is the cheapest legal cut`);
+  // The season value the cut gives up (the cut's ROS less the filler's)
+  // against what the slot gains in the need week (it starts nobody
+  // otherwise). The cut still goes: an empty slot scores zero, and who may
+  // leave is the rails' call (stash, kept starters, the protected top), not
+  // the week's. But a cut that costs more season value than the week gains
+  // is said so in the reason, for the review, never traded in silence.
+  const cut = roster.find((p) => lower(p.name) === lower(drop));
+  const givenUp = cut ? Math.round((cut.points - filler.value) * 10) / 10 : null;
+  const floor = cut && givenUp !== null && givenUp > filler.weekPoints
+    ? `; season value given up: ${givenUp} ROS (${drop} ${cut.points} for ${filler.name} ${filler.value}), more than the ${filler.weekPoints} the slot gains in week ${need.week}`
+    : "";
+  const ranked = SWAP_POSITIONS.has(need.position)
+    ? `${filler.name} is the best ${need.position} for week ${need.week} (${filler.weekPoints}, ${filler.value} ROS)`
+    : `${filler.name} is the best rest-of-season ${need.position} who plays it (${filler.value} ROS, ${filler.weekPoints} in week ${need.week})`;
+  return out("cut", filler, drop, `covering ${need.coveringFor.join(", ")} in week ${need.week}; ${ranked}; ${drop} is the cheapest legal cut${cut ? ` (${cut.points} ROS)` : ""}${floor}`);
 }
 // #endregion
