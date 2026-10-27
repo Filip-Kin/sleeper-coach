@@ -30,13 +30,15 @@ import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters, weekSchedule } from "../sleeper/graphql.ts";
 import { forcedCutNotBefore, fmtZoned } from "./reserve-hold.ts";
 import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, currentStarters, cancelWaiverClaim } from "../league/api.ts";
-import { loadValues, liveStatusFromRosters, toRail, cutOrder, notPlaying, LAST_WEEK, type PlayerValue } from "../analysis/value.ts";
-import { canDrop, DEFAULT_RAILS } from "../analysis/rails.ts";
-import { keptStarters } from "../analysis/roster-fit.ts";
+import { loadValues, liveStatusFromRosters, toRail, notPlaying, LAST_WEEK, type PlayerValue } from "../analysis/value.ts";
+import { DEFAULT_RAILS } from "../analysis/rails.ts";
+import { SWAP_POSITIONS } from "../analysis/streaming.ts";
+import { handLegalCuts } from "./hand-cuts.ts";
 import { bestLineup } from "../analysis/trade.ts";
 import { loadWeekFacts } from "../analysis/week-projections.ts";
 import { weekLineupGain, stashCandidates } from "../analysis/waivers.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
+import { byeWeek } from "../data/byes.ts";
 import { logEvent } from "../log.ts";
 import { pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
 
@@ -92,18 +94,21 @@ const fmt = (v: PlayerValue | undefined, id: string): string => v
   : `${id.padEnd(24)} (no value)`;
 
 // The picture, live.
-const rail = view.active.map((e) => { const v = values.get(e.playerId); return v ? toRail(v) : { playerId: e.playerId, name: e.name, position: e.position, points: 0 }; });
+const rail = view.active.map((e) => { const v = values.get(e.playerId); return v ? toRail(v, { bye: byeWeek(v.team) ?? undefined }) : { playerId: e.playerId, name: e.name, position: e.position, points: 0 }; });
 const pendingDrops: string[] = pending.drops;
-// A starter is kept from the cut unless he is a kicker or defense with a
-// better body behind him who can take the slot this week (roster-fit.ts
-// keptStarters): a starting one-week rental is cut before the better one.
-// For an add, the target counts as a body who can take a slot: a starting
-// back, receiver or tight end he beats at his own position and can replace
-// this week is a legal cut for him (the engine's same-position upgrade).
+// Who may leave (hand-cuts.ts handLegalCuts): the cut order less the rails,
+// a pending claim's drop and the starters this week's cut keeps
+// (roster-fit.ts keptStarters: a kicker or defense with a better body
+// behind him who can take the slot is not kept, and for an add a starting
+// back, receiver or tight end the target beats at his own position and can
+// replace this week is a legal cut for him, the engine's same-position
+// upgrade). Plus the stream's swap: a starting kicker or defense on bye or
+// ruled out THIS week, nobody rostered to fill his slot, is the drop for a
+// target at his position who plays it (`covered`, streaming.ts planStream's
+// need-week swap, 2026-10-27).
 const newcomer = (cmd === "add" || cmd === "claim") && name ? values.get(byName(name)?.playerId ?? "") : undefined;
-const kept = new Set(keptStarters(rail.filter((p) => starters.has(p.playerId!)).map((p) => p.name), rail,
-  (body, starter) => startable(body, starter) && !pendingDrops.includes(body.playerId ?? ""), newcomer ? toRail(newcomer) : undefined).map((n) => n.toLowerCase()));
-const legalCuts = cutOrder(rail.filter((p) => !kept.has(p.name.toLowerCase()) && !pendingDrops.includes(p.playerId!) && canDrop(p.name, rail, { ...DEFAULT_RAILS, protectTopN: 0 }).allowed));
+const { cuts: legalCuts, covered } = handLegalCuts({ week, roster: rail, starters: rail.filter((p) => starters.has(p.playerId!)).map((p) => p.name), pendingDrops, canFill: startable, newcomer: newcomer ? toRail(newcomer) : undefined });
+const isCovered = (p: PlayerValue): boolean => covered.some((c) => c.playerId === p.playerId);
 // Who could go to IR instead of a cut (the daemon's filter, waivers.ts
 // stashCandidates): IR-eligible under the league's flags, not a starter this
 // week (a starter whose own tag qualifies for IR is benched by the guard as
@@ -137,19 +142,24 @@ if (stash && drop) { console.error("--stash or --drop, not both: the stash makes
 // evalPaths: the cheapest same-position body goes, whatever a cheaper body
 // at another position is worth), so the order is among that position's
 // legal cuts. A target who starts costs the cheapest cut overall, as the
-// engine charges him.
+// engine charges him. A kicker or defense swap replaces the man at his
+// own position whether or not the target starts (streaming.ts planStream:
+// the spare or the covered man leaves, never the cheapest cut overall), so
+// at the swap positions the order is the position's.
 function checkCut(leaving: PlayerValue, target?: PlayerValue): void {
   const slots = league.roster_positions.filter((s) => s !== "BN" && s !== "IR");
   const targetStarts = !!target && bestLineup([...rail, toRail(target)], slots).starters.some((s) => s.player?.playerId === target.playerId);
-  const order = target && !targetStarts && target.position === leaving.position ? legalCuts.filter((p) => p.position === leaving.position) : legalCuts;
-  const cheapest = order[0];
-  if (!cheapest) { console.error("no legal cut exists"); process.exit(2); }
+  const samePosition = !!target && target.position === leaving.position && (!targetStarts || SWAP_POSITIONS.has(leaving.position));
+  const order = samePosition ? legalCuts.filter((p) => p.position === leaving.position) : legalCuts;
   const rank = order.findIndex((p) => p.playerId === leaving.playerId);
   if (rank < 0) {
-    console.error(`\n${leaving.name} is not a legal cut (a kept starter this week, pending claim's drop, never-drop, or a protected stash).`);
+    // An empty order is the same refusal: the reason stays in writing, so
+    // --override still works (a kicker swap with no week table, say).
+    console.error(`\n${leaving.name} is not a legal cut (a kept starter this week, pending claim's drop, never-drop, or a protected stash)${order.length ? "" : `; no legal cut exists${samePosition ? ` at ${leaving.position}` : ""}`}.`);
     if (!OVERRIDE) process.exit(2);
     console.error(`override given: ${OVERRIDE}`);
   } else if (rank > 0) {
+    const cheapest = order[0]!;
     console.error(`\n${leaving.name} is cut #${rank + 1}; the cheapest legal cut is ${cheapest.name} (${Math.round(cheapest.points)} ROS vs ${Math.round(leaving.value)}).`);
     if (!OVERRIDE) { console.error("refusing without --override \"<reason>\""); process.exit(2); }
     console.error(`override given: ${OVERRIDE}`);
@@ -193,7 +203,18 @@ switch (cmd) {
       const weekGain = weekLineupGain({ ...toRail(target), onWaivers: false }, drop.name, { roster: rail, openBenchSlots: 0, openIrSlots: 0, startingSlots: SLOTS, weekPoints });
       const playsThisWeek = (weekPoints.get(drop.name) ?? 0) > 0;
       console.log(`this week: lineup ${weekGain >= 0 ? "+" : ""}${weekGain} with the swap${weekFacts.known ? "" : " (no week table: taken as 0)"}${playsThisWeek ? `; ${drop.name} plays this week (${weekPoints.get(drop.name)})` : ""}`);
-      if (gainWk < 1 && !OVERRIDE) { console.error("under 1.0 points per week: not a swap worth a drop. --override to insist."); process.exit(2); }
+      // The stream's swap (streaming.ts planStream): the slot starts nobody
+      // without him, so the add bar does not apply; the newcomer is judged
+      // on the week, not the season, and the covered man is the drop.
+      const cover = isCovered(drop);
+      if (cover) {
+        // The engine's own pick for the slot (planStream's swap): the best
+        // rest-of-season value among the free men at the position who play
+        // this week. A worse hand pick is said, never refused.
+        const enginePick = [...values.values()].filter((v) => v.position === target.position && !taken.has(v.playerId) && startable(toRail(v), toRail(drop))).sort((a, b) => b.value - a.value || b.valueAvg - a.valueAvg)[0];
+        console.log(`stream cover: ${drop.name} is off in week ${week}; ${target.name} plays it and takes his slot (${weekPoints.get(target.name)} this week); the add bar does not apply${enginePick && enginePick.playerId !== target.playerId ? `; the engine's pick is ${enginePick.name} (${Math.round(enginePick.value)} ROS vs ${Math.round(target.value)})` : ""}`);
+      }
+      if (gainWk < 1 && !cover && !OVERRIDE) { console.error("under 1.0 points per week: not a swap worth a drop. --override to insist."); process.exit(2); }
       if (stableFails && !OVERRIDE) { console.error("not playing now and under 1.0 points per week on the season projection: the feed assumes his return, and a cut is for the season. --override to insist."); process.exit(2); }
       // An add only: a claim's drop lands at the clear, after the week for the weekly run, and the engine never holds one.
       if (cmd === "add" && weekGain < 0 && playsThisWeek && !OVERRIDE) { console.error(`lowers this week's lineup while ${drop.name} plays for us: wait for the week, the drop costs it nothing once it is over. --override to insist.`); process.exit(2); }
