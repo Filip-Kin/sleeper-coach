@@ -189,3 +189,26 @@ describe("review 2026-09-30: drops that tie on lineup gain", () => {
     expect(m.drop).toBe("Kenny Gainwell");
   });
 });
+
+describe("2026-10-28: a third healthy quarterback is surplus", () => {
+  test("he is worth zero, first in the cut order, and his seat goes to a better receiver", async () => {
+    const { markSurplus } = await import("./value.ts");
+    const qb = (name: string, points: number, extra: Partial<RailPlayer> = {}): RailPlayer => ({ name, position: "QB", points, seasonPoints: points, playerId: name, ...extra });
+    const roster = markSurplus([
+      qb("Mahomes", 194), qb("Prescott", 162), qb("Nix", 150), qb("Hurts", 0, { onIr: true, returnsBeforePlayoffs: true }),
+      { name: "Godwin", position: "WR", points: 92, seasonPoints: 174, playerId: "g" },
+      { name: "Harvey", position: "RB", points: 94, seasonPoints: 144, playerId: "h" },
+    ]);
+    const nix = roster.find((p) => p.name === "Nix")!;
+    expect(nix.surplus).toBe(true);
+    expect(nix.points).toBe(0);
+    expect(roster.find((p) => p.name === "Prescott")!.surplus).toBeUndefined();
+    expect(roster.find((p) => p.name === "Hurts")!.surplus).toBeUndefined(); // on IR: not counted, not cut
+    expect(chooseForcedDrops(roster, 1, cfg)[0]?.name).toBe("Nix");
+  });
+  test("two healthy quarterbacks are both kept", async () => {
+    const { markSurplus } = await import("./value.ts");
+    const r: RailPlayer[] = markSurplus<RailPlayer>([{ name: "A", position: "QB", points: 200 }, { name: "B", position: "QB", points: 150 }]);
+    expect(r.some((p) => p.surplus)).toBe(false);
+  });
+});

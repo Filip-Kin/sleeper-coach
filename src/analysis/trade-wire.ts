@@ -20,7 +20,7 @@ import { weekLockedIds } from "./trade-week.ts";
 import { tokenGql, pendingRosterDelta, applyRosterDelta, pendingTrades, currentStarters, type Gql, type PendingTrade } from "../league/api.ts";
 import { pendingClaimPlayers } from "../act/pending-claims.ts";
 import { sleeper } from "../sleeper/client.ts";
-import { loadValues, liveStatusFromRosters, scalePts } from "./value.ts";
+import { loadValues, liveStatusFromRosters, scalePts, markSurplus } from "./value.ts";
 import { loadPlayers } from "../data/players.ts";
 import { byeWeek } from "../data/byes.ts";
 import { activeCapacity } from "./roster-fit.ts";
@@ -76,7 +76,7 @@ export function tradeRostersFrom(rosters: Roster[], playerById: Map<string, Trad
     const onIr = new Set(r.reserve ?? []);
     rosterOf.set(
       r.roster_id,
-      (r.players ?? []).map((id) => ({ ...(playerById.get(id) ?? { name: id, position: "", points: 0 }), playerId: id, onIr: onIr.has(id) })),
+      markSurplus((r.players ?? []).map((id) => ({ ...(playerById.get(id) ?? { name: id, position: "", points: 0 }), playerId: id, onIr: onIr.has(id) }))),
     );
   }
   return rosterOf;

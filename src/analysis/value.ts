@@ -195,3 +195,27 @@ export function scalePts<T extends object>(cfg: T, week: number, keys: (keyof T)
   }
   return out;
 }
+
+/** Healthy players worth holding at a single-slot position: one starter and
+ *  one backup. Filip, 2026-10-28: "why are we holding 4 QBs?" The roster had
+ *  Prescott, Mahomes and Bo Nix healthy (Hurts on IR). Every bench rule
+ *  valued Nix at his full season worth, so he sat third from the bottom of the
+ *  cut order while the receivers the team needed stayed on waivers. A third
+ *  quarterback cannot start and covers nothing the second one does not. */
+export const DEPTH_CAP: Record<string, number> = { QB: 2 };
+
+/** Mark the healthy players beyond DEPTH_CAP at their position as surplus:
+ *  worth zero for every cut, add and claim decision. On IR, a protected stash
+ *  or a pending claim's add is never surplus and never counts toward the cap.
+ *  Pure; returns a new array, same order. */
+export function markSurplus<T extends RailPlayer>(roster: T[]): T[] {
+  const surplus = new Set<string>();
+  for (const [pos, cap] of Object.entries(DEPTH_CAP)) {
+    const healthy = roster
+      .filter((p) => p.position === pos && !p.onIr && !p.returnsBeforePlayoffs && !(p as { claimAdd?: boolean }).claimAdd)
+      .sort((a, b) => b.points - a.points || (b.seasonPoints ?? 0) - (a.seasonPoints ?? 0) || a.name.localeCompare(b.name));
+    for (const p of healthy.slice(cap)) surplus.add(p.name);
+  }
+  if (!surplus.size) return roster;
+  return roster.map((p) => (surplus.has(p.name) ? { ...p, points: 0, seasonPoints: 0, surplus: true } : p));
+}

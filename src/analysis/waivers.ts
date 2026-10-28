@@ -288,13 +288,13 @@ function lineupDelta(
   // stash) it is the cheapest bench body we could otherwise have cut, since
   // that is who the add is really being compared with.
   const dropped = dropName && !seat ? state.roster.find((p) => p.name === dropName) ?? null : cheapestSwappable(incoming, state, rails);
-  const benchGain = dropped && swappable(incoming.position, dropped.position)
+  const benchGain = dropped && swappableFor(incoming, dropped)
     ? Math.round((incoming.points - dropped.points) * 10) / 10
     : 0;
   // The same comparison per game played. A rest-of-season sum counts games,
   // so a player whose bye is still to come trails an equal one whose bye has
   // passed by a whole game; late in the season that alone cleared the bar.
-  const benchPerGame = dropped && swappable(incoming.position, dropped.position)
+  const benchPerGame = dropped && swappableFor(incoming, dropped)
     ? Math.round((incoming.points / gamesLeft(incoming, state) - dropped.points / gamesLeft(dropped, state)) * 10) / 10
     : 0;
   // The same gaps on the STABLE number, the full-season projection, for the
@@ -302,7 +302,7 @@ function lineupDelta(
   // gap against the same man, and the lineup gain with every body at his
   // season points. A man the season table does not list is unknown, not
   // zero: the gap reads as nothing, and a newcomer held to it fails.
-  const seasonGain = dropped && swappable(incoming.position, dropped.position) && (dropped.seasonPoints ?? 0) > 0
+  const seasonGain = dropped && swappableFor(incoming, dropped) && ((dropped.seasonPoints ?? 0) > 0 || dropped.surplus === true)
     ? Math.round(((incoming.seasonPoints ?? 0) - dropped.seasonPoints!) * 10) / 10
     : 0;
   const asSeason = (p: RailPlayer): LineupPlayer => ({ playerId: p.name, name: p.name, position: p.position, points: p.seasonPoints ?? 0 });
@@ -374,7 +374,7 @@ function cheapestSwappable(incoming: RailPlayer, state: RosterState, rails: Rail
   const swapRails: RailConfig = { ...rails, protectTopN: 0 };
   let best: RailPlayer | null = null;
   for (const p of state.roster) {
-    if (kept.has(p.name.toLowerCase()) || !swappable(incoming.position, p.position)) continue;
+    if (kept.has(p.name.toLowerCase()) || !swappableFor(incoming, p)) continue;
     if (!canDrop(p.name, state.roster, swapRails).allowed) continue;
     if (!best || p.points < best.points || (p.points === best.points && (p.seasonPoints ?? 0) < (best.seasonPoints ?? 0))) best = p;
   }
@@ -388,6 +388,11 @@ function cheapestSwappable(incoming: RailPlayer, state: RosterState, rails: Rail
  *  131 points, "beat" Kenny Gainwell, RB, 106, and would never have played). */
 export function swappable(a: string, b: string): boolean {
   return a === b;
+}
+/** Swappable for a bench comparison: same position, or the man leaving is
+ *  surplus (value.ts markSurplus), whose seat any position may take. */
+function swappableFor(incoming: { position: string }, dropped: RailPlayer): boolean {
+  return dropped.surplus === true || swappable(incoming.position, dropped.position);
 }
 
 interface PathEval {

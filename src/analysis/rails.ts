@@ -48,6 +48,8 @@ export interface RailPlayer {
   seasonPoints?: number;
   /** Rank at his position on seasonPoints, 1 = best. */
   seasonRank?: number;
+  /** Beyond the depth cap at his position (value.ts markSurplus): worth zero. */
+  surplus?: boolean;
   // Bye week, when known. Optional because the rails themselves do not care, but
   // trade and waiver scoring do: four of our starters share the week 8 bye, which
   // costs about 10.7 points in that week and is the worst single-week hole in the

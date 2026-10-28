@@ -30,7 +30,7 @@ import { sleeper } from "../sleeper/client.ts";
 import { leagueRosters, weekSchedule } from "../sleeper/graphql.ts";
 import { forcedCutNotBefore, fmtZoned } from "./reserve-hold.ts";
 import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, currentStarters, cancelWaiverClaim } from "../league/api.ts";
-import { loadValues, liveStatusFromRosters, toRail, notPlaying, LAST_WEEK, type PlayerValue } from "../analysis/value.ts";
+import { loadValues, liveStatusFromRosters, toRail, notPlaying, LAST_WEEK, markSurplus, type PlayerValue } from "../analysis/value.ts";
 import { DEFAULT_RAILS } from "../analysis/rails.ts";
 import { SWAP_POSITIONS } from "../analysis/streaming.ts";
 import { handLegalCuts } from "./hand-cuts.ts";
@@ -94,7 +94,7 @@ const fmt = (v: PlayerValue | undefined, id: string): string => v
   : `${id.padEnd(24)} (no value)`;
 
 // The picture, live.
-const rail = view.active.map((e) => { const v = values.get(e.playerId); return v ? toRail(v, { bye: byeWeek(v.team) ?? undefined }) : { playerId: e.playerId, name: e.name, position: e.position, points: 0 }; });
+const rail = markSurplus(view.active.map((e) => { const v = values.get(e.playerId); return v ? toRail(v, { bye: byeWeek(v.team) ?? undefined }) : { playerId: e.playerId, name: e.name, position: e.position, points: 0 }; }));
 const pendingDrops: string[] = pending.drops;
 // Who may leave (hand-cuts.ts handLegalCuts): the cut order less the rails,
 // a pending claim's drop and the starters this week's cut keeps

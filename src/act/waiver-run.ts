@@ -30,7 +30,7 @@ import { canDrop } from "../analysis/rails.ts";
 import { chooseLegalForcedDrops } from "../analysis/reconcile-plan.ts";
 import { keptStarters } from "../analysis/roster-fit.ts";
 import { DEFAULT_FAIRNESS } from "../analysis/trade-fair.ts";
-import { loadValues, liveStatusFromRosters, toRail, weeksLeft } from "../analysis/value.ts";
+import { loadValues, liveStatusFromRosters, toRail, weeksLeft, markSurplus } from "../analysis/value.ts";
 import { DropIntentStore, decideIntent, type DropIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
 import { loadWeekProjections, byPlayerId, startableThisWeek, weekPointsThisWeek } from "../analysis/week-projections.ts";
@@ -133,7 +133,7 @@ async function main(): Promise<void> {
   // add and claim below reads it and nothing else.
   const ros = await loadValues(season, week, league.scoring_settings, liveStatusFromRosters(rosters));
   const liveStatus = overlayRosterStatus(players, mine);
-  const roster: RailPlayer[] = myPlayerIds.map((id) => {
+  const roster: RailPlayer[] = markSurplus(myPlayerIds.map((id) => {
     const v = ros.get(id);
     const dump = liveStatus[id];
     const name = dump?.full_name ?? (dump ? `${dump.first_name} ${dump.last_name}`.trim() : v?.name ?? id);
@@ -141,7 +141,7 @@ async function main(): Promise<void> {
     const team = dump?.team ?? v?.team ?? (/^[A-Z]{2,4}$/.test(id) ? id : undefined);
     const base: RailPlayer = v ? toRail(v) : { playerId: id, name, position, points: 0 };
     return { ...base, name, position, onIr: false, injuryStatus: dump?.injury_status ?? base.injuryStatus, bye: byeWeek(team) ?? undefined };
-  });
+  }));
   // Players spoken for by our own pending claims (R6): the adds leave the
   // candidate pool, the drops leave the drop table. The adds are planned
   // WITH as ours (RailPlayer.claimAdd: never a drop, a stash or a trade
