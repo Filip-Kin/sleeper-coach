@@ -57,6 +57,12 @@ export interface LineupPlan {
   hold?: string;
 }
 
+/** The same set of men, whatever their slots. "0" is an empty slot, not a man. */
+function sameMen(a: string[], b: string[]): boolean {
+  const men = (v: string[]) => v.filter((id) => id !== "0").sort().join(",");
+  return a.length === b.length && men(a) === men(b);
+}
+
 /** Slots with the same label are interchangeable (FLEX, FLEX), so a lineup
  *  that only permutes players among like slots is the same lineup. Writing it
  *  would be a pointless mutation every poll. */
@@ -226,6 +232,12 @@ export function planLineup(current: string[], candidates: LineupPlayer[], slots:
   // 3. Same lineup up to like-slot permutation means no write. The comparison
   //    is against what the SITE has, so a phantom occupant is itself a change.
   if (canonical(ids, slots) === canonical(site, slots)) return { ids: site, changed: false, unfilled, swaps: [] };
+  // 3b. The same men moved between slots of different labels (a WR from WR to
+  //     FLEX: Smith/Godwin 2026-10-28, Godwin/Robinson 10-30) is the same
+  //     lineup too. A man scores the same in any slot he fills, and the
+  //     solver's slot order is a tie, not a decision; writing it was a roster
+  //     mutation every poll with an empty swap list. The site's slots are kept.
+  if (sameMen(ids, site)) return { ids: site, changed: false, unfilled, swaps: [] };
   if (ids.some((v, i) => v === "0" && cur[i] !== "0")) {
     // Refuse to empty a slot an active player fills; the scheduled lock alerts a human.
     return { ids: site, changed: false, unfilled, swaps: [] };
@@ -373,6 +385,7 @@ const PIN_MS = 24 * 60 * 60_000;
 const pinned = new Map<string, number>();
 let emptyProjectionLogged = 0;
 let holdLogged = 0;
+let noopLogged = 0;
 
 /** The roster the guard last planned over: who was active and who was on
  *  reserve when it looked, and the starters on the leg. The invariants read
@@ -401,6 +414,7 @@ export function resetGuardStateForTests(): void {
   lastHeldNotice = 0;
   emptyProjectionLogged = 0;
   holdLogged = 0;
+  noopLogged = 0;
 }
 
 /** One pass. Returns the plan (changed or not), or null when out of season. */
@@ -457,6 +471,15 @@ export async function runLineupGuard(deps: GuardDeps): Promise<LineupPlan | null
     return plan;
   }
   if (!plan.changed) return plan;
+  if (!plan.swaps.length) {
+    // Belt for planLineup's same-men check: a plan that moves nobody in or
+    // out is no write, whatever its slots say.
+    if (now - noopLogged > NOTICE_MS) {
+      noopLogged = now;
+      console.log(`[lineup-guard] week ${week} plan moves nobody in or out; not written: ${plan.ids.join(",")}`);
+    }
+    return plan;
+  }
 
   const key = plan.ids.join(",");
   const summary = plan.swaps.map((s) => `${s.slot}: ${s.out} -> ${s.in} (${s.why})`).join("; ");

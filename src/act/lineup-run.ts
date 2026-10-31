@@ -195,7 +195,9 @@ async function main(): Promise<void> {
     return;
   }
   // Nothing to do beats a pointless mutation on a live roster.
-  if (!plan.changed) {
+  if (!plan.changed || !plan.swaps.length) {
+    // No swaps with changed set is planLineup's same-men check missed: the
+    // same belt the 90 s guard wears, since moving nobody is no write.
     console.log(`\nWeek ${week} lineup already correct; no write.`);
     logEvent("coach", "lineup-unchanged", `Week ${week} lineup already correct, no write.`, { week, leagueId });
     return;

@@ -395,3 +395,48 @@ describe("a table with no numbers is no basis for a lineup (2026-10-07 05:15 ET)
     expect(plan.ids).toContain("9500");
   });
 });
+
+describe("planLineup: the same ten men in other slots is the same lineup", () => {
+  // Replay of 2026-10-30 13:33 ET (week 8). The 13:02 write set Robinson at
+  // WR2 and Godwin at FLEX; the next poll solved Godwin to WR2 and Robinson
+  // to FLEX, same ten men, and wrote it with an empty swap list. The 10-28
+  // 03:09 write was the same churn (Smith/Godwin). A WR scores the same in
+  // WR or FLEX, so the write mutated the roster for nothing.
+  const SLOTS10 = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "K", "DEF"];
+  const week8 = () => [
+    P("3294", "QB", 19.8), P("8151", "RB", 14.1), P("9224", "RB", 13.9),
+    P("2449", "WR", 12.0), P("8126", "WR", 10.4), P("4037", "WR", 10.5), P("5947", "WR", 9.1),
+    P("10859", "TE", 9.0), P("7839", "K", 8.0), P("SEA", "DEF", 7.0),
+    P("7525", "WR", 0, "Out"), P("12489", "RB", 0, "Out"),
+  ];
+  const SITE = ["3294", "8151", "9224", "2449", "8126", "10859", "5947", "4037", "7839", "SEA"];
+  test("WR/FLEX permutation of the site's men is no write, the site's slots are kept", () => {
+    const plan = planLineup(SITE, week8(), SLOTS10, new Set());
+    expect(plan.changed).toBe(false);
+    expect(plan.swaps).toEqual([]);
+    expect(plan.ids).toEqual(SITE);
+  });
+  test("the same permutation with the solver's own order on the site is no write either", () => {
+    const solved = ["3294", "8151", "9224", "2449", "4037", "10859", "8126", "5947", "7839", "SEA"];
+    const plan = planLineup(solved, week8(), SLOTS10, new Set());
+    expect(plan.changed).toBe(false);
+    expect(plan.ids).toEqual(solved);
+  });
+  test("a genuine swap among the same slots still writes, with its swap listed", () => {
+    const rs = week8().map((p) => (p.playerId === "7525" ? { ...p, points: 15.0, injuryStatus: null } : p));
+    const plan = planLineup(SITE, rs, SLOTS10, new Set());
+    expect(plan.changed).toBe(true);
+    expect(plan.swaps.length).toBe(1);
+    expect(plan.ids).toContain("7525");
+    expect(plan.ids).not.toContain("5947");
+  });
+  test("a phantom occupant with a body on the bench is still a change even when the other nine match", () => {
+    // Meyers off the active roster, Smith healthy on the bench: Smith comes in.
+    const rs = week8().filter((p) => p.playerId !== "5947").map((p) => (p.playerId === "7525" ? { ...p, points: 8.0, injuryStatus: null } : p));
+    const plan = planLineup(SITE, rs, SLOTS10, new Set());
+    expect(plan.changed).toBe(true);
+    expect(plan.ids).not.toContain("5947");
+    expect(plan.ids).toContain("7525");
+    expect(plan.swaps.map((s) => s.why)).toEqual(["not on the active roster"]);
+  });
+});
