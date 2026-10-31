@@ -564,7 +564,13 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
 
 /** Statuses that are multi-week by definition: parked by the NFL, not a
  *  game-day designation. */
-const LONG_ABSENCE = new Set(["IR", "PUP", "SUS", "COV", "NA", "DNR"]);
+export const LONG_ABSENCE = new Set(["IR", "PUP", "SUS", "COV", "NA", "DNR"]);
+/** Not playing on a game-day designation (Out, Doubtful): the one value has
+ *  lost his week on news that the Tuesday re-rate will size. A long absence
+ *  is already the real length; nothing is left to re-rate. */
+function gameDayOut(p: RailPlayer): boolean {
+  return notPlaying(p.injuryStatus) && !LONG_ABSENCE.has((p.injuryStatus ?? "").trim().toUpperCase());
+}
 
 // With no league flags only IR and PUP qualify. The live run always passes the
 // league's real flags through RosterState.irEligible.
@@ -725,10 +731,39 @@ export function planOne(
   // game-day Out included: the check holds for the week of the tag only,
   // and a cut in doubt is no cut.
   const held = notPlaying(incoming.injuryStatus);
-  const stableSwap = !held || seasonGain >= cfg.benchSwapMarginPerWeek * LAST_WEEK;
-  const stableClaim = !held || seasonGain >= cfg.benchClaimMarginPerWeek * LAST_WEEK;
-  const stableLineup = !held || seasonLineupGain >= cfg.freeAddMarginPts;
-  const stableLineupClaim = !held || seasonLineupGain >= cfg.claimMarginPts;
+  // THE SAME CHECK ON THE CUT (review of 2026-10-31). The man a swap drops
+  // loses his week from the one value the day he is ruled Out, and his
+  // backup gains it: RJ Harvey (RB37, 144 on the season) went 94 -> 82 -> 74
+  // on one knee designation while Jonah Coleman, his own backup (RB59, 64),
+  // rose to 100, and the 10-30 free add cut Harvey for him on a 26-point
+  // gap built on a news feed. A drop is for the season, so a swap whose cut
+  // (or, for a seat, the man the add is measured against) is not playing
+  // now holds to the season projection by the same bar; otherwise the free
+  // add waits for the Tuesday re-rate, like the week wait, and a claim is
+  // not filed. Never a kicker or defense: his swap is the stream's free body
+  // for the week, never a drop for the season. Never a long absence (IR,
+  // PUP, suspended): that feed is the real length, and a man on it with no
+  // season left would hold his seat for ever. The bench checks are measured
+  // against him whatever the path; the lineup checks hold only when he is
+  // the cut, now or on a return (a seat path's comparison body is not the
+  // man the lineup number depends on), and on the defect's own quantity:
+  // the newcomer's season points against his, by the swap's per-week bar.
+  const againstPlayer = against ? state.roster.find((p) => p.name === against) ?? null : null;
+  const heldCut = !!againstPlayer && !SWAP_POSITIONS.has(againstPlayer.position) && gameDayOut(againstPlayer);
+  const heldCutLineup = heldCut && (against === drop || laterCost.includes(against!));
+  const unstable = held || heldCut;
+  const unstableWhy = held
+    ? `he is not playing now (${incoming.injuryStatus}) and the feed assumes his return`
+    : `${against} is not playing now (${againstPlayer?.injuryStatus}) and his feed has lost the week`;
+  const cutSeasonBar = cfg.benchSwapMarginPerWeek * LAST_WEEK;
+  const cutSeasonClaimBar = cfg.benchClaimMarginPerWeek * LAST_WEEK;
+  const stableSwap = (!held || seasonGain >= cutSeasonBar) && (!heldCut || seasonGain >= cutSeasonBar);
+  const stableClaim = (!held || seasonGain >= cutSeasonClaimBar) && (!heldCut || seasonGain >= cutSeasonClaimBar);
+  const stableLineup = (!held || seasonLineupGain >= cfg.freeAddMarginPts) && (!heldCutLineup || seasonGain >= cutSeasonBar);
+  const stableLineupClaim = (!held || seasonLineupGain >= cfg.claimMarginPts) && (!heldCutLineup || seasonGain >= cutSeasonClaimBar);
+  /** The season reading behind a failed lineup check when the cut is the unstable side: the newcomer's gap to him. */
+  const cutGapWhy = (cutNeeds: number): string => `on the season projection he is ${seasonGain >= 0 ? "+" : ""}${seasonGain} against ${against} (needs ${cutNeeds}/week over the season)`;
+  const seasonLineupText = `${seasonLineupGain >= 0 ? "+" : ""}${seasonLineupGain}`;
   // A seat whose later cut is the first-shed man is a deferred swap too.
   const benchUpgrade = benchable && (drop !== null || path === "ir-stash" || laterCost.length > 0) && benchGain >= swapBar && benchPerGame >= cfg.benchSwapMarginPerWeek && stableSwap;
   const droppedPlayer = drop ? state.roster.find((p) => p.name === drop) ?? null : null;
@@ -776,8 +811,13 @@ export function planOne(
   // body the roster sheds first anyway (a rental who starts keeps his seat
   // on an early return, and the cut lands on that man; he is the lowest
   // value on the roster and goes on the next move whatever this one does).
+  // The seat's body is judged on the one value, so an Out season body reads
+  // as a spent rental the week his feed loses his game (Harvey, 10-30): a
+  // skill-position body not playing now keeps his seat unless the season
+  // projection also puts him under the newcomer.
+  const seatStable = (p: RailPlayer): boolean => SWAP_POSITIONS.has(p.position) || !gameDayOut(p) || (p.seasonPoints ?? 0) <= (incoming.seasonPoints ?? 0);
   const seatFree = laterCost.every((c) => (best.returning ?? []).includes(c) || c === cutFirst)
-    && (!needsDrop || !!best.spare || (!!droppedPlayer && likeForLike(incoming.position, droppedPlayer.position) && droppedPlayer.points <= incoming.points));
+    && (!needsDrop || !!best.spare || (!!droppedPlayer && likeForLike(incoming.position, droppedPlayer.position) && droppedPlayer.points <= incoming.points && seatStable(droppedPlayer)));
   // Never the seat of a body the top-N rail protects (an upgradeOnly path):
   // a starter-tier player is not rented over for one week of points, however
   // small the one-value gap the newcomer clears him by (the 2026-10-08
@@ -830,11 +870,16 @@ export function planOne(
     const lineupOk = gain >= cfg.freeAddMarginPts && stableLineup;
     if (costsSomething && !lineupOk && !benchUpgrade) {
       if (rentalOk) return move(kind, false, true, `${label} — ${how}; one-week rental, +${weekGain} this week`);
+      // A newcomer not playing now is no add (skip); a cut not playing now
+      // is the week's number, and the free add waits for the re-rate (wait).
+      const unstableMove = (why: string): WaiverMove => heldCut && !held
+        ? move("wait", false, false, `wait for the Tuesday re-rate: ${why}: no cut on a number that can swing`)
+        : skip(`free agent, and ${why}: no cut on a number that can swing`);
       if (!stableLineup && gain >= cfg.freeAddMarginPts) {
-        return skip(`free agent, and ${describe(best)} reads as +${gain} ROS to the lineup, but he is not playing now (${incoming.injuryStatus}) and the feed assumes his return; on the season projection the lineup gains ${seasonLineupGain >= 0 ? "+" : ""}${seasonLineupGain} (needs ${cfg.freeAddMarginPts}): no cut on a number that can swing`);
+        return unstableMove(`${describe(best)} reads as +${gain} ROS to the lineup, but ${unstableWhy}; ${held ? `on the season projection the lineup gains ${seasonLineupText} (needs ${cfg.freeAddMarginPts})` : cutGapWhy(cfg.benchSwapMarginPerWeek)}`);
       }
       if (!stableSwap && benchable && benchGain >= swapBar && benchPerGame >= cfg.benchSwapMarginPerWeek) {
-        return skip(`free agent, and ${describe(best)} reads as a bench upgrade of +${benchGain} ROS, but he is not playing now (${incoming.injuryStatus}) and the feed assumes his return; on the season projection he is ${seasonGain >= 0 ? "+" : ""}${seasonGain} against ${against ?? "the man he would replace"} (needs ${cfg.benchSwapMarginPerWeek}/week over the season): no cut on a number that can swing`);
+        return unstableMove(`${describe(best)} reads as a bench upgrade of +${benchGain} ROS, but ${unstableWhy}; on the season projection he is ${seasonGain >= 0 ? "+" : ""}${seasonGain} against ${against ?? "the man he would replace"} (needs ${cfg.benchSwapMarginPerWeek}/week over the season)`);
       }
       return skip(`free agent, but ${describe(best)} lifts the lineup just +${gain} ROS and the bench ${benchGain >= 0 ? "+" : ""}${benchGain} (${benchPerGame >= 0 ? "+" : ""}${benchPerGame} a game; needs ${cfg.freeAddMarginPts} lineup or ${cfg.benchSwapMarginPerWeek}/week bench, in total and per game)`);
     }
@@ -861,12 +906,18 @@ export function planOne(
     return move("waiver-claim", true, false, `worth a priority burn: ${why} — ${how}`);
   }
   // Not worth going last: wait for him to clear, then free-add for nothing.
+  const unstableBench = benchable && (drop !== null || path === "ir-stash") && benchGain >= claimSwapBar && benchPerGame >= cfg.benchClaimMarginPerWeek && !stableClaim;
   const why = gain >= cfg.claimMarginPts && !stableLineupClaim
-    ? `+${gain} ROS to the lineup on the feed, but he is not playing now (${incoming.injuryStatus}) and the season-projection lineup gains only ${seasonLineupGain >= 0 ? "+" : ""}${seasonLineupGain} (needs ${cfg.claimMarginPts})`
+    ? `+${gain} ROS to the lineup on the feed, but ${unstableWhy}; ${held ? `the season-projection lineup gains only ${seasonLineupText} (needs ${cfg.claimMarginPts})` : cutGapWhy(cfg.benchClaimMarginPerWeek)}`
+    : unstableBench
+    ? `a bench upgrade of +${benchGain} ROS on the feed, but ${unstableWhy}; on the season projection he is ${seasonGain >= 0 ? "+" : ""}${seasonGain} against ${against} (needs ${cfg.benchClaimMarginPerWeek}/week over the season)`
     : !bigEnough
     ? `only +${gain} ROS to the lineup, under the ${cfg.claimMarginPts}pt claim bar`
     : "would not start for us";
-  return move("wait", false, false, `do NOT claim (${why}); wait for him to clear and free-add at no priority cost`);
+  const then = heldCut && !held && (unstableBench || (gain >= cfg.claimMarginPts && !stableLineupClaim))
+    ? "wait for the Tuesday re-rate, then for him to clear"
+    : "wait for him to clear and free-add at no priority cost";
+  return move("wait", false, false, `do NOT claim (${why}); ${then}`);
   }
 }
 

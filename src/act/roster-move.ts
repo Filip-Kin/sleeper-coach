@@ -36,7 +36,7 @@ import { SWAP_POSITIONS } from "../analysis/streaming.ts";
 import { handLegalCuts } from "./hand-cuts.ts";
 import { bestLineup } from "../analysis/trade.ts";
 import { loadWeekFacts } from "../analysis/week-projections.ts";
-import { weekLineupGain, stashCandidates } from "../analysis/waivers.ts";
+import { weekLineupGain, stashCandidates, LONG_ABSENCE } from "../analysis/waivers.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { byeWeek } from "../data/byes.ts";
 import { logEvent } from "../log.ts";
@@ -193,8 +193,14 @@ switch (cmd) {
       // swap must hold on the full-season projection too, by the same bar.
       const seasonWk = Math.round(((target.seasonPoints - drop.seasonPoints) / LAST_WEEK) * 10) / 10;
       // An unlisted drop (season 0) is unknown, not zero: the check fails (waivers.ts lineupDelta).
-      const stableFails = notPlaying(target.injuryStatus) && (seasonWk < 1 || drop.seasonPoints <= 0);
-      if (notPlaying(target.injuryStatus)) console.log(`stable check: ${target.name} is ${target.injuryStatus}; season ${Math.round(target.seasonPoints)} vs ${Math.round(drop.seasonPoints)} = ${seasonWk >= 0 ? "+" : ""}${seasonWk}/wk over the season`);
+      // The same check on the cut (waivers.ts verdict, 2026-10-31): a drop
+      // who is not playing now has lost his week from the one value (Harvey
+      // for Coleman, 10-30), so the swap must hold on the season too. Never
+      // a kicker or defense: his swap is the stream's.
+      const unstableSide = notPlaying(target.injuryStatus) ? `${target.name} is ${target.injuryStatus} (the feed assumes his return)`
+        : !SWAP_POSITIONS.has(drop.position) && notPlaying(drop.injuryStatus) && !LONG_ABSENCE.has((drop.injuryStatus ?? "").toUpperCase()) ? `${drop.name} is ${drop.injuryStatus} (his feed has lost the week)` : null;
+      const stableFails = unstableSide !== null && (seasonWk < 1 || drop.seasonPoints <= 0);
+      if (unstableSide) console.log(`stable check: ${unstableSide}; season ${Math.round(target.seasonPoints)} vs ${Math.round(drop.seasonPoints)} = ${seasonWk >= 0 ? "+" : ""}${seasonWk}/wk over the season`);
       // The week wait (waivers.ts verdict): a swap that lowers this week's
       // lineup by cutting a man who plays for us this week waits for the week.
       const weekPoints = new Map<string, number>();
@@ -215,7 +221,7 @@ switch (cmd) {
         console.log(`stream cover: ${drop.name} is off in week ${week}; ${target.name} plays it and takes his slot (${weekPoints.get(target.name)} this week); the add bar does not apply${enginePick && enginePick.playerId !== target.playerId ? `; the engine's pick is ${enginePick.name} (${Math.round(enginePick.value)} ROS vs ${Math.round(target.value)})` : ""}`);
       }
       if (gainWk < 1 && !cover && !OVERRIDE) { console.error("under 1.0 points per week: not a swap worth a drop. --override to insist."); process.exit(2); }
-      if (stableFails && !OVERRIDE) { console.error("not playing now and under 1.0 points per week on the season projection: the feed assumes his return, and a cut is for the season. --override to insist."); process.exit(2); }
+      if (stableFails && !OVERRIDE) { console.error(`${unstableSide}, and the swap is under 1.0 points per week on the season projection: a cut is for the season; the Tuesday re-rate carries the injury's real length. --override to insist.`); process.exit(2); }
       // An add only: a claim's drop lands at the clear, after the week for the weekly run, and the engine never holds one.
       if (cmd === "add" && weekGain < 0 && playsThisWeek && !OVERRIDE) { console.error(`lowers this week's lineup while ${drop.name} plays for us: wait for the week, the drop costs it nothing once it is over. --override to insist.`); process.exit(2); }
     }
