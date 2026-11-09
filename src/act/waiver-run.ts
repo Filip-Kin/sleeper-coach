@@ -46,7 +46,7 @@ import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
 import { irEligible as ruleIrEligible, legsToScan, RESERVE_LOCKED_RE, reserveWritable, staleReserve } from "../sleeper/rules.ts";
 import { overlayRosterStatus } from "./lineup-guard.ts";
-import { pendingClaimPlayers, withoutPendingAdds, railsWithPendingDrops } from "./pending-claims.ts";
+import { pendingClaimPlayers, withoutPendingAdds, railsWithPendingDrops, claimDropsOf, NO_PENDING } from "./pending-claims.ts";
 import { droppedAtFromTransactions, waiverStateNow, recentWaiverInstants, nextWaiverRunAt } from "./waiver-status.ts";
 import { claimLockedUntil, lockClaim, CLAIM_LOCKED_RE } from "../league/claim-lock.ts";
 import { fileClaim, moveCost } from "./claim-exec.ts";
@@ -147,9 +147,15 @@ async function main(): Promise<void> {
   // WITH as ours (RailPlayer.claimAdd: never a drop, a stash or a trade
   // give), so a second claim this cycle measures its gain against a roster
   // with the first one landed and cannot count the same seat twice.
-  const pending = await pendingClaimPlayers(tokenGql(), week, rosterId, leagueId).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
+  // Plus the legs we give in a live trade of ours (an open offer, or an
+  // accepted trade in review): held off the drop table with the claim
+  // drops, by the transaction, until it processes or dies (2026-11-09).
+  const pending = await pendingClaimPlayers(tokenGql(), week, rosterId, leagueId).catch(() => NO_PENDING);
   if (pending.adds.length || pending.drops.length) {
-    console.log(`  pending claims: +${pending.adds.length} add(s) held out of the pool, ${pending.drops.length} drop(s) held off the table`);
+    console.log(`  pending claims: +${pending.adds.length} add(s) held out of the pool, ${claimDropsOf(pending).length} drop(s) held off the table`);
+  }
+  for (const g of pending.tradeGives) {
+    console.log(`  trade leg held: ${roster.find((p) => p.playerId === g.playerId)?.name ?? g.playerId} leaves in trade ${g.transactionId} (${g.status}); not a cut while it is live`);
   }
   for (const id of pending.adds) {
     if (roster.some((p) => p.playerId === id)) continue;
@@ -169,7 +175,7 @@ async function main(): Promise<void> {
   const starterIds = await legStarters(tokenGql(), week, mine.starters ?? [], rosterId, leagueId).catch(() => mine.starters ?? []);
   const currentStarters = starterIds.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
 
-  const rails = railsWithPendingDrops(DEFAULT_WAIVERS.rails, roster, pending.drops);
+  const rails = railsWithPendingDrops(DEFAULT_WAIVERS.rails, roster, pending);
   const waiverCfg = { ...DEFAULT_WAIVERS, rails };
 
   // Available = fantasy players on no roster in the league. Rank by ROS, take the

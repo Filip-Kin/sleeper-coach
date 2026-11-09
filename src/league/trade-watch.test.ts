@@ -15,7 +15,7 @@ import {
   runProposer, pairKey, onCooldown, liveOffers, reconcileProposals, ensureTable, OFFER_TTL_DAYS, type ProposerIo,
 } from "./trade-propose.ts";
 import { IntentStore } from "../analysis/trade-intent.ts";
-import { applyPending, type LeagueSnapshot } from "../analysis/trade-wire.ts";
+import { applyPending, markTradeGives, type LeagueSnapshot } from "../analysis/trade-wire.ts";
 import { isStash } from "../analysis/value.ts";
 import { fitsObjective, objectiveScore, outboundConfig, DEFAULT_FAIRNESS, DEFAULT_PROPOSER, type FairnessConfig } from "../analysis/trade-fair.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
@@ -197,6 +197,17 @@ describe("T11 our open offers are re-checked every poll", () => {
     const open = [tx("ok", { consenterIds: [US], adds: { tRB2: US, tRB4: US, WRc: THEM, WRd: THEM }, drops: { tRB2: THEM, tRB4: THEM, WRc: US, WRd: US } })];
     const stale = await reviewOpenOffers(open, snap(), fakeDeps());
     expect(stale).toEqual([]);
+  });
+  test("the snapshot holds the offer's own legs for it (markTradeGives); the review frees them, and only them (2026-11-09)", async () => {
+    const open = [tx("ok", { consenterIds: [US], adds: { tRB2: US, tRB4: US, WRc: THEM, WRd: THEM }, drops: { tRB2: THEM, tRB4: THEM, WRc: US, WRd: US } })];
+    const held = markTradeGives(snap(), [{ playerId: "WRc", transactionId: "ok" }, { playerId: "WRd", transactionId: "ok" }]);
+    expect((held.rosterOf.get(US) ?? []).filter((p) => p.tradeGive === "ok").length).toBe(2);
+    expect(await reviewOpenOffers(open, held, fakeDeps())).toEqual([]);
+    // The same legs held for ANOTHER live offer: this one can no longer give them.
+    const other = markTradeGives(snap(), [{ playerId: "WRc", transactionId: "earlier" }]);
+    expect(await reviewOpenOffers(open, other, fakeDeps())).toEqual(["ok"]);
+    const ev = eventsOf("trade-offer-stale")[0]!;
+    expect(JSON.stringify(ev.detail)).toContain("committed to a pending roster move");
   });
 });
 

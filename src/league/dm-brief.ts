@@ -167,9 +167,10 @@ export function renderRosters(snap: LeagueSnapshot, nameOf: Map<string, string>,
       lines.push(`  on injured reserve (not startable, ${mine ? "NOT tradeable, do not offer them" : "the owner cannot start them"}): ${stashed.map((p) => p.name).join(", ")}`);
     }
 
-    // Same for the drop side of our own pending waiver claims: the rails
-    // refuse to trade him, so the model must not dangle him in conversation.
-    const committed = mine ? roster.filter((p) => p.claimDrop) : [];
+    // Same for the drop side of our own pending waiver claims and the legs
+    // of our live trades: the rails refuse to trade him, so the model must
+    // not dangle him in conversation.
+    const committed = mine ? roster.filter((p) => p.claimDrop || p.tradeGive) : [];
     if (committed.length) {
       lines.push(`  committed to a pending roster move (NOT tradeable, do not offer them, do not say what the move is): ${committed.map((p) => p.name).join(", ")}`);
     }

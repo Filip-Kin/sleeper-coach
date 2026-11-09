@@ -31,6 +31,15 @@ export interface RailPlayer {
    *  ours (so a second claim does not count the seat he will take), but not
    *  ours yet: never a drop, never a stash, never offered in a trade. */
   claimAdd?: boolean;
+  /** A leg we give in a live trade of ours (the transaction id): an offer
+   *  we sent that is still open, or a trade we accepted that is in review.
+   *  He is ours until it processes, so lineup and depth maths count him,
+   *  but he is committed: no cut takes him and no second offer gives him
+   *  (Sleeper voids a trade whose player has left). Set on the trade
+   *  snapshot (trade-wire.ts markTradeGives); the cut paths hold him by
+   *  name through the rails instead. 2026-11-09: Shakir, Meyers and
+   *  Prescott were legs of a live +13 offer and cuts #2 to #4. */
+  tradeGive?: string;
   /** Starts for us this week and the trade would process before his game,
    *  with nobody on the roster who can take his slot (analysis/trade-week.ts
    *  weekLockedIds, the kept-starters rule at trade-processing time). A
@@ -71,6 +80,11 @@ export interface RailConfig {
   // a tie plus transaction risk is a loss.
   // Names that may never be dropped regardless of projection.
   neverDrop: string[];
+  /** Why a name is on the list, keyed by the lower-cased name, for the
+   *  refusal's reason: a pending claim's drop or a live trade's leg (set
+   *  by act/pending-claims.ts railsWithPendingDrops). A name without one
+   *  is simply on the list. */
+  neverDropWhy?: Record<string, string>;
 }
 
 export const DEFAULT_RAILS: RailConfig = {
@@ -96,7 +110,8 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
     return { allowed: false, reason: `"${target}" is not on the roster as read back from Sleeper` };
   }
   if (cfg.neverDrop.some((n) => norm(n) === t)) {
-    return { allowed: false, reason: `"${player.name}" is on the never-drop list` };
+    const why = cfg.neverDropWhy?.[player.name.toLowerCase()];
+    return { allowed: false, reason: why ? `"${player.name}" is not a cut: ${why}` : `"${player.name}" is on the never-drop list` };
   }
   // The drop side of a pending waiver claim is spoken for. Cutting or trading
   // him now kills the claim (nobody left to drop) or the trade (nobody left to
@@ -109,6 +124,13 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
     // The reason reaches the rival in a DM, so it does not say what the move
     // is: "the drop of our pending waiver claim" tells a manager with better
     // waiver priority that a claim is in and who is about to hit the wire.
+    return { allowed: false, reason: `"${player.name}" is committed to a pending roster move and cannot be moved until it processes` };
+  }
+  // A leg of a live trade of ours (trade-wire.ts markTradeGives): giving
+  // him in a second deal, or cutting him, voids the first when it
+  // processes. The reason reaches the rival in a DM, so it does not name
+  // the trade or the manager it is with.
+  if (player.tradeGive) {
     return { allowed: false, reason: `"${player.name}" is committed to a pending roster move and cannot be moved until it processes` };
   }
   // A starter this week whose slot nobody else can fill, leaving before his

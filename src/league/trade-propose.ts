@@ -39,7 +39,7 @@ import { proposeTrades, giveEligibleForProposal, byeAwareLineupTotal, depthInsur
 import { gateOutgoing, offerKey, IntentStore, DEFAULT_GATE, type GateOptions } from "../analysis/trade-intent.ts";
 import type { TradePlayer } from "../analysis/trade.ts";
 import { shortlist, pickOne, type PickCandidate, type PickResult } from "./trade-pick.ts";
-import { pastTradeDeadline, tradeDead, irEligible } from "../sleeper/rules.ts";
+import { pastTradeDeadline, irEligible, offerLive, OFFER_TTL_DAYS } from "../sleeper/rules.ts";
 import { STATE_DIR } from "../paths.ts";
 import { sleeper } from "../sleeper/client.ts";
 import type { RosterSettings, LeagueSettings } from "../sleeper/types.ts";
@@ -50,7 +50,7 @@ export const MAX_OPEN_OFFERS = 2;
 export const REPROPOSE_COOLDOWN_DAYS = 21;
 /** Offers expire so a stale one cannot be accepted weeks later against a roster
  *  that has changed underneath it. */
-export const OFFER_TTL_DAYS = 3;
+export { OFFER_TTL_DAYS };
 
 export interface ProposerState {
   db: Database;
@@ -152,11 +152,12 @@ export function ensureTable(db: Database): void {
 }
 
 /** Our outstanding offers that are still alive: not dead by status and not
- *  past the expiry we set when we sent them. api.ts does not read
- *  settings.expires_at, so the expiry is reconstructed from created + TTL,
- *  which is what every offer we send carries. */
+ *  past their expiry (rules.ts offerLive: Sleeper's expires_at when read
+ *  back, else created + the TTL every offer we send carries). The same
+ *  rule decides which offers' legs are held from the cut paths
+ *  (act/pending-claims.ts), so an offer is live or dead everywhere at once. */
 export function liveOffers(open: PendingTrade[], now: number): PendingTrade[] {
-  return open.filter((t) => !tradeDead({ status: t.status, settings: { expires_at: t.expiresAt ?? Math.floor(t.created / 1000) + OFFER_TTL_DAYS * 86_400 } }, now));
+  return open.filter((t) => offerLive(t, now));
 }
 
 /** Settle trade_proposals rows against what Sleeper still lists (T12): a row

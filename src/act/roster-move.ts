@@ -31,7 +31,7 @@ import { leagueRosters, weekSchedule } from "../sleeper/graphql.ts";
 import { forcedCutNotBefore, fmtZoned } from "./reserve-hold.ts";
 import { tokenGql, myRosterView, addFreeAgent, submitWaiverClaim, dropPlayers, updateReserve, currentStarters, cancelWaiverClaim } from "../league/api.ts";
 import { loadValues, liveStatusFromRosters, toRail, notPlaying, LAST_WEEK, markSurplus, type PlayerValue } from "../analysis/value.ts";
-import { DEFAULT_RAILS } from "../analysis/rails.ts";
+import { DEFAULT_RAILS, canDrop } from "../analysis/rails.ts";
 import { SWAP_POSITIONS } from "../analysis/streaming.ts";
 import { handLegalCuts } from "./hand-cuts.ts";
 import { bestLineup } from "../analysis/trade.ts";
@@ -40,7 +40,7 @@ import { weekLineupGain, stashCandidates, LONG_ABSENCE } from "../analysis/waive
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { byeWeek } from "../data/byes.ts";
 import { logEvent } from "../log.ts";
-import { pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
+import { pendingClaimPlayers, claimsToCancel, railsWithPendingDrops, heldReason, claimDropsOf, NO_PENDING, type HeldClaim } from "./pending-claims.ts";
 
 const args = process.argv.slice(2);
 const cmd = args[0] ?? "";
@@ -75,7 +75,7 @@ const rosters = await leagueRosters(config.leagueId);
 const values = await loadValues(state.season || config.season, week, league.scoring_settings, liveStatusFromRosters(rosters), { forceRefresh: true });
 const view = await myRosterView();
 const starters = new Set(await currentStarters(gql, week, []).catch(() => [] as string[]));
-const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0, claims: [] as PendingClaim[] }));
+const pending = await pendingClaimPlayers(gql, week).catch(() => NO_PENDING);
 const weekFacts = await loadWeekFacts(state.season || config.season, week, league.scoring_settings);
 const startable = weekFacts.startable;
 const SLOTS = league.roster_positions.filter((s) => s !== "BN" && s !== "IR");
@@ -95,9 +95,13 @@ const fmt = (v: PlayerValue | undefined, id: string): string => v
 
 // The picture, live.
 const rail = markSurplus(view.active.map((e) => { const v = values.get(e.playerId); return v ? toRail(v, { bye: byeWeek(v.team) ?? undefined }) : { playerId: e.playerId, name: e.name, position: e.position, points: 0 }; }));
+// Every committed man (pending-claims.ts): the drop of a pending claim and
+// each leg we give in a live trade of ours (an open offer, or an accepted
+// trade in review). Neither is a cut, a stash, or a body who fills a slot.
 const pendingDrops: string[] = pending.drops;
+const heldRails = railsWithPendingDrops(DEFAULT_RAILS, rail, pending);
 // Who may leave (hand-cuts.ts handLegalCuts): the cut order less the rails,
-// a pending claim's drop and the starters this week's cut keeps
+// a committed man and the starters this week's cut keeps
 // (roster-fit.ts keptStarters: a kicker or defense with a better body
 // behind him who can take the slot is not kept, and for an add a starting
 // back, receiver or tight end the target beats at his own position and can
@@ -116,13 +120,15 @@ const isCovered = (p: PlayerValue): boolean => covered.some((c) => c.playerId ==
 // claim's drop; longest absence first.
 const stashable = stashCandidates(
   { roster: rail, irEligible: (st) => irEligible(st, league.settings), currentStarters: rail.filter((p) => starters.has(p.playerId!) && !irEligible(p.injuryStatus, league.settings)).map((p) => p.name) },
-  { rails: { ...DEFAULT_RAILS, neverDrop: [...DEFAULT_RAILS.neverDrop, ...rail.filter((p) => pendingDrops.includes(p.playerId!)).map((p) => p.name)] } },
+  { rails: heldRails },
 );
-console.log(`\nWeek ${week}. Active ${view.active.length}/${league.roster_positions.length}, IR ${view.reserve.map((e) => e.name).join(", ") || "empty"}. Pending claims: +${pending.adds.length} / -${pending.drops.length}.`);
+const tradeGiveOf = (id: string) => pending.tradeGives.find((g) => g.playerId === id);
+console.log(`\nWeek ${week}. Active ${view.active.length}/${league.roster_positions.length}, IR ${view.reserve.map((e) => e.name).join(", ") || "empty"}. Pending claims: +${pending.adds.length} / -${claimDropsOf(pending).length}. Trade legs held: ${pending.tradeGives.length}.`);
 console.log("\nOUR ROSTER (live values; * = starts this week; cut order among legal cuts shown)");
 for (const e of [...view.active].sort((a, b) => (values.get(b.playerId)?.value ?? 0) - (values.get(a.playerId)?.value ?? 0))) {
   const idx = legalCuts.findIndex((p) => p.playerId === e.playerId);
-  console.log(`  ${starters.has(e.playerId) ? "*" : " "} ${fmt(values.get(e.playerId), e.playerId)}${idx >= 0 ? `   cut #${idx + 1}` : ""}`);
+  const give = tradeGiveOf(e.playerId);
+  console.log(`  ${starters.has(e.playerId) ? "*" : " "} ${fmt(values.get(e.playerId), e.playerId)}${idx >= 0 ? `   cut #${idx + 1}` : ""}${give ? `   HELD: trade ${give.transactionId} (${give.status})` : ""}`);
 }
 for (const e of view.reserve) console.log(`  IR ${fmt(values.get(e.playerId), e.playerId)}`);
 
@@ -154,8 +160,12 @@ function checkCut(leaving: PlayerValue, target?: PlayerValue): void {
   const rank = order.findIndex((p) => p.playerId === leaving.playerId);
   if (rank < 0) {
     // An empty order is the same refusal: the reason stays in writing, so
-    // --override still works (a kicker swap with no week table, say).
-    console.error(`\n${leaving.name} is not a legal cut (a kept starter this week, pending claim's drop, never-drop, or a protected stash)${order.length ? "" : `; no legal cut exists${samePosition ? ` at ${leaving.position}` : ""}`}.`);
+    // --override still works (a kicker swap with no week table, say). The
+    // rails' own reason when they have one (a committed man names the
+    // claim or the trade that holds him).
+    const verdict = canDrop(leaving.name, rail, heldRails);
+    const why = heldReason(leaving.playerId, pending) ?? (verdict.allowed ? "a kept starter this week or a protected stash" : verdict.reason);
+    console.error(`\n${leaving.name} is not a legal cut: ${why}${order.length ? "" : `; no legal cut exists${samePosition ? ` at ${leaving.position}` : ""}`}.`);
     if (!OVERRIDE) process.exit(2);
     console.error(`override given: ${OVERRIDE}`);
   } else if (rank > 0) {
@@ -261,7 +271,7 @@ switch (cmd) {
         if (!view.activeIds.has(stash.playerId)) { console.error(`${stash.name} is not on our active roster`); process.exit(2); }
         if (!irEligible(stash.injuryStatus, league.settings)) { console.error(`${stash.name} is ${stash.injuryStatus ?? "healthy"}: not IR-eligible in this league`); process.exit(2); }
         if (!stashable.some((p) => p.playerId === stash.playerId)) {
-          console.error(`\n${stash.name} is IR-eligible but the engine would not stash him (a starter this week, a pending claim's drop, or never-drop). ${seatBy}.`);
+          console.error(`\n${stash.name} is IR-eligible but the engine would not stash him (a starter this week, a pending claim's drop, a live trade's leg, or never-drop). ${seatBy}.`);
           if (!OVERRIDE) { console.error("refusing without --override \"<reason>\""); process.exit(2); }
           console.error(`override given: ${OVERRIDE}`);
         } else if (stashable[0]!.playerId !== stash.playerId) {

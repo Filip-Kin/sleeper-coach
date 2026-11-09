@@ -18,7 +18,7 @@ import { weekSchedule, type ScheduleGame } from "../sleeper/graphql.ts";
 import { loadWeekProjections, byPlayerId, tableIsUsable, type WeekProjection } from "./week-projections.ts";
 import { weekLockedIds } from "./trade-week.ts";
 import { tokenGql, pendingRosterDelta, applyRosterDelta, pendingTrades, currentStarters, type Gql, type PendingTrade } from "../league/api.ts";
-import { pendingClaimPlayers } from "../act/pending-claims.ts";
+import { pendingClaimPlayers, NO_PENDING } from "../act/pending-claims.ts";
 import { sleeper } from "../sleeper/client.ts";
 import { loadValues, liveStatusFromRosters, scalePts, markSurplus } from "./value.ts";
 import { loadPlayers } from "../data/players.ts";
@@ -112,6 +112,23 @@ export function markClaimDrops(snap: LeagueSnapshot, dropIds: readonly string[])
   if (!current.some((p) => p.playerId && ids.has(p.playerId))) return snap;
   const rosterOf = new Map(snap.rosterOf);
   rosterOf.set(snap.ourRosterId, current.map((p) => (p.playerId && ids.has(p.playerId) ? { ...p, claimDrop: true } : p)));
+  return { ...snap, rosterOf };
+}
+
+/** Flag the legs we give in our live trades (an open offer we sent, or an
+ *  accepted trade in review) on OUR roster with the transaction that holds
+ *  each (RailPlayer.tradeGive). Pure. He stays on the roster (ours until it
+ *  processes); canDrop and giveEligibleForProposal refuse him, so no second
+ *  offer gives him and no inbound offer takes him, and the DM brief lists
+ *  him as committed. The review of our own offer clears its own legs first
+ *  (trade-watch.ts reviewOpenOffers). */
+export function markTradeGives(snap: LeagueSnapshot, gives: readonly { playerId: string; transactionId: string }[]): LeagueSnapshot {
+  if (!gives.length) return snap;
+  const txOf = new Map(gives.map((g) => [g.playerId, g.transactionId]));
+  const current = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  if (!current.some((p) => p.playerId && txOf.has(p.playerId))) return snap;
+  const rosterOf = new Map(snap.rosterOf);
+  rosterOf.set(snap.ourRosterId, current.map((p) => (p.playerId && txOf.has(p.playerId) ? { ...p, tradeGive: txOf.get(p.playerId) } : p)));
   return { ...snap, rosterOf };
 }
 
@@ -235,8 +252,14 @@ export async function snapshotWithPending(gql: Gql = tokenGql(), leg?: number, b
   // Our own pending waiver claims: the adds are not ours yet and a claim can
   // lose on priority, so nothing arrives; the drops are committed and are
   // flagged so no trade path offers or gives one away (markClaimDrops).
-  const claims = await pendingClaimPlayers(gql, week, snap.ourRosterId).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
-  const effective = markClaimDrops(applyPending(snap, delta), claims.drops);
+  // The legs we give in a live trade of ours are flagged with the
+  // transaction (markTradeGives): a second offer never gives one. An open
+  // offer's legs are on the roster; an accepted trade in review (status
+  // pending) is not applied by the delta above, which reads proposed,
+  // processing and in_progress only, so its legs are on the roster too and
+  // are held the same way.
+  const claims = await pendingClaimPlayers(gql, week, snap.ourRosterId).catch(() => NO_PENDING);
+  const effective = markTradeGives(markClaimDrops(applyPending(snap, delta), claims.claims.flatMap((c) => c.drops)), claims.tradeGives);
   // This week's starters a trade may not give away (trade-week.ts): on the
   // leg, playing, nobody to take the slot, and the trade processing before
   // the game. Read over the effective roster, so a man already leaving in a
@@ -253,7 +276,13 @@ export async function counterSnapshot(gql: Gql, leg: number): Promise<LeagueSnap
 
 // Turn a Sleeper trade transaction into an offer from OUR perspective, and score
 // it. `adds`/`drops` map player_id -> roster_id receiving/losing him.
-export type Tx = { adds?: Record<string, number> | null; drops?: Record<string, number> | null; roster_ids?: number[] };
+export type Tx = {
+  adds?: Record<string, number> | null; drops?: Record<string, number> | null; roster_ids?: number[];
+  /** The transaction being judged, when it is one of ours: the snapshot
+   *  holds its own legs for it (markTradeGives) and the evaluation frees
+   *  them, as reviewOpenOffers does. Absent for an inbound offer. */
+  transaction_id?: string;
+};
 
 /** Any single roster's own side of a transaction: what THEY give and receive,
  *  regardless of who else is party to it or how many are. Lineup math is
@@ -353,7 +382,9 @@ export async function evaluateLiveOffer(
   // snapshot when it has one; the CLI does not.
   const snap = base ?? (await snapshotWithPending());
   const { offer, theirRosterId } = offerFromTransaction(tx, snap);
-  const ourRoster = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  // Our own offer, re-read (the CLI's trade-eval): its legs are held for
+  // it, not against it.
+  const ourRoster = (snap.rosterOf.get(snap.ourRosterId) ?? []).map((p) => (tx.transaction_id && p.tradeGive === tx.transaction_id ? { ...p, tradeGive: undefined } : p));
   const others = otherSides(tx, snap);
 
   // THE THREE-WAY CASE. A trade naming more than one other roster cannot be

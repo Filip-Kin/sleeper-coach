@@ -668,6 +668,11 @@ export function giveEligibleForProposal(
   if (present.claimDrop) {
     return { ok: false, reason: `"${present.name}" is committed to a pending roster move and cannot be moved until it processes` };
   }
+  // A leg of a live offer of ours (trade-wire.ts markTradeGives): a second
+  // offer giving him collides with the first the same way.
+  if (present.tradeGive) {
+    return { ok: false, reason: `"${present.name}" is committed to a pending roster move and cannot be moved until it processes` };
+  }
   // Starts for us this week with nobody to take his slot, and the trade
   // would process before his game (rails.ts weekLocked, set by the trade
   // snapshot). A proposal never costs the week's lineup for season points;

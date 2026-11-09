@@ -160,11 +160,14 @@ const REAL_DEPS: TradeWatchDeps = {
 const staleLogged = new Set<string>();
 export async function reviewOpenOffers(open: PendingTrade[], snap: LeagueSnapshot, deps: TradeWatchDeps): Promise<string[]> {
   const stale: string[] = [];
-  const ours = snap.rosterOf.get(snap.ourRosterId) ?? [];
+  const held = snap.rosterOf.get(snap.ourRosterId) ?? [];
   for (const t of open) {
     const { offer, theirRosterId } = offerFromTransaction({ adds: t.adds, drops: t.drops, roster_ids: t.rosterIds }, snap);
     if (theirRosterId === null) continue;
     const theirs = snap.rosterOf.get(theirRosterId) ?? [];
+    // The snapshot holds this offer's own legs for it (trade-wire.ts
+    // markTradeGives); the offer is judged with them free to give.
+    const ours = held.map((p) => (p.tradeGive === t.transactionId ? { ...p, tradeGive: undefined } : p));
     const ev = evaluateTradeTwoSided(offer, ours, theirs, outboundConfig(await deps.fairness(snap, theirRosterId)));
     if (ev.verdict === "accept") { staleLogged.delete(t.transactionId); continue; }
     stale.push(t.transactionId);

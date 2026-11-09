@@ -23,7 +23,7 @@ import { keptStarters } from "./analysis/roster-fit.ts";
 import { loadStartableThisWeek } from "./analysis/week-projections.ts";
 import { reconcileReserve } from "./act/reserve-reconcile.ts";
 import { DropIntentStore, decideIntent, intentsToConfirm } from "./act/drop-intent.ts";
-import { pendingClaimPlayers, railsWithPendingDrops } from "./act/pending-claims.ts";
+import { pendingClaimPlayers, railsWithPendingDrops, NO_PENDING } from "./act/pending-claims.ts";
 import { RunLedger } from "./act/run-ledger.ts";
 import { runJobProcess, runJobWithRetry, JOB_TIMEOUT_MS } from "./act/spawn-job.ts";
 import { reactToDropsCore } from "./act/drop-react.ts";
@@ -579,8 +579,10 @@ async function reconcileRoster(gql: ReturnType<typeof leagueGql>): Promise<void>
     // Names as the rail roster spells them (a defense is "SEA" there).
     const nameOf = new Map(full.map((p) => [p.playerId ?? "", p.name]));
     const starterNames = starterIds.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
-    const pending = await pendingClaimPlayers(gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0 }));
-    const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, full, pending.drops);
+    // `pending.drops` is every committed man: a claim's drop and a leg we
+    // give in a live trade (pending-claims.ts, 2026-11-09).
+    const pending = await pendingClaimPlayers(gql, week).catch(() => NO_PENDING);
+    const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, full, pending);
     const startable = await loadStartableThisWeek(state.season || config.season, week, league.scoring_settings);
     const pendingDrops = new Set<string>(pending.drops);
     const keep = keptStarters(starterNames, full, (body, starter) => startable(body, starter) && !pendingDrops.has(body.playerId ?? ""));

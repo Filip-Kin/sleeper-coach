@@ -124,6 +124,10 @@ t("our backup QB is worth ~nothing to the lineup despite a huge projection", dak
 t("a real FLEX starter is worth a lot to the lineup", walkerMarginal > 10, String(walkerMarginal));
 t("so the backup QB is offerable", giveEligibleForProposal(P("Dak Prescott", "QB", 250, { bye: 10 }), ours, DEFAULT_FAIRNESS).ok);
 t("and the FLEX starter is not", !giveEligibleForProposal(P("Kenneth Walker", "RB", 244, { bye: 5 }), ours, DEFAULT_FAIRNESS).ok);
+// 2026-11-09: the backup QB is a leg of a live offer of ours; a second offer never gives him.
+const oursWithLeg = ours.map((p) => (p.name === "Dak Prescott" ? { ...p, tradeGive: "1425359907405783040" } : p));
+const legGate = giveEligibleForProposal(P("Dak Prescott", "QB", 250, { bye: 10 }), oursWithLeg, DEFAULT_FAIRNESS);
+t("a leg of our live offer is not offered again", !legGate.ok && legGate.reason.includes("committed to a pending roster move"), legGate.reason);
 console.log(`\n  ${pass} passed, ${fail} failed (marginal value)`);
 process.exit(fail ? 1 : 0);
 

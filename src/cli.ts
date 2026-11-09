@@ -174,7 +174,7 @@ async function cmdTradeEval(): Promise<void> {
     console.log(`No proposed trade ${txid} in legs ${week} or ${week - 1} of league ${config.leagueId}.`);
     process.exit(2);
   }
-  const { evaluation, theirRosterId, isMultiParty, snap } = await evaluateLiveOffer({ adds: tx.adds, drops: tx.drops, roster_ids: tx.rosterIds });
+  const { evaluation, theirRosterId, isMultiParty, snap } = await evaluateLiveOffer({ adds: tx.adds, drops: tx.drops, roster_ids: tx.rosterIds, transaction_id: txid });
   const { offer } = offerFromTransaction({ adds: tx.adds, drops: tx.drops, roster_ids: tx.rosterIds }, snap);
   const fmt = (ps: { name: string; position: string; points: number; onIr?: boolean }[]) =>
     ps.length ? ps.map((p) => `${p.name} (${p.position} ${Math.round(p.points)}${p.onIr ? ", IR" : ""})`).join(", ") : "nothing";

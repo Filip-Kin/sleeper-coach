@@ -72,7 +72,7 @@ import { snapshot, scheduleContext } from "../analysis/trade-wire.ts";
 import { dropPlayers, updateReserve, myRosterView, currentStarters, cancelWaiverClaim, type Gql } from "../league/api.ts";
 import { weekSchedule } from "../sleeper/graphql.ts";
 import { forcedCutNotBefore, fmtZoned } from "./reserve-hold.ts";
-import { railsWithPendingDrops, pendingClaimPlayers, claimsToCancel, type PendingClaim, type HeldClaim } from "./pending-claims.ts";
+import { railsWithPendingDrops, pendingClaimPlayers, claimsToCancel, NO_PENDING, type HeldClaim } from "./pending-claims.ts";
 export { claimsToCancel, type HeldClaim } from "./pending-claims.ts";
 import { DropIntentStore, decideIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
@@ -348,8 +348,11 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   // "Seattle Seahawks" in the view), since the chooser matches on rail names.
   const nameOf = new Map(railRoster.map((p) => [p.playerId ?? "", p.name]));
   const keep = starters.map((id) => nameOf.get(id)).filter((n): n is string => !!n);
-  const pending = await pendingClaimPlayers(deps.gql, week).catch(() => ({ adds: [], drops: [], slotsNeeded: 0, claims: [] as PendingClaim[] }));
-  const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, railRoster, pending.drops);
+  // `pending.drops` is every committed man: a claim's drop and a leg we
+  // give in a live trade (pending-claims.ts, 2026-11-09); neither is the
+  // cut for a seat nor a body who can fill a starter's slot.
+  const pending = await pendingClaimPlayers(deps.gql, week).catch(() => NO_PENDING);
+  const rails = railsWithPendingDrops(DEFAULT_FAIRNESS.rails, railRoster, pending);
   // Our no-drop claims, each at the best rest-of-season value among its
   // adds: the ONE value, so the rental (a defense at 71) yields before the
   // season body (a back at 137).

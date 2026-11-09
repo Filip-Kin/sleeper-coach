@@ -13,7 +13,7 @@ export interface FixtureRoster { rosterId: number; players: string[]; reserve: s
 export interface Fixture {
   capturedAt: string; week: number; ourRosterId: number; rosterPositions: string[];
   rosters: FixtureRoster[];
-  pendingClaims: { adds: string[]; drops: string[]; slotsNeeded: number };
+  pendingClaims: { adds: string[]; drops: string[]; slotsNeeded: number; tradeGives?: { playerId: string; transactionId: string; status: string; leg: number }[] };
   waiverPositions?: Record<string, number | null>;
   players: Record<string, FixturePlayer>;
 }

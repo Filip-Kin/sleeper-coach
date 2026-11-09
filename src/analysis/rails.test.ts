@@ -47,5 +47,15 @@ t("refuses a name that is not on the roster", !ghost.allowed, ghost.reason);
 const cfg = { ...DEFAULT_RAILS, neverDrop: ["Bo Nix"] };
 t("never-drop list overrides projection", !canDrop("Bo Nix", roster, cfg).allowed);
 
+// 9. The never-drop list carries its reason when it has one (2026-11-09).
+const why = canDrop("Bo Nix", roster, { ...cfg, neverDropWhy: { "bo nix": "he is a leg of our live trade 42 (proposed)" } });
+t("a held name is refused with the transaction that holds him", !why.allowed && why.reason.includes("live trade 42"), why.reason);
+
+// 10. A leg of a live trade of ours, flagged on the trade snapshot, is refused
+// with the DM-safe reason (no transaction, no manager named).
+const legged = roster.map((p) => (p.name === "Bo Nix" ? { ...p, tradeGive: "42" } : p));
+const leg = canDrop("Bo Nix", legged);
+t("a trade leg is not given or cut", !leg.allowed && leg.reason.includes("committed to a pending roster move") && !leg.reason.includes("42"), leg.reason);
+
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

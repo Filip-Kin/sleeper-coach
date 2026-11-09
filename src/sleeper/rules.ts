@@ -83,6 +83,16 @@ export function tradeDead(t: { status?: string | null; settings?: { expires_at?:
   const exp = t.settings?.expires_at;
   return typeof exp === "number" && exp > 0 && exp * 1000 < nowMs;
 }
+/** How long an offer we send stays open (settings.expires_at on propose_trade). */
+export const OFFER_TTL_DAYS = 3;
+/** A trade of ours that still binds its legs: not dead by status, and not
+ *  past its expiry. An offer with no expiry read back (every offer we send
+ *  carries one; Sleeper sets one on a trade in review) is taken to expire
+ *  OFFER_TTL_DAYS after it was created, the TTL we send, so a stale row
+ *  never holds a player for the season. `created` is ms, `expiresAt` seconds. */
+export function offerLive(t: { status?: string | null; created: number; expiresAt?: number | null }, nowMs: number): boolean {
+  return !tradeDead({ status: t.status, settings: { expires_at: t.expiresAt ?? Math.floor(t.created / 1000) + OFFER_TTL_DAYS * 86_400 } }, nowMs);
+}
 /** A transaction is filed under the leg it was created in and stays there until
  *  processed, while the NFL week rolls over on Tuesday. Every read of open
  *  transactions has to look one leg back or it goes blind on Tuesday and

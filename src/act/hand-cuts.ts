@@ -38,7 +38,8 @@ export interface HandCutArgs {
   roster: readonly RailPlayer[];
   /** This week's leg, by name. */
   starters: readonly string[];
-  /** Player ids committed as the drop of a pending claim. */
+  /** Player ids committed to leave: the drop of a pending claim and each
+   *  leg we give in a live trade of ours (pending-claims.ts `drops`). */
   pendingDrops: readonly string[];
   /** week-projections.ts startableThisWeek over the live week: can `body`
    *  take `starter`'s slot this week. False for everyone when the week is
