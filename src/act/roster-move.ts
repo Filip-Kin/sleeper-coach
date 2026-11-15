@@ -36,7 +36,7 @@ import { SWAP_POSITIONS } from "../analysis/streaming.ts";
 import { handLegalCuts } from "./hand-cuts.ts";
 import { bestLineup } from "../analysis/trade.ts";
 import { loadWeekFacts } from "../analysis/week-projections.ts";
-import { weekLineupGain, stashCandidates, LONG_ABSENCE } from "../analysis/waivers.ts";
+import { weekLineupGain, weekLockOf, stashCandidates, LONG_ABSENCE } from "../analysis/waivers.ts";
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { byeWeek } from "../data/byes.ts";
 import { logEvent } from "../log.ts";
@@ -74,7 +74,12 @@ const league = await sleeper.league(config.leagueId);
 const rosters = await leagueRosters(config.leagueId);
 const values = await loadValues(state.season || config.season, week, league.scoring_settings, liveStatusFromRosters(rosters), { forceRefresh: true });
 const view = await myRosterView();
-const starters = new Set(await currentStarters(gql, week, []).catch(() => [] as string[]));
+// null: the leg could not be read. Nobody is then known to start, and this
+// week's lineup gain of a swap is unknown (no slot is known locked or open).
+const legRead = await currentStarters(gql, week, []).catch(() => null);
+const starterIds = legRead ?? [];
+const legKnown = starterIds.some((id) => id && id !== "0");
+const starters = new Set(starterIds);
 const pending = await pendingClaimPlayers(gql, week).catch(() => NO_PENDING);
 const weekFacts = await loadWeekFacts(state.season || config.season, week, league.scoring_settings);
 const startable = weekFacts.startable;
@@ -216,9 +221,14 @@ switch (cmd) {
       const weekPoints = new Map<string, number>();
       for (const p of rail) weekPoints.set(p.name, weekFacts.points(p, weekFacts.teamOf(p.playerId ?? "")));
       weekPoints.set(target.name, weekFacts.points({ playerId: target.playerId, injuryStatus: target.injuryStatus }, target.team, true));
-      const weekGain = weekLineupGain({ ...toRail(target), onWaivers: false }, drop.name, { roster: rail, openBenchSlots: 0, openIrSlots: 0, startingSlots: SLOTS, weekPoints });
+      // Starters whose game has kicked off hold their slots (waivers.ts
+      // weekLineupGain); the team is the week table's, else the value's.
+      const teamNow = (id: string): string | null => weekFacts.teamOf(id) ?? values.get(id)?.team ?? null;
+      const weekGain = legKnown ? weekLineupGain({ ...toRail(target), onWaivers: false }, drop.name, { roster: rail, openBenchSlots: 0, openIrSlots: 0, startingSlots: SLOTS, weekPoints, weekLock: weekLockOf(starterIds, SLOTS.length, rail, (p) => weekFacts.begun(teamNow(p.playerId ?? ""))) }) : 0;
       const playsThisWeek = (weekPoints.get(drop.name) ?? 0) > 0;
-      console.log(`this week: lineup ${weekGain >= 0 ? "+" : ""}${weekGain} with the swap${weekFacts.known ? "" : " (no week table: taken as 0)"}${playsThisWeek ? `; ${drop.name} plays this week (${weekPoints.get(drop.name)})` : ""}`);
+      console.log(legKnown
+        ? `this week: lineup ${weekGain >= 0 ? "+" : ""}${weekGain} with the swap${weekFacts.known ? "" : " (no week table: taken as 0)"}${playsThisWeek ? `; ${drop.name} plays this week (${weekPoints.get(drop.name)})` : ""}`
+        : `this week: the lineup on the site could not be read, so the swap's effect on the week is unknown${playsThisWeek ? `; ${drop.name} plays this week (${weekPoints.get(drop.name)})` : ""}`);
       // The stream's swap (streaming.ts planStream): the slot starts nobody
       // without him, so the add bar does not apply; the newcomer is judged
       // on the week, not the season, and the covered man is the drop.
@@ -233,6 +243,8 @@ switch (cmd) {
       if (gainWk < 1 && !cover && !OVERRIDE) { console.error("under 1.0 points per week: not a swap worth a drop. --override to insist."); process.exit(2); }
       if (stableFails && !OVERRIDE) { console.error(`${unstableSide}, and the swap is under 1.0 points per week on the season projection: a cut is for the season; the Tuesday re-rate carries the injury's real length. --override to insist.`); process.exit(2); }
       // An add only: a claim's drop lands at the clear, after the week for the weekly run, and the engine never holds one.
+      // No numbers, no decision: with the leg unread the week's cost of cutting a man who plays is unknown.
+      if (cmd === "add" && !legKnown && playsThisWeek && !OVERRIDE) { console.error(`the lineup on the site could not be read and ${drop.name} plays this week: whether the swap lowers the week is unknown. Run it again, or --override to insist.`); process.exit(2); }
       if (cmd === "add" && weekGain < 0 && playsThisWeek && !OVERRIDE) { console.error(`lowers this week's lineup while ${drop.name} plays for us: wait for the week, the drop costs it nothing once it is over. --override to insist.`); process.exit(2); }
     }
     if (!WRITE) { console.log(`\n(dry) would ${cmd} him${drop ? ` dropping ${drop.name}` : ""}. Add --write.`); break; }

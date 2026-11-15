@@ -36,7 +36,7 @@ import { DropRefused } from "../league/drop-ledger.ts";
 import { loadWeekProjections, byPlayerId, startableThisWeek, weekPointsThisWeek } from "../analysis/week-projections.ts";
 import { startingSlots } from "../analysis/lineup.ts";
 import {
-  planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities, stashCandidates, claimFallbackAllowed,
+  planWaivers, bestClaim, upcomingByeCrunch, crowdedByeWeeks, irOpportunities, stashCandidates, claimFallbackAllowed, weekLockOf,
   DEFAULT_WAIVERS, type AvailablePlayer, type RosterState,
 } from "../analysis/waivers.ts";
 import type { RailPlayer } from "../analysis/rails.ts";
@@ -280,7 +280,9 @@ async function main(): Promise<void> {
   // game has begun is pinned in his slot by the guard, not an open seat
   // (week-projections.ts weekPointsThisWeek).
   const weekFacts = weekPointsThisWeek(weekTable, thisWeekGames, nowMs);
-  const teamOf = (p: RailPlayer): string | undefined => liveStatus[p.playerId ?? ""]?.team ?? ros.get(p.playerId ?? "")?.team;
+  // A defense's id is its team code (the roster build above reads it the same way).
+  const teamOfId = (id: string): string | undefined => liveStatus[id]?.team ?? ros.get(id)?.team ?? (/^[A-Z]{2,4}$/.test(id) ? id : undefined);
+  const teamOf = (p: RailPlayer): string | undefined => teamOfId(p.playerId ?? "");
   const weekPoints = new Map<string, number>();
   for (const p of roster) weekPoints.set(p.name, weekFacts.points(p, teamOf(p)));
   for (const p of availableRos) weekPoints.set(p.name, weekFacts.points(p, p.team, true));
@@ -315,6 +317,16 @@ async function main(): Promise<void> {
     weeksLeft: weeksLeft(week),
     priorityFree,
     weekPoints,
+    // The starters whose game has kicked off hold their slots in the week
+    // solve, and a kicked-off bench body stays out (waivers.ts weekLineupGain).
+    // Named from the planning roster and the live active roster both: a
+    // played starter leaving in a trade under review is off the first and
+    // still holds his slot on the leg.
+    weekLock: weekLockOf(
+      starterIds, slots.length,
+      [...roster.map((p) => ({ playerId: p.playerId, name: p.name })), ...[...view.activeIds].filter((id) => !nameOf.has(id)).map((id) => ({ playerId: id, name: liveStatus[id]?.full_name ?? ros.get(id)?.name ?? id }))],
+      (p) => weekFacts.begun(teamOfId(p.playerId ?? "")),
+    ),
     canFill,
   };
 

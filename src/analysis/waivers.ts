@@ -206,6 +206,33 @@ export interface RosterState {
    *  has kicked off. The one place a weekly number enters the planner: a
    *  one-week rental is a lineup decision (value.ts). Absent = no rentals. */
   weekPoints?: Map<string, number>;
+  /** Which of our players are locked this week (weekLockOf). weekPoints
+   *  keeps a kicked-off man of ours at his projection, so the week solve
+   *  must hold him where he is: a starter in his slot, a bench body on the
+   *  bench. Absent = nobody has kicked off, every slot is open. */
+  weekLock?: WeekLock;
+}
+
+/** This week's locks on our own roster, by name. `slots` is the lineup on
+ *  the site in startingSlots order (null for an empty slot); `begun` is
+ *  every player of ours whose game this week has kicked off. A starter in
+ *  `begun` is pinned in his slot and nobody takes it; a bench body in
+ *  `begun` cannot come in. The lineup guard plans under the same two rules
+ *  (lineup-guard.ts planLineup). The slot stays closed for the week
+ *  whoever is on the planning roster: a played starter leaving in a trade
+ *  under review is off that roster and still holds the slot on the leg. */
+export interface WeekLock { slots: (string | null)[]; begun: ReadonlySet<string> }
+
+/** WeekLock from the starters on the site (player ids in slot order; "0" or
+ *  a man not among `bodies` is an empty slot) and a kickoff test per
+ *  player. `bodies` is every man the lock can name: the planning roster
+ *  AND the live active roster, which differ by an in-flight trade. */
+export function weekLockOf<P extends { playerId?: string; name: string }>(starterIds: readonly string[], slotCount: number, bodies: readonly P[], begun: (p: P) => boolean): WeekLock {
+  const byId = new Map(bodies.filter((p) => p.playerId).map((p) => [p.playerId!, p.name]));
+  return {
+    slots: Array.from({ length: slotCount }, (_, i) => byId.get(starterIds[i] ?? "") ?? null),
+    begun: new Set(bodies.filter(begun).map((p) => p.name)),
+  };
 }
 
 export type MoveKind = "free-add" | "waiver-claim" | "wait" | "skip";
@@ -517,7 +544,7 @@ function evalPaths(incoming: AvailablePlayer, state: RosterState, cfg: WaiverCon
   // Who leaves when each player on IR after the move comes back. A return
   // with no legal cut at all is not offered (the activation would be stuck).
   const forecast = (active: RailPlayer[], reserveAfter: RailPlayer[], dropName: string | null = null): { returning: string[]; returnCuts: string[] } | null => {
-    const incomingStarts = weekLineupGain(incoming, dropName, state) > 0;
+    const incomingStarts = weekSolve(incoming, dropName, state).lift > 0;
     const r = returnsAcceptable({ active, reserveAfter, incoming, directDrop: null, currentStarters: starterNames, rails: cfg.rails, slots: state.startingSlots, incomingStarts, canFill: state.canFill });
     if (r.cuts.some((c) => c.cut === null)) return null;
     return { returning: r.cuts.map((c) => c.returning), returnCuts: r.cuts.map((c) => c.cut!) };
@@ -627,19 +654,46 @@ function byeCreditFor(
  *  today's. Zero when the week table is absent or he has no points this
  *  week (bye, out, or his game has been played). The lineup guard makes the
  *  same choice on the same numbers, so a positive answer here is a starter
- *  this week. */
+ *  this week.
+ *
+ *  Both lineups are solved over the slots still OPEN (state.weekLock): a
+ *  starter whose game has kicked off holds his slot on both sides while he
+ *  is ours, and a bench body whose game has kicked off cannot come in. So a
+ *  newcomer is measured against the weakest man he can still replace, and
+ *  gains nothing when no open slot takes him. Until 2026-11-15 the solve
+ *  was free over the whole roster: on a Sunday morning Zach Charbonnet
+ *  (12.4) read as +2.2 over Stefon Diggs (10.2), who had played on
+ *  Thursday, where the open FLEX he could take was worth +1.0. */
 export function weekLineupGain(incoming: AvailablePlayer, dropName: string | null, state: RosterState): number {
+  return weekSolve(incoming, dropName, state).gain;
+}
+
+/** weekLineupGain and its two parts. `lift` is what the open slots gain
+ *  with the newcomer in and the drop out, before the cost of a pinned
+ *  drop: above zero he takes an open slot this week, whoever leaves. */
+function weekSolve(incoming: AvailablePlayer, dropName: string | null, state: RosterState): { gain: number; lift: number } {
   const wp = state.weekPoints;
-  if (!wp) return 0;
+  if (!wp) return { gain: 0, lift: 0 };
   // A newcomer with nothing this week (bye, out, his game played) adds
   // nothing, but the drop still costs what it costs: until 2026-10-09 the
   // answer was 0 for him whoever left.
   const mine = Math.max(0, wp.get(incoming.name) ?? 0);
   const week = (p: RailPlayer): LineupPlayer => ({ playerId: p.name, name: p.name, position: p.position, points: wp.get(p.name) ?? 0 });
-  const baseline = solveLineup(state.roster.map(week), state.startingSlots).total;
-  const kept = state.roster.filter((p) => p.name !== dropName).map(week);
-  const after = solveLineup([...kept, { playerId: incoming.name, name: incoming.name, position: incoming.position, points: mine }], state.startingSlots).total;
-  return Math.round((after - baseline) * 10) / 10;
+  const begun = state.weekLock?.begun;
+  const pinned = state.startingSlots.map((_, i) => { const n = state.weekLock?.slots[i] ?? null; return n && begun!.has(n) ? n : null; });
+  const openSlots = state.startingSlots.filter((_, i) => pinned[i] === null);
+  // A pinned starter scores the same on both sides, so he is left out of
+  // both; a kicked-off bench body is out of both too.
+  const movable = state.roster.filter((p) => !begun?.has(p.name));
+  const baseline = solveLineup(movable.map(week), openSlots).total;
+  const kept = movable.filter((p) => p.name !== dropName).map(week);
+  const after = solveLineup([...kept, { playerId: incoming.name, name: incoming.name, position: incoming.position, points: mine }], openSlots).total;
+  // The drop of a pinned starter still costs the week his points, as it
+  // did under the free solve: he plays for us this week, nobody can take
+  // his slot, and what Sleeper scores for a starter dropped after his
+  // kickoff was never observed. The week wait holds that swap (verdict).
+  const pinnedDrop = dropName !== null && pinned.includes(dropName) ? Math.max(0, wp.get(dropName) ?? 0) : 0;
+  return { gain: Math.round((after - pinnedDrop - baseline) * 10) / 10, lift: Math.round((after - baseline) * 10) / 10 };
 }
 
 // Plan a single available player into a decisive move. `crowdedByes` is optional

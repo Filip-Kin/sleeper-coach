@@ -265,6 +265,8 @@ export interface WeekFacts {
   startable: (body: { playerId?: string; injuryStatus?: string | null }, starter: { playerId?: string }) => boolean;
   points: (p: { playerId?: string; injuryStatus?: string | null }, team?: string | null, pool?: boolean) => number;
   teamOf: (playerId: string) => string | null;
+  /** Whether a team's game this week has kicked off. */
+  begun: (team?: string | null) => boolean;
 }
 
 /** startableThisWeek and weekPointsThisWeek over the live week table and
@@ -274,10 +276,11 @@ export async function loadWeekFacts(season: string, week: number, scoring: Scori
   try {
     const [table, games] = await Promise.all([loadWeekProjections(season, week, scoring), weekSchedule(season, week)]);
     const t = byPlayerId(table);
-    return { known: true, startable: startableThisWeek(t, games, now), points: weekPointsThisWeek(t, games, now).points, teamOf: (id) => t.get(id)?.team ?? null };
+    const wk = weekPointsThisWeek(t, games, now);
+    return { known: true, startable: startableThisWeek(t, games, now), points: wk.points, begun: wk.begun, teamOf: (id) => t.get(id)?.team ?? null };
   } catch (err) {
     console.log(`[week] no usable week ${week} table or schedule (${err instanceof Error ? err.message : String(err)}); every starter is kept from the cut and nobody has points this week`);
-    return { known: false, startable: () => false, points: () => 0, teamOf: () => null };
+    return { known: false, startable: () => false, points: () => 0, teamOf: () => null, begun: () => false };
   }
 }
 
