@@ -59,6 +59,8 @@ export interface RailPlayer {
   seasonRank?: number;
   /** Beyond the depth cap at his position (value.ts markSurplus): worth zero. */
   surplus?: boolean;
+  /** Certain he will not play again this season (value.ts seasonOver). */
+  seasonOver?: boolean;
   // Bye week, when known. Optional because the rails themselves do not care, but
   // trade and waiver scoring do: four of our starters share the week 8 bye, which
   // costs about 10.7 points in that week and is the worst single-week hole in the
@@ -148,7 +150,9 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
   // would offer. Found in the staging run of 2026-09-20: giving Nico Collins
   // away evaluated the same with him owned or not. Moving a stash is a human
   // decision, the same as the returns-before-playoffs rule below.
-  if (player.onIr) {
+  // ...unless his season is over by a team or doctor report (injury-report.ts):
+  // then the IR seat is all he holds.
+  if (player.onIr && !player.seasonOver) {
     return { allowed: false, reason: `"${player.name}" is on injured reserve; a stash is not cut or traded away automatically` };
   }
 
@@ -163,7 +167,7 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
 
   const ranked = roster.slice().sort((a, b) => b.points - a.points);
   const rank = ranked.findIndex((p) => norm(p.name) === t) + 1;
-  if (rank > 0 && rank <= cfg.protectTopN) {
+  if (rank > 0 && rank <= cfg.protectTopN && !player.seasonOver) {
     return {
       allowed: false,
       reason: `"${player.name}" is #${rank} on our roster by rest-of-season projection (top ${cfg.protectTopN} is protected)`,

@@ -222,5 +222,12 @@ export async function refreshNews(opts: { web?: boolean; dry?: boolean } = {}): 
 
 if (import.meta.main) {
   const r = await refreshNews({ web: !process.argv.includes("--no-web"), dry: process.argv.includes("--dry") });
+  // The injury reporting for every not-playing player in the league, so a
+  // roster decision can tell a two-week knock from a season-ending diagnosis.
+  if (!process.argv.includes("--no-web")) {
+    const { refreshInjuries } = await import("./injury-report.ts");
+    const inj = await refreshInjuries({ dry: process.argv.includes("--dry") }).catch((e) => { console.error(`[injuries] ${e}`); return null; });
+    if (inj) console.log(`[injuries] researched ${inj.researched}, ${inj.reports} on file`);
+  }
   console.log(`[news] ${r.total} entries (${r.dump} Sleeper, ${r.web} web)${process.argv.includes("--dry") ? " [dry, not written]" : ` -> ${r.path}`}`);
 }

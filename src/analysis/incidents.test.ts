@@ -29,7 +29,7 @@ function P(name: string, status: string | null = null, onIr = false): RailPlayer
     playerId: r.playerId, name: r.name, position: r.position as PlayerValue["position"], team: r.team,
     value: r.value, valueAvg: Math.round((r.value / 14) * 10) / 10, weeksLeft: 14,
     seasonPoints: r.seasonPoints, seasonRank: r.seasonRank, injuryStatus: status,
-    stash: isStash(r.position, r.seasonRank, status, WEEK),
+    stash: isStash(r.position, r.seasonRank, status, WEEK), seasonOver: false,
   };
   return toRail(v, { onIr });
 }

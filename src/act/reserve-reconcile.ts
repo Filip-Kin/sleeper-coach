@@ -498,3 +498,54 @@ export async function reconcileReserve(deps: ReserveDeps): Promise<ReserveDecisi
   return activated ? plan : null;
 }
 // #endregion
+
+// #region season over
+/** Our IR players whose season is over by a team or doctor report
+ *  (value.ts seasonOver, from data/injury-report.ts). Pure. */
+export function planSeasonOverRelease(view: RosterView, railRoster: RailPlayer[]): RailPlayer[] {
+  return railRoster.filter((p) => p.playerId && view.reserveIds.has(p.playerId) && p.seasonOver === true);
+}
+
+/** Filip, 2026-11-16: Jalen Hurts held an IR seat for weeks after a
+ *  season-ending blood-clot diagnosis because nothing ever released an IR
+ *  player or read why he was hurt. One release per pass, through the
+ *  two-look gate and the drop breaker. */
+export async function releaseSeasonOver(deps: ReserveDeps): Promise<RailPlayer | null> {
+  const now = deps.now ?? Date.now();
+  const view = deps.view ?? (await myRosterView());
+  if (!view.reserve.length) return null;
+  if (freezeState().frozen) return null;
+  if (!(await deps.tokenReady())) return null;
+  const snap = await snapshot();
+  const target = planSeasonOverRelease(view, snap.rosterOf.get(snap.ourRosterId) ?? [])[0];
+  if (!target?.playerId) return null;
+  const intents = deps.intents ?? new DropIntentStore();
+  const key = `season-over:${target.playerId}`;
+  const gate = decideIntent(intents.get(key), now);
+  if (gate.action === "record") {
+    intents.put({ key, firstSeen: now, note: `release ${target.name}` });
+    logEvent("coach", "season-over-intent", `${target.name} is out for the season by a team or doctor report and holds an IR seat; releasing him on the next look.`, { player: target.playerId });
+    return null;
+  }
+  if (gate.action === "wait") return null;
+  try {
+    await dropPlayers(deps.gql, [target.playerId], config.rosterId, config.leagueId, "ir-release");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (err instanceof DropRefused) {
+      logEvent("coach", "season-over-deferred", `Release of ${target.name} deferred by the breaker: ${err.verdict.reason}`, { player: target.playerId });
+      return null;
+    }
+    logEvent("coach", "season-over-failed", `Could not release ${target.name}: ${msg}`, { player: target.playerId });
+    return null;
+  }
+  intents.delete(key);
+  const after = await myRosterView();
+  if (after.ownedIds.has(target.playerId)) {
+    logEvent("coach", "season-over-failed", `Released ${target.name} but he is still on the roster after read-back`, { player: target.playerId });
+    return null;
+  }
+  logEvent("coach", "season-over-released", `Released ${target.name}: out for the season, his IR seat is free.`, { player: target.playerId, reserve: after.reserve.map((e) => e.playerId) });
+  return target;
+}
+// #endregion

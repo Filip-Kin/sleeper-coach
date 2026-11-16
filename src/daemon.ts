@@ -21,7 +21,8 @@ import { pruneDeadJobs } from "./soak/migrations.ts";
 import { activeRailRoster, chooseLegalForcedDrops } from "./analysis/reconcile-plan.ts";
 import { keptStarters } from "./analysis/roster-fit.ts";
 import { loadStartableThisWeek } from "./analysis/week-projections.ts";
-import { reconcileReserve } from "./act/reserve-reconcile.ts";
+import { reconcileReserve, releaseSeasonOver } from "./act/reserve-reconcile.ts";
+import { loadInjuryReports, needsResearch } from "./data/injury-report.ts";
 import { DropIntentStore, decideIntent, intentsToConfirm } from "./act/drop-intent.ts";
 import { pendingClaimPlayers, railsWithPendingDrops, NO_PENDING } from "./act/pending-claims.ts";
 import { RunLedger } from "./act/run-ledger.ts";
@@ -704,6 +705,27 @@ async function confirmWaiverIntents(): Promise<void> {
 }
 // #endregion
 
+// #region injury watch
+let lastInjuryRun = 0;
+const NOT_PLAYING_NOW = new Set(["OUT", "IR", "PUP", "SUS", "NA", "DOUBTFUL", "DNR", "COV"]);
+/** At most every 30 minutes: if any of our players is listed not playing and
+ *  has no fresh injury report (or his status changed since it), read the
+ *  reporting for him now. */
+async function watchNewInjuries(): Promise<void> {
+  const now = Date.now();
+  if (now - lastInjuryRun < 30 * 60_000) return;
+  const view = await myRosterView();
+  const injured = view.owned
+    .filter((e) => NOT_PLAYING_NOW.has((e.injuryStatus ?? "").toUpperCase()))
+    .map((e) => ({ playerId: e.playerId, status: (e.injuryStatus ?? "").trim() }));
+  if (!injured.length) return;
+  const todo = needsResearch(injured, (await loadInjuryReports()).reports, now);
+  if (!todo.length) return;
+  lastInjuryRun = now;
+  await runOneOff("injury-report", ["bun", "run", "src/data/injury-report.ts", ...todo]);
+}
+// #endregion
+
 /** Re-solve and set the week's lineup immediately. Lineups are pure upside and
  *  reversible until kickoff, so this needs no shadow phase. */
 async function resolveLineupNow(why: string): Promise<void> {
@@ -761,6 +783,11 @@ async function pollOnce(): Promise<void> {
   // reads are public; the write waits for the token. See act/reserve-reconcile.ts.
   const fixReserve = () => reconcileReserve({ gql: leagueGql(), tokenReady }).then(() => undefined);
   await fixReserve().catch((e) => console.error(`[reserve] ${e instanceof Error ? e.message : String(e)}`));
+  // A player of ours who has just stopped playing gets his injury reporting
+  // read now, not at tomorrow's refresh; a season-ending report then frees
+  // his IR seat (two looks).
+  await watchNewInjuries().catch((e) => console.error(`[injuries] ${e instanceof Error ? e.message : String(e)}`));
+  await releaseSeasonOver({ gql: leagueGql(), tokenReady }).catch((e) => console.error(`[season-over] ${e instanceof Error ? e.message : String(e)}`));
 
   // A claim of ours Sleeper resolved since the last poll is a roster change
   // we never wrote: log it (landed or lost) before the guard plans over the

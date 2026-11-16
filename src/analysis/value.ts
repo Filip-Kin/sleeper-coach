@@ -39,6 +39,7 @@ import { loadRestOfSeason, type RosProjection } from "./ros-projections.ts";
 import { loadSeasonProjections } from "./projections.ts";
 import type { ScoringSettings, Position } from "../sleeper/types.ts";
 import type { RailPlayer } from "./rails.ts";
+import { loadInjuryReports, factsFor } from "../data/injury-report.ts";
 
 /** The fantasy season ends with the championship in week 17. */
 export const LAST_WEEK = 17;
@@ -87,6 +88,9 @@ export interface PlayerValue {
   seasonRank: number;
   injuryStatus: string | null;
   stash: boolean;
+  /** Certain, from the injury reporting (data/injury-report.ts factsFor):
+   *  he will not play again this season. Never a stash; his seat is freed. */
+  seasonOver: boolean;
 }
 
 /** Pure: join rest-of-season rows, season rows and live statuses into values.
@@ -97,6 +101,7 @@ export function buildValues(
   season: { playerId: string; position: Position; points: number }[],
   week: number,
   liveStatus?: Map<string, string | null | undefined>,
+  seasonOverIds?: Set<string>,
 ): Map<string, PlayerValue> {
   const wl = weeksLeft(week);
   const seasonById = new Map(season.map((s) => [s.playerId, s]));
@@ -127,7 +132,8 @@ export function buildValues(
       seasonPoints: Math.round(seasonPoints * 10) / 10,
       seasonRank,
       injuryStatus: live ?? null,
-      stash: isStash(r.position, seasonRank, live, week),
+      stash: !seasonOverIds?.has(r.playerId) && isStash(r.position, seasonRank, live, week),
+      seasonOver: seasonOverIds?.has(r.playerId) ?? false,
     });
   }
   return out;
@@ -144,7 +150,14 @@ export async function loadValues(
 ): Promise<Map<string, PlayerValue>> {
   const ros = await loadRestOfSeason(season, week, scoring, { forceRefresh: opts?.forceRefresh });
   const seasonList = await loadSeasonProjections(season, scoring, { forceRefresh: opts?.forceRefresh });
-  return buildValues(ros.values(), seasonList, week, liveStatus);
+  // Season-over is a FACT read from the injury reporting, never a value scale.
+  const injuries = await loadInjuryReports().catch(() => ({ updatedAt: "", week: 0, reports: {} }));
+  const over = new Set<string>();
+  for (const [id, r] of Object.entries(injuries.reports)) {
+    const live = liveStatus?.has(id) ? liveStatus.get(id) : r.sleeperStatus;
+    if (factsFor(r, live, week).seasonOver) over.add(id);
+  }
+  return buildValues(ros.values(), seasonList, week, liveStatus, over);
 }
 
 /** A rail/trade-engine player from a value. `points` is the ONE value. */
@@ -158,6 +171,7 @@ export function toRail(v: PlayerValue, extra: Partial<RailPlayer> = {}): RailPla
     seasonRank: v.seasonRank,
     injuryStatus: v.injuryStatus ?? undefined,
     returnsBeforePlayoffs: v.stash,
+    seasonOver: v.seasonOver,
     ...extra,
   };
 }
