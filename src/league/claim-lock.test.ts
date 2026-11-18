@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { DB_PATH } from "../paths.ts";
-import { lockClaim, claimLockedUntil, claimLocks, resetClaimLocksForTests, CLAIM_LOCKED_RE } from "./claim-lock.ts";
+import { lockClaim, claimLockedUntil, claimLocks, resetClaimLocksForTests, CLAIM_LOCKED_RE, noteCancelRefused, cancelRefusals, CANCEL_REFUSED_FOR_MS } from "./claim-lock.ts";
 
 beforeEach(() => { resetClaimLocksForTests(); try { rmSync(DB_PATH); } catch { /* fresh */ } });
 
@@ -25,5 +25,27 @@ describe("a claim Sleeper refused as past its time locks the man until the clear
     lockClaim("11792", CLEAR, "first", FRI);
     lockClaim("11792", CLEAR + 7 * 86_400_000, "second", CLEAR + 60_000);
     expect(claimLockedUntil("11792", CLEAR + 120_000)).toBe(CLEAR + 7 * 86_400_000);
+  });
+});
+
+describe("a cancel Sleeper refused as past its time is a known seatless claim for an hour (2026-11-18)", () => {
+  const MSG = "graphql cancel_waiver_claim:  The time to claim this player has passed.  Please wait for waivers to clear in a few minutes.";
+  const AT = Date.UTC(2026, 10, 18, 8, 7, 1); // Wed 03:07:01 ET, the reconciler's cancel of the Gesicki claim
+  test("nothing recorded reads as none", () => {
+    expect(cancelRefusals(AT)).toEqual([]);
+  });
+  test("recorded with its adds until an hour on", () => {
+    expect(noteCancelRefused("1428119853583077376", ["4993"], MSG, AT)).toBe(true);
+    expect(cancelRefusals(AT + 99_000)).toEqual([{ transactionId: "1428119853583077376", adds: ["4993"], until: AT + CANCEL_REFUSED_FOR_MS, reason: MSG, at: AT }]);
+    expect(cancelRefusals(AT + CANCEL_REFUSED_FOR_MS)).toEqual([]);
+  });
+  test("the hand tool's second refusal at 03:11 does not extend the hour", () => {
+    noteCancelRefused("1428119853583077376", ["4993"], MSG, AT);
+    expect(noteCancelRefused("1428119853583077376", ["4993"], MSG, AT + 239_000)).toBe(true);
+    expect(cancelRefusals(AT + 240_000)[0]!.until).toBe(AT + CANCEL_REFUSED_FOR_MS);
+  });
+  test("any other failure is not recorded: that claim stays a fault", () => {
+    expect(noteCancelRefused("1428119853583077376", ["4993"], "graphql cancel_waiver_claim: fetch failed", AT)).toBe(false);
+    expect(cancelRefusals(AT + 1)).toEqual([]);
   });
 });

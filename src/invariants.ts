@@ -36,6 +36,7 @@ import type { League, NflState, Roster } from "./sleeper/types.ts";
 import { buildRosterView, type RosterView } from "./analysis/roster-view.ts";
 import { rosterLegal } from "./sleeper/rules.ts";
 import { currentReserveHold, currentReserveIntents } from "./act/reserve-reconcile.ts";
+import { cancelRefusals } from "./league/claim-lock.ts";
 import { lastGuardLook, type GuardLook } from "./act/lineup-guard.ts";
 import { fmtZoned } from "./act/reserve-hold.ts";
 import { MAX_AGE_MS as INTENT_MAX_AGE_MS } from "./act/drop-intent.ts";
@@ -92,6 +93,11 @@ export interface InvariantInput {
   view: RosterView;
   token: TokenProbe;
   pendingClaims: { count: number; adds: string[] };
+  /** Claims of ours the coach left without a seat and Sleeper refused to
+   *  cancel as "past its time" (league/claim-lock.ts cancelRefusals): each
+   *  processes within minutes and fails for want of a seat. A chosen state
+   *  until `until`; a claim still pending after it is counted again. */
+  cancelRefused?: { transactionId: string; adds: string[]; until: number }[];
   /** Our offers Sleeper still lists as proposed. */
   outstandingOffers: { transactionId: string }[];
   proposalsDb: ProposalRow[];
@@ -249,15 +255,25 @@ export function evaluateInvariants(input: InvariantInput): InvariantCheck[] {
   // claim-slots
   {
     const openSlots = Math.max(0, capacity - input.view.active.length);
-    const ok = input.pendingClaims.count <= openSlots;
+    // A claim whose seat went to a man off injured reserve and whose cancel
+    // Sleeper refused in the minutes before the clear (2026-11-18 03:07 ET,
+    // Gesicki) needs no slot: it fails at processing, as the coach decided.
+    // `adds` holds one entry per add of a no-drop claim, so the count is
+    // what is left of it.
+    const refused = (input.cancelRefused ?? []).filter((r) => r.until > now);
+    const refusedAdds = new Set(refused.flatMap((r) => r.adds));
+    const needing = input.pendingClaims.adds.filter((a) => !refusedAdds.has(a));
+    const known = input.pendingClaims.adds.filter((a) => refusedAdds.has(a));
+    const knownNote = known.length ? `; ${known.length} more (${known.join(", ")}) left seatless by the coach, cancel refused before the clear, failing at processing` : "";
+    const ok = needing.length <= openSlots;
     out.push({
       name: "claim-slots", ok, action: "alert",
       detail: ok
         // The count is claims that name NO drop: only those need a free slot.
         // "0 pending claim(s)" read as "no claims" on 2026-09-30 while two
         // self-financing claims were pending.
-        ? `${input.pendingClaims.count} pending claim(s) with no drop, ${openSlots} open slot(s)`
-        : `${input.pendingClaims.count} pending claim(s) with no drop need slots but only ${openSlots} open (${input.pendingClaims.adds.join(", ")})`,
+        ? `${needing.length} pending claim(s) with no drop, ${openSlots} open slot(s)${knownNote}`
+        : `${needing.length} pending claim(s) with no drop need slots but only ${openSlots} open (${needing.join(", ")})${knownNote}`,
     });
   }
 
@@ -419,6 +435,7 @@ export async function collectInvariantInput(db: Database, gql: Gql, leg: number,
     dropFreeze: breakerState(),
     reserveHold: currentReserveHold(now),
     reserveIntents: currentReserveIntents(now),
+    cancelRefused: cancelRefusals(now),
     guardLook: lastGuardLook(),
     alertsLastHour: alertsLastHour(db, now),
     now,

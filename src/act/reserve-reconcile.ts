@@ -76,6 +76,7 @@ import { railsWithPendingDrops, pendingClaimPlayers, claimsToCancel, NO_PENDING,
 export { claimsToCancel, type HeldClaim } from "./pending-claims.ts";
 import { DropIntentStore, decideIntent } from "./drop-intent.ts";
 import { DropRefused } from "../league/drop-ledger.ts";
+import { noteCancelRefused } from "../league/claim-lock.ts";
 import { freezeState } from "../killswitch.ts";
 import { logEvent } from "../log.ts";
 import { sendAlert } from "../alert.ts";
@@ -286,7 +287,8 @@ async function cancelHeldClaims(gql: Gql, plan: ReserveDecision): Promise<void> 
       logEvent("coach", "claim-cancelled", `Waiver claim for ${who} cancelled: no seat once ${plan.name} is off injured reserve.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, value: c.value, status, player: plan.playerId });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logEvent("coach", "claim-cancel-failed", `Could not cancel the waiver claim for ${who}: ${msg}. It has no seat; if it is still pending it fails at processing.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, player: plan.playerId });
+      const known = noteCancelRefused(c.transactionId, c.adds, msg);
+      logEvent("coach", "claim-cancel-failed", `Could not cancel the waiver claim for ${who}: ${msg}. It has no seat; if it is still pending it fails at processing.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, player: plan.playerId, preClear: known });
     }
   }
 }

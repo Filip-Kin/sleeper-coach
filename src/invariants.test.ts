@@ -203,6 +203,47 @@ describe("claim-slots", () => {
   });
 });
 
+describe("claim-slots: a claim the coach left seatless and Sleeper would not cancel (2026-11-18)", () => {
+  // Wed 2026-11-18. 15 active, Smith and McConkey on injured reserve, the
+  // no-drop Gesicki claim (4993) holding the sixteenth seat. 03:07:01 ET the
+  // report reset listed Smith Questionable, he took the seat, and the cancel
+  // came back "The time to claim this player has passed. Please wait for
+  // waivers to clear in a few minutes." 03:08:40: 16 active, McConkey stale
+  // on reserve with his stash recorded for a second look, the claim pending.
+  const REFUSED = Date.UTC(2026, 10, 18, 8, 7, 1);
+  const AT = Date.UTC(2026, 10, 18, 8, 8, 40);
+  const r = roster({ n: 17, reserve: ["p16"], injuries: { p16: "Questionable", p15: "IR" } });
+  const world = (over: Partial<InvariantInput>) => byName(evaluateInvariants(input({
+    now: AT, pendingClaims: { count: 1, adds: ["4993"] },
+    reserveIntents: [{ playerId: "p16", firstSeen: Date.UTC(2026, 10, 18, 8, 8, 37) }], ...over,
+  }, r)))["claim-slots"]!;
+  const refusal = { transactionId: "1428119853583077376", adds: ["4993"], until: REFUSED + 3_600_000 };
+  test("as it ran that night, with no record of the refusal, it failed", () => {
+    const c = world({});
+    expect(c.ok).toBe(false);
+    expect(c.detail).toBe("1 pending claim(s) with no drop need slots but only 0 open (4993)");
+  });
+  test("with the refusal recorded it is said, not failed", () => {
+    const c = world({ cancelRefused: [refusal] });
+    expect(c.ok).toBe(true);
+    expect(c.detail).toContain("0 pending claim(s) with no drop, 0 open slot(s)");
+    expect(c.detail).toContain("4993");
+    expect(c.detail).toContain("cancel refused before the clear");
+  });
+  test("still pending an hour after the refusal, it did not process: failed again", () => {
+    expect(world({ cancelRefused: [refusal], now: REFUSED + 3_600_000 }).ok).toBe(false);
+    expect(world({ cancelRefused: [refusal], now: REFUSED + 3_600_000 - 1 }).ok).toBe(true);
+  });
+  test("another no-drop claim nobody tried to cancel still needs its seat", () => {
+    const c = world({ cancelRefused: [refusal], pendingClaims: { count: 2, adds: ["4993", "13281"] } });
+    expect(c.ok).toBe(false);
+    expect(c.detail).toContain("1 pending claim(s) with no drop need slots but only 0 open (13281)");
+  });
+  test("a refusal for some other claim excuses nothing", () => {
+    expect(world({ cancelRefused: [{ ...refusal, adds: ["9999"] }] }).ok).toBe(false);
+  });
+});
+
 describe("schedule", () => {
   test("a job past its window and never marked fails", () => {
     const c = byName(evaluateInvariants(input({ scheduledRuns: { "sun-11": 0, "daily-9": Date.UTC(2026, 8, 23, 13, 0, 0) } })))["schedule"]!;

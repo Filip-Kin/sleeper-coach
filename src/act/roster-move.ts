@@ -40,6 +40,7 @@ import { weekLineupGain, weekLockOf, stashCandidates, LONG_ABSENCE } from "../an
 import { irEligible, staleReserve } from "../sleeper/rules.ts";
 import { byeWeek } from "../data/byes.ts";
 import { logEvent } from "../log.ts";
+import { noteCancelRefused } from "../league/claim-lock.ts";
 import { pendingClaimPlayers, claimsToCancel, railsWithPendingDrops, heldReason, claimDropsOf, NO_PENDING, type HeldClaim } from "./pending-claims.ts";
 
 const args = process.argv.slice(2);
@@ -326,7 +327,8 @@ switch (cmd) {
         console.log(`cancelled claim ${c.transactionId} [${status}]`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        logEvent("coach", "claim-cancel-failed", `Could not cancel the waiver claim for ${c.names.join(" + ")}: ${msg}. It has no seat; if it is still pending it fails at processing.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, player: target.playerId });
+        const known = noteCancelRefused(c.transactionId, c.adds, msg);
+        logEvent("coach", "claim-cancel-failed", `Could not cancel the waiver claim for ${c.names.join(" + ")}: ${msg}. It has no seat; if it is still pending it fails at processing.`, { transactionId: c.transactionId, leg: c.leg, adds: c.adds, player: target.playerId, preClear: known });
         console.error(`cancel of claim ${c.transactionId} failed: ${msg} (it has no seat and fails at processing on its own)`);
       }
     }
