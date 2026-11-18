@@ -91,6 +91,10 @@ export interface PlayerValue {
   /** Certain, from the injury reporting (data/injury-report.ts factsFor):
    *  he will not play again this season. Never a stash; his seat is freed. */
   seasonOver: boolean;
+  /** A week of his is not a projection and is left out of `value`
+   *  (ros-projections.ts suspect): `value` is a floor. He is not an add on
+   *  more than the floor, and is never cut or traded while it stands. */
+  suspect?: string | null;
 }
 
 /** Pure: join rest-of-season rows, season rows and live statuses into values.
@@ -134,6 +138,7 @@ export function buildValues(
       injuryStatus: live ?? null,
       stash: !seasonOverIds?.has(r.playerId) && isStash(r.position, seasonRank, live, week),
       seasonOver: seasonOverIds?.has(r.playerId) ?? false,
+      suspect: r.suspect ?? null,
     });
   }
   return out;
@@ -172,6 +177,7 @@ export function toRail(v: PlayerValue, extra: Partial<RailPlayer> = {}): RailPla
     injuryStatus: v.injuryStatus ?? undefined,
     returnsBeforePlayoffs: v.stash,
     seasonOver: v.seasonOver,
+    suspect: v.suspect ?? undefined,
     ...extra,
   };
 }

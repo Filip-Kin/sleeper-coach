@@ -61,6 +61,9 @@ export interface RailPlayer {
   surplus?: boolean;
   /** Certain he will not play again this season (value.ts seasonOver). */
   seasonOver?: boolean;
+  /** A week of his projection is not a projection (value.ts suspect), so
+   *  `points` is a floor and not his value: never cut, never traded away. */
+  suspect?: string;
   // Bye week, when known. Optional because the rails themselves do not care, but
   // trade and waiver scoring do: four of our starters share the week 8 bye, which
   // costs about 10.7 points in that week and is the worst single-week hole in the
@@ -110,6 +113,14 @@ export function canDrop(target: string, roster: RailPlayer[], cfg: RailConfig = 
   if (!player) {
     // Not knowing what we are about to drop is itself disqualifying.
     return { allowed: false, reason: `"${target}" is not on the roster as read back from Sleeper` };
+  }
+  // No numbers, no decision (2026-11-18, Butker's week 15 row). His value is
+  // a floor with a week missing, so every cut order and every trade prices
+  // him low; a cut is for the season and is not made on a hole in the feed.
+  // The reason reaches the rival in a DM: it says the numbers are out, not
+  // which.
+  if (player.suspect) {
+    return { allowed: false, reason: `"${player.name}" has no usable projection right now, so there is no move on him until the numbers are back` };
   }
   if (cfg.neverDrop.some((n) => norm(n) === t)) {
     const why = cfg.neverDropWhy?.[player.name.toLowerCase()];

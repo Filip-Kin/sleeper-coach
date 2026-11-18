@@ -120,6 +120,12 @@ export interface LogClaimResultsArgs {
   managerOf: (rosterId: number) => Promise<string>;
   /** Our waiver priority after the clear, `{ position, of }`; may throw. */
   waiverPosition: () => Promise<{ position: number; of: number } | null>;
+  /** Whether the coach itself left this claim without a seat and Sleeper
+   *  refused the cancel before the clear (league/claim-lock.ts
+   *  cancelRefusedFor). Its "too many players" loss is the outcome the coach
+   *  chose, and the event says so (`leftSeatless`), so the incident watcher
+   *  does not wake an engineer for it. */
+  leftSeatless?: (transactionId: string) => boolean;
 }
 
 const quiet = async <T>(f: () => Promise<T>, fallback: T): Promise<T> => { try { return await f(); } catch { return fallback; } };
@@ -139,14 +145,16 @@ export async function logClaimResults(a: LogClaimResultsArgs): Promise<ClaimResu
     const winner = r.winnerRosterId != null
       ? ` Won by ${await quiet(() => a.managerOf(r.winnerRosterId!), `roster ${r.winnerRosterId}`)} (roster ${r.winnerRosterId}).`
       : "";
+    const chosen = !r.landed && (a.leftSeatless?.(r.transactionId) ?? false);
     const summary = r.landed
       ? `Waiver claim landed: ${addName} added${dropName ? `, ${dropName} dropped` : ", no drop"} (${when})${priority ? `; waiver priority now ${priority.position} of ${priority.of}` : ""}.`
-      : `Waiver claim lost: ${addName}${dropName ? ` for ${dropName}` : ", no drop"} (${when}).${r.notes ? ` Sleeper: "${r.notes.replace(/\.$/, "")}."` : ""}${winner}`;
+      : `Waiver claim lost: ${addName}${dropName ? ` for ${dropName}` : ", no drop"} (${when}).${r.notes ? ` Sleeper: "${r.notes.replace(/\.$/, "")}."` : ""}${winner}${chosen ? " The coach gave its seat to a man off injured reserve and Sleeper refused the cancel before the clear; this is the loss it chose." : ""}`;
     a.log(r.landed ? CLAIM_LANDED : CLAIM_LOST, summary, {
       transactionId: r.transactionId, leg: r.leg, add: r.add, drop: r.drop, notes: r.notes,
       processedAt: r.at != null ? new Date(r.at).toISOString() : null,
       winnerRosterId: r.winnerRosterId,
       waiverPosition: r.landed ? priority : null,
+      ...(chosen ? { leftSeatless: true } : {}),
     });
   }
   return results;

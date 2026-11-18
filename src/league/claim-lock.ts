@@ -42,8 +42,8 @@ function open(): Database {
 
 /** How long a claim whose cancel Sleeper refused as "past its time" is taken
  *  as about to process. Sleeper's own words are "wait for waivers to clear in
- *  a few minutes"; the Wednesday run has processed between 03:15 and 03:16 ET
- *  every week of 2026 and the refusals of 2026-11-18 came at 03:07 and 03:11.
+ *  a few minutes"; the Wednesday runs on record processed at 03:15 to 03:16 ET
+ *  (10-21, 10-28, 11-18) and the refusals of 2026-11-18 came at 03:07 and 03:11.
  *  A claim still pending an hour on did not process and is a fault again. */
 export const CANCEL_REFUSED_FOR_MS = 3_600_000;
 
@@ -87,6 +87,11 @@ export function noteCancelRefused(transactionId: string, adds: string[], msg: st
   // hand tool after the reconciler) must not extend it.
   d.run("INSERT OR IGNORE INTO claim_cancel_refusals (transaction_id, adds, until, reason, at) VALUES (?, ?, ?, ?, ?)", [transactionId, JSON.stringify(adds), at + CANCEL_REFUSED_FOR_MS, msg, at]);
   return true;
+}
+/** Whether a cancel of this claim was ever refused as past its time: the
+ *  claim's own result is then the one the coach chose (act/claim-result.ts). */
+export function cancelRefusedFor(transactionId: string): boolean {
+  return open().query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM claim_cancel_refusals WHERE transaction_id = ?").get(transactionId)!.n > 0;
 }
 /** Every refused cancel still inside its hour. */
 export function cancelRefusals(now = Date.now()): CancelRefusal[] {

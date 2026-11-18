@@ -36,6 +36,11 @@ export interface WeekProjection {
   onBye: boolean; // this player's team is on bye this week
   hasGame: boolean; // a projection row with a game id exists for the week
   stats: Record<string, number>;
+  /** Set when the row is not a projection (impossibleRow): why. `points`
+   *  stays as the feed gave it, for the lineup of a man we already own;
+   *  nothing that prices a player sums it (ros-projections.ts) and no pool
+   *  body is picked on it (weekPointsThisWeek, the stream's need week). */
+  impossible?: string | null;
 }
 
 const FANTASY = new Set(["QB", "RB", "WR", "TE", "K", "DEF"]);
@@ -63,6 +68,38 @@ export const MIN_SCORED_ROWS = 100;
 /** Rows projected above zero. */
 export function scoredRows(table: { points: number }[]): number {
   return table.reduce((n, p) => n + (p.points > 0 ? 1 : 0), 0);
+}
+
+/** The NFL single-game record for each counting stat a row is scored from:
+ *  field goals 8 (Bironas 2007), passing yards 554 (Van Brocklin 1951),
+ *  passing touchdowns 7, rushing yards 296 (Peterson 2007), rushing
+ *  touchdowns 6, receptions 21 (Marshall 2009), receiving yards 336
+ *  (Anderson 1989), receiving touchdowns 5. A projection is an average over
+ *  the games a man might have; one above the most anyone has ever done in a
+ *  game is the feed's fault. The highest real rows in the cached weeks 10
+ *  to 17 of 2026 sit at a third to a half of each (2.36 field goals, 327
+ *  yards passing, 123 receiving). */
+export const SINGLE_GAME_RECORD: Record<string, number> = {
+  fgm: 8, pass_yd: 554, pass_td: 7, rush_yd: 296, rush_td: 6, rec: 21, rec_yd: 336, rec_td: 5,
+};
+
+/** Why a row's stat line is not a projection, or null when it can be one.
+ *
+ *  Tue 2026-11-17 the week 15 row for Harrison Butker (KC at NE) read 17.22
+ *  field goals made of 20.19, 23.75 extra points, 75.2 points: his other
+ *  weeks are 6.85 to 7.29. Summed, his rest of season was 117 (16.7 a
+ *  week, K15 on the season), the best body available, and the 20:00 claim
+ *  run recorded "claim Harrison Butker costing Wan'Dale Robinson, +55.7"
+ *  and confirmed it at 20:32. It was not filed only because the defense
+ *  stream took the one claim of the cycle; Wednesday's free-agent run would
+ *  have made it an add for the cheapest cut. The row was still there on the
+ *  fetch of Wed 03:15 ET. */
+export function impossibleRow(stats: Record<string, number>): string | null {
+  for (const [stat, record] of Object.entries(SINGLE_GAME_RECORD)) {
+    const v = stats[stat];
+    if (typeof v === "number" && v > record) return `${stat} ${v} projected for one game, over the NFL single-game record of ${record}`;
+  }
+  return null;
 }
 
 /** Can a lineup be decided from this table? */
@@ -188,6 +225,7 @@ export function normaliseWeek(records: ProjectionRecord[], week: number, scoring
       onBye: byeWeek(team) === week,
       hasGame: gameId != null,
       stats,
+      impossible: impossibleRow(stats),
     });
   }
 
@@ -202,7 +240,23 @@ export async function loadWeekProjections(
   opts?: { forceRefresh?: boolean; source?: WeekSource },
 ): Promise<WeekProjection[]> {
   const records = await rawWeek(season, week, scoring, opts?.forceRefresh ?? false, opts?.source ?? DEFAULT_SOURCE);
-  return normaliseWeek(records, week, scoring);
+  const table = normaliseWeek(records, week, scoring);
+  noteImpossible(season, week, table, opts?.source?.now?.() ?? Date.now());
+  return table;
+}
+
+const impossibleLogged = new Map<string, number>();
+/** Say once an hour per week which rows are not projections, so the review
+ *  sees a player the coach is making no decision on and why. */
+function noteImpossible(season: string, week: number, table: WeekProjection[], now: number): void {
+  const bad = table.filter((p) => p.impossible);
+  if (!bad.length) return;
+  const key = `${season}:${week}`;
+  if (now - (impossibleLogged.get(key) ?? 0) < NOTICE_MS) return;
+  impossibleLogged.set(key, now);
+  const rows = bad.map((p) => `${p.name} (${p.position}, ${p.points} points: ${p.impossible})`);
+  console.log(`[week-proj] ${season} week ${week}: ${bad.length} row(s) are not projections and are left out of every value: ${rows.join("; ")}`);
+  logEvent("coach", "week-proj-impossible", `Week ${week} projection feed carries ${bad.length} impossible row(s): ${rows.join("; ")}. Left out of rest-of-season value; he is not picked up on it and, if ours, not cut or traded.`, { season, week, rows: bad.map((p) => ({ playerId: p.playerId, name: p.name, points: p.points, why: p.impossible })) });
 }
 
 // Index a week by player id for O(1) lookup when assembling a specific roster.
@@ -254,6 +308,8 @@ export function weekPointsThisWeek(
   const points = (p: { playerId?: string; injuryStatus?: string | null }, team?: string | null, pool = false): number => {
     const r = p.playerId ? table.get(p.playerId) : undefined;
     if (!r || !r.hasGame || r.onBye || (pool && begun(team ?? r.team))) return 0;
+    // A pool body is never picked on a row that is not a projection.
+    if (pool && r.impossible) return 0;
     return availabilityOf({ playerId: r.playerId, name: r.name, position: r.position, points: r.points, injuryStatus: p.injuryStatus ?? r.injuryStatus }).available ? r.points : 0;
   };
   return { points, begun };

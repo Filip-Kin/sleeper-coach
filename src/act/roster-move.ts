@@ -96,7 +96,7 @@ const byName = (n: string): PlayerValue | undefined => {
   return partial[0];
 };
 const fmt = (v: PlayerValue | undefined, id: string): string => v
-  ? `${v.name.padEnd(24)} ${v.position.padEnd(3)} ${String(v.valueAvg).padStart(5)}/wk  ROS ${String(Math.round(v.value)).padStart(4)}  season ${String(Math.round(v.seasonPoints)).padStart(4)} (${v.position}${v.seasonRank})  ${v.injuryStatus ?? "healthy"}${v.stash ? "  STASH" : ""}`
+  ? `${v.name.padEnd(24)} ${v.position.padEnd(3)} ${String(v.valueAvg).padStart(5)}/wk  ROS ${String(Math.round(v.value)).padStart(4)}  season ${String(Math.round(v.seasonPoints)).padStart(4)} (${v.position}${v.seasonRank})  ${v.injuryStatus ?? "healthy"}${v.stash ? "  STASH" : ""}${v.suspect ? "  FLOOR (impossible row left out)" : ""}`
   : `${id.padEnd(24)} (no value)`;
 
 // The picture, live.
@@ -141,6 +141,7 @@ for (const e of view.reserve) console.log(`  IR ${fmt(values.get(e.playerId), e.
 const target = byName(name);
 if (!target) { console.error(`\nno player named "${name}" in the value table`); process.exit(2); }
 console.log(`\nTARGET  ${fmt(target, target.playerId)}`);
+if (target.suspect) console.log(`his value is a floor: ${target.suspect}; that week is left out of it`);
 const drop = dropName ? byName(dropName) : undefined;
 if (dropName && !drop) { console.error(`no player named "${dropName}"`); process.exit(2); }
 const stash = stashName ? byName(stashName) : undefined;

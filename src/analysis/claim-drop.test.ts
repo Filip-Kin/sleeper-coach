@@ -68,7 +68,11 @@ describe("a claim's drop is committed in every trade path", () => {
         expect(gives).not.toContain(SPEARS);
       }
     }
-  });
+    // Seven proposer runs of pure compute: 4 s on a quiet box, 5.6 to 6.8 s
+    // on 2026-11-18 03:21 ET with another job holding eight cores, over the
+    // runner's 5 s default with the code unchanged. The limit is the box's,
+    // not the rule's.
+  }, 30_000);
   test("the reason is sent to the rival in a DM, so it does not say what the move is", () => {
     // "the drop of our pending waiver claim" told a rival with better waiver
     // priority that we have a claim in and who is about to hit the wire.

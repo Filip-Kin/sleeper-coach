@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { DB_PATH } from "../paths.ts";
-import { lockClaim, claimLockedUntil, claimLocks, resetClaimLocksForTests, CLAIM_LOCKED_RE, noteCancelRefused, cancelRefusals, CANCEL_REFUSED_FOR_MS } from "./claim-lock.ts";
+import { lockClaim, claimLockedUntil, claimLocks, resetClaimLocksForTests, CLAIM_LOCKED_RE, noteCancelRefused, cancelRefusals, cancelRefusedFor, CANCEL_REFUSED_FOR_MS } from "./claim-lock.ts";
 
 beforeEach(() => { resetClaimLocksForTests(); try { rmSync(DB_PATH); } catch { /* fresh */ } });
 
@@ -43,6 +43,13 @@ describe("a cancel Sleeper refused as past its time is a known seatless claim fo
     noteCancelRefused("1428119853583077376", ["4993"], MSG, AT);
     expect(noteCancelRefused("1428119853583077376", ["4993"], MSG, AT + 239_000)).toBe(true);
     expect(cancelRefusals(AT + 240_000)[0]!.until).toBe(AT + CANCEL_REFUSED_FOR_MS);
+  });
+  test("the refusal is remembered for the claim's result after the hour has run out", () => {
+    expect(cancelRefusedFor("1428119853583077376")).toBe(false);
+    noteCancelRefused("1428119853583077376", ["4993"], MSG, AT);
+    expect(cancelRefusals(AT + 2 * CANCEL_REFUSED_FOR_MS)).toEqual([]);
+    expect(cancelRefusedFor("1428119853583077376")).toBe(true);
+    expect(cancelRefusedFor("1428127663901401088")).toBe(false);
   });
   test("any other failure is not recorded: that claim stays a fault", () => {
     expect(noteCancelRefused("1428119853583077376", ["4993"], "graphql cancel_waiver_claim: fetch failed", AT)).toBe(false);

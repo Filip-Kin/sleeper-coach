@@ -29,6 +29,7 @@ import { RunLedger } from "./act/run-ledger.ts";
 import { runJobProcess, runJobWithRetry, JOB_TIMEOUT_MS } from "./act/spawn-job.ts";
 import { reactToDropsCore } from "./act/drop-react.ts";
 import { logClaimResults } from "./act/claim-result.ts";
+import { cancelRefusedFor } from "./league/claim-lock.ts";
 import { legsToScan } from "./sleeper/rules.ts";
 import { loadPlayers } from "./data/players.ts";
 import { maybePublishWeekly } from "./blog/auto.ts";
@@ -474,6 +475,7 @@ async function noteClaimResults(round: number): Promise<void> {
   const rosters = async () => sleeper.rosters(config.leagueId);
   await logClaimResults({
     txns, rosterId: config.rosterId, alreadySeen: alreadyHandled, markSeen, log: (type, summary, detail) => logEvent("coach", type, summary, detail),
+    leftSeatless: (id) => { try { return cancelRefusedFor(id); } catch { return false; } },
     nameOf: async (id) => {
       const p = (await loadPlayers())[id];
       if (!p) throw new Error(`no player ${id}`);

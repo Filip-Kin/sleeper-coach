@@ -22,6 +22,11 @@ export interface RosProjection {
   seasonPoints: number; // full-season projection, the healthy-talent signal
   injuryStatus: string | null;
   returnsBeforePlayoffs: boolean; // injured now but real talent => a stash, not dead weight
+  /** A week of his in the window is not a projection (week-projections.ts
+   *  impossibleRow) and is left out of `points`, which is then a floor: the
+   *  least he can be worth. A floor is enough to refuse an add and never
+   *  enough to cut or trade him (rails.ts canDrop). Names the week and why. */
+  suspect?: string | null;
 }
 
 const RESERVE = new Set(["IR", "PUP", "NA", "SUS", "DNR", "COV", "OUT", "DOUBTFUL"]);
@@ -42,6 +47,43 @@ export function assertUsableWeek(table: WeekProjection[], week: number): void {
       "rest-of-season value cannot be built from it, so no roster decision is made on it",
   );
 }
+
+/** The sum of the weekly tables, one row per player. A row that is not a
+ *  projection (week-projections.ts impossibleRow) adds nothing, no points
+ *  and no week, and marks him `suspect` with the week and the reason: what
+ *  is left is the least he can be worth. Pure. */
+export function sumWeeks(tables: { week: number; table: WeekProjection[] }[]): Map<string, RosProjection> {
+  const sum = new Map<string, RosProjection>();
+  for (const { week: w, table } of tables) {
+    for (const row of table) {
+      // A row that is not a projection adds nothing: no points, no week.
+      const bad = row.impossible ? `week ${w}: ${row.impossible}` : null;
+      const p = bad ? { ...row, points: 0, hasGame: false } : row;
+      const cur = sum.get(p.playerId);
+      if (cur) {
+        cur.points = Math.round((cur.points + p.points) * 100) / 100;
+        cur.weeksCounted += p.hasGame ? 1 : 0;
+        // Keep the most recent non-null injury status seen.
+        if (p.injuryStatus) cur.injuryStatus = p.injuryStatus;
+        if (bad && !cur.suspect) cur.suspect = bad;
+      } else {
+        sum.set(p.playerId, {
+          playerId: p.playerId,
+          name: p.name,
+          position: p.position,
+          team: p.team,
+          points: p.points,
+          weeksCounted: p.hasGame ? 1 : 0,
+          seasonPoints: 0,
+          injuryStatus: p.injuryStatus,
+          returnsBeforePlayoffs: false,
+          suspect: bad,
+        });
+      }
+    }
+  }
+  return sum;
+}
 // #endregion
 
 // Build ROS projections for every fantasy player. `fromWeek` is the first week
@@ -58,32 +100,13 @@ export async function loadRestOfSeason(
 
   // Sum remaining weeks. Sequential to be polite to the API and to reuse each
   // week's on-disk cache; the volume is small (a dozen weeks at most).
-  const sum = new Map<string, RosProjection>();
+  const tables: { week: number; table: WeekProjection[] }[] = [];
   for (const w of weeks) {
     const table = await loadWeekProjections(season, w, scoring, { forceRefresh: opts?.forceRefresh, source: opts?.source });
     assertUsableWeek(table, w);
-    for (const p of table) {
-      const cur = sum.get(p.playerId);
-      if (cur) {
-        cur.points = Math.round((cur.points + p.points) * 100) / 100;
-        cur.weeksCounted += p.hasGame ? 1 : 0;
-        // Keep the most recent non-null injury status seen.
-        if (p.injuryStatus) cur.injuryStatus = p.injuryStatus;
-      } else {
-        sum.set(p.playerId, {
-          playerId: p.playerId,
-          name: p.name,
-          position: p.position,
-          team: p.team,
-          points: p.points,
-          weeksCounted: p.hasGame ? 1 : 0,
-          seasonPoints: 0,
-          injuryStatus: p.injuryStatus,
-          returnsBeforePlayoffs: false,
-        });
-      }
-    }
+    tables.push({ week: w, table });
   }
+  const sum = sumWeeks(tables);
 
   // Join the full-season projection as a talent signal, and use it to decide the
   // stash flag. A player who is on a reserve/out status right now but carries a

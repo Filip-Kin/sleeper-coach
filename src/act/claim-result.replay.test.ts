@@ -64,7 +64,7 @@ describe("claimResults on the 2026-10-22 capture", () => {
 describe("logClaimResults", () => {
   const names: Record<string, string> = { "11563": "Bo Nix", JAX: "Jacksonville Jaguars", CIN: "Cincinnati Bengals", "4046": "Patrick Mahomes", "7021": "Rico Dowdle" };
   const managers = new Map(fx.rosters.map((r) => [r.roster_id, fx.users.find((u) => u.user_id === r.owner_id)?.display_name ?? ""]));
-  const harness = (txns: WaiverTxn[], opts: { brokenNames?: boolean } = {}) => {
+  const harness = (txns: WaiverTxn[], opts: { brokenNames?: boolean; leftSeatless?: (id: string) => boolean } = {}) => {
     const seen = new Map<string, string>();
     const events: { type: string; summary: string; detail: Record<string, unknown> }[] = [];
     const order: string[] = [];
@@ -76,6 +76,7 @@ describe("logClaimResults", () => {
       nameOf: async (id) => { if (opts.brokenNames) throw new Error("no dump"); return names[id] ?? id; },
       managerOf: async (rid) => managers.get(rid) ?? `roster ${rid}`,
       waiverPosition: async () => ({ position: fx.rosters.find((r) => r.roster_id === ME)!.settings.waiver_position!, of: fx.rosters.length }),
+      leftSeatless: opts.leftSeatless,
     });
     return { run, seen, events, order };
   };
@@ -107,6 +108,30 @@ describe("logClaimResults", () => {
     const h = harness(legs(7, 6), { brokenNames: true });
     await h.run();
     expect(h.events[1]!.summary).toContain("11563 added, JAX dropped");
+  });
+  // Wed 2026-11-18 03:16:23 ET, as Sleeper lists it: the no-drop Gesicki
+  // claim whose seat went to Smith at 03:07 and whose cancel was refused.
+  const GESICKI: WaiverTxn = {
+    transaction_id: "1428119853583077376", type: "waiver", status: "failed", roster_ids: [ME], adds: { "4993": ME }, drops: null,
+    metadata: { notes: "Unfortunately, your roster will have too many players after this transaction." }, status_updated: 1794989783000, leg: 10,
+  };
+  test("a claim the coach left seatless (cancel refused before the clear) is lost as chosen and marked for the watcher", async () => {
+    const h = harness([GESICKI], { leftSeatless: (id) => id === "1428119853583077376" });
+    await h.run();
+    expect(h.events).toHaveLength(1);
+    expect(h.events[0]!.type).toBe("claim-lost");
+    expect(h.events[0]!.detail.leftSeatless).toBe(true);
+    expect(h.events[0]!.summary).toContain("too many players");
+    expect(h.events[0]!.summary).toContain("this is the loss it chose");
+  });
+  test("the same loss with no refused cancel behind it is unmarked: a claim filed into a full roster is a fault", async () => {
+    const h = harness([GESICKI], { leftSeatless: () => false });
+    await h.run();
+    expect(h.events[0]!.detail.leftSeatless).toBeUndefined();
+    expect(h.events[0]!.summary).not.toContain("chose");
+    const bare = harness([GESICKI]);
+    await bare.run();
+    expect(bare.events[0]!.detail.leftSeatless).toBeUndefined();
   });
   test("a lost claim with no note from Sleeper has no empty quote", async () => {
     const cin = legs(4).find((t) => t.transaction_id === "1413195928436817920")!;

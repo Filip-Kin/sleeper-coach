@@ -399,7 +399,7 @@ async function main(): Promise<void> {
     const table = byPlayerId(await loadWeekProjections(season, need.week, league.scoring_settings).catch(() => []));
     const pool: StreamPoolPlayer[] = streamBase
       .filter((p) => p.position === need.position)
-      .map((p) => ({ ...p, weekPoints: table.get(p.playerId)?.points ?? 0, onWaivers: isOnWaivers(p.playerId, p.team), locked: isLocked(p.playerId, p.team) }));
+      .map((p) => ({ ...p, weekPoints: table.get(p.playerId)?.impossible ? 0 : table.get(p.playerId)?.points ?? 0, onWaivers: isOnWaivers(p.playerId, p.team), locked: isLocked(p.playerId, p.team) }));
     // Kicker and defense: the covered player is swapped in his bye week
     // (streaming.ts planStream). A scarce position: the cheapest legal cut,
     // never the player being covered for (he returns) nor a kept starter (a

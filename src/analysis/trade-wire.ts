@@ -218,6 +218,7 @@ export async function snapshot(): Promise<LeagueSnapshot> {
       injuryStatus: status ?? undefined,
       returnsBeforePlayoffs: v?.stash ?? false,
       seasonOver: v?.seasonOver ?? false,
+      suspect: v?.suspect ?? undefined,
       bye: byeWeek(p.team ?? v?.team ?? "") ?? undefined,
       depthChartOrder: typeof p.depth_chart_order === "number" ? p.depth_chart_order : undefined,
     });
